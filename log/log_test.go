@@ -1,11 +1,13 @@
 package log
 
 import (
+	"encoding/binary"
 	"os"
 	"strconv"
 	"testing"
 
-	"github.com/mohitkumar/mlog/api/common"
+	"github.com/mohitkumar/mlog/segment"
+	"github.com/stretchr/testify/require"
 )
 
 func setupTestLog(t *testing.T) (*Log, func()) {
@@ -34,9 +36,7 @@ func TestLogAppendRead(t *testing.T) {
 
 	var offsets []uint64
 	for _, r := range records {
-		offset, err := log.Append(&common.LogEntry{
-			Value: r,
-		})
+		offset, err := log.Append(r)
 
 		if err != nil {
 			t.Fatalf("failed to append record: %v", err)
@@ -45,9 +45,13 @@ func TestLogAppendRead(t *testing.T) {
 	}
 
 	for i, r := range records {
-		rec, err := log.Read(offsets[i])
+		recBytes, err := log.Read(offsets[i])
 		if err != nil {
 			t.Fatalf("failed to read record: %v", err)
+		}
+		rec, err := segment.Decode(recBytes)
+		if err != nil {
+			t.Fatalf("failed to decode record: %v", err)
 		}
 		if string(rec.Value) != string(r) {
 			t.Errorf("record mismatch: got (payload: %s), want (payload: %s)",
@@ -72,9 +76,7 @@ func TestLogSegmentRotation(t *testing.T) {
 	numRecords := 100000
 	var lastOffset uint64
 	for i := 0; i < numRecords; i++ {
-		offset, err := log.Append(&common.LogEntry{
-			Value: []byte("log record " + strconv.Itoa(i)),
-		})
+		offset, err := log.Append([]byte("log record " + strconv.Itoa(i)))
 		if err != nil {
 			t.Fatalf("failed to append record: %v", err)
 		}
@@ -85,9 +87,13 @@ func TestLogSegmentRotation(t *testing.T) {
 		t.Errorf("expected multiple segments after appending records, got %d", len(log.segments))
 	}
 
-	rec, err := log.Read(lastOffset)
+	recBytes, err := log.Read(lastOffset)
 	if err != nil {
 		t.Fatalf("failed to read last record: %v", err)
+	}
+	rec, err := segment.Decode(recBytes)
+	if err != nil {
+		t.Fatalf("failed to decode last record: %v", err)
 	}
 	expectedValue := "log record " + strconv.Itoa(numRecords-1)
 	if string(rec.Value) != expectedValue {
@@ -98,37 +104,89 @@ func TestLogSegmentRotation(t *testing.T) {
 func TestLogReader(t *testing.T) {
 	log, teardown := setupTestLog(t)
 	defer teardown()
-
-	records := [][]byte{
-		[]byte("first log record"),
-		[]byte("second log record"),
-		[]byte("third log record"),
-	}
-
-	for _, r := range records {
-		_, err := log.Append(&common.LogEntry{
-			Value: r,
-		})
+	for i := 0; i < 100000; i++ {
+		_, err := log.Append([]byte("log record " + strconv.Itoa(i)))
 		if err != nil {
 			t.Fatalf("failed to append record: %v", err)
 		}
 	}
-
+	var readRecords []string
 	reader := log.Reader()
-	buf := make([]byte, 1024)
-	n, err := reader.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read from log reader: %v", err)
-	}
+	for i := 0; i < 100000; i++ {
+		// Header: offset (8 bytes) + length (4 bytes)
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
+		require.NoError(t, err)
+		require.Equal(t, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
 
-	readData := buf[:n]
-	for _, r := range records {
-		if !containsRecord(readData, r) {
-			t.Errorf("log reader data missing record: %s", r)
+		payloadBuf := make([]byte, size)
+		n, err = reader.Read(payloadBuf)
+		require.NoError(t, err)
+		require.Equal(t, int(size), n)
+		readRecords = append(readRecords, string(payloadBuf))
+	}
+	for i := 0; i < 100000; i++ {
+		if string("log record "+strconv.Itoa(i)) != readRecords[i] {
+			t.Errorf("record mismatch: got %s, want %s", readRecords[i], "log record "+strconv.Itoa(i))
 		}
 	}
 }
 
-func containsRecord(data []byte, record []byte) bool {
-	return string(data) != "" && string(record) != "" && (len(data) >= len(record)) && (string(data[:len(record)]) == string(record) || containsRecord(data[1:], record))
+func BenchmarkLogWrite(b *testing.B) {
+	log, teardown := setupTestLog(&testing.T{})
+	defer teardown()
+	for i := 0; i < b.N; i++ {
+		log.Append([]byte("log record " + strconv.Itoa(i)))
+	}
+	seconds := b.Elapsed().Seconds()
+	if seconds > 0 {
+		b.ReportMetric(float64(b.N)/seconds, "req/s")
+	}
+}
+func BenchmarkLogRead(b *testing.B) {
+	log, teardown := setupTestLog(&testing.T{})
+	defer teardown()
+	for i := 0; i < b.N; i++ {
+		log.Append([]byte("log record " + strconv.Itoa(i)))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := log.Read(uint64(i))
+		if err != nil {
+			b.Fatalf("failed to read record: %v", err)
+		}
+	}
+	seconds := b.Elapsed().Seconds()
+	if seconds > 0 {
+		b.ReportMetric(float64(b.N)/seconds, "req/s")
+	}
+}
+
+func BenchmarkLogReader(b *testing.B) {
+	log, teardown := setupTestLog(&testing.T{})
+	defer teardown()
+	for i := 0; i < b.N; i++ {
+		log.Append([]byte("log record " + strconv.Itoa(i)))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reader := log.Reader()
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
+		require.NoError(b, err)
+		require.Equal(b, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
+		payloadBuf := make([]byte, size)
+		n, err = reader.Read(payloadBuf)
+		require.NoError(b, err)
+		require.Equal(b, int(size), n)
+		if err != nil {
+			b.Fatalf("failed to read record: %v", err)
+		}
+	}
+	seconds := b.Elapsed().Seconds()
+	if seconds > 0 {
+		b.ReportMetric(float64(b.N)/seconds, "req/s")
+	}
 }

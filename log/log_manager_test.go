@@ -1,12 +1,14 @@
 package log
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/mohitkumar/mlog/api/common"
+	"github.com/mohitkumar/mlog/segment"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLogManager_Read_WithHighWatermark(t *testing.T) {
@@ -18,7 +20,7 @@ func TestLogManager_Read_WithHighWatermark(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// Append some entries
-	entry1 := &common.LogEntry{Value: []byte("message-1")}
+	entry1 := []byte("message-1")
 	offset1, err := lm.Append(entry1)
 	if err != nil {
 		t.Fatalf("Append error: %v", err)
@@ -27,7 +29,7 @@ func TestLogManager_Read_WithHighWatermark(t *testing.T) {
 		t.Fatalf("expected offset 0, got %d", offset1)
 	}
 
-	entry2 := &common.LogEntry{Value: []byte("message-2")}
+	entry2 := []byte("message-2")
 	offset2, err := lm.Append(entry2)
 	if err != nil {
 		t.Fatalf("Append error: %v", err)
@@ -36,7 +38,7 @@ func TestLogManager_Read_WithHighWatermark(t *testing.T) {
 		t.Fatalf("expected offset 1, got %d", offset2)
 	}
 
-	entry3 := &common.LogEntry{Value: []byte("message-3")}
+	entry3 := []byte("message-3")
 	offset3, err := lm.Append(entry3)
 	if err != nil {
 		t.Fatalf("Append error: %v", err)
@@ -53,8 +55,12 @@ func TestLogManager_Read_WithHighWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read(0) error: %v", err)
 	}
-	if string(readEntry1.Value) != "message-1" {
-		t.Fatalf("expected 'message-1', got '%s'", string(readEntry1.Value))
+	rec, err := segment.Decode(readEntry1)
+	if err != nil {
+		t.Fatalf("failed to decode record: %v", err)
+	}
+	if string(rec.Value) != "message-1" {
+		t.Fatalf("expected 'message-1', got '%s'", string(rec.Value))
 	}
 
 	// Should be able to read offset 1 (at HW)
@@ -62,8 +68,12 @@ func TestLogManager_Read_WithHighWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read(1) error: %v", err)
 	}
-	if string(readEntry2.Value) != "message-2" {
-		t.Fatalf("expected 'message-2', got '%s'", string(readEntry2.Value))
+	rec, err = segment.Decode(readEntry2)
+	if err != nil {
+		t.Fatalf("failed to decode record: %v", err)
+	}
+	if string(rec.Value) != "message-2" {
+		t.Fatalf("expected 'message-2', got '%s'", string(rec.Value))
 	}
 
 	// Should NOT be able to read offset 2 (beyond HW)
@@ -81,11 +91,12 @@ func TestLogManager_Read_WithHighWatermark(t *testing.T) {
 
 	// Now should be able to read offset 2
 	readEntry3, err := lm.Read(2)
+	rec, err = segment.Decode(readEntry3)
 	if err != nil {
 		t.Fatalf("Read(2) error after HW advance: %v", err)
 	}
-	if string(readEntry3.Value) != "message-3" {
-		t.Fatalf("expected 'message-3', got '%s'", string(readEntry3.Value))
+	if string(rec.Value) != "message-3" {
+		t.Fatalf("expected 'message-3', got '%s'", string(readEntry3))
 	}
 }
 
@@ -98,7 +109,7 @@ func TestLogLeo(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// Append some entries
-	entry1 := &common.LogEntry{Value: []byte("message-1")}
+	entry1 := []byte("message-1")
 	offset1, err := lm.Append(entry1)
 	if err != nil {
 		t.Fatalf("Append error: %v", err)
@@ -107,7 +118,7 @@ func TestLogLeo(t *testing.T) {
 		t.Fatalf("expected offset 0, got %d", offset1)
 	}
 
-	entry2 := &common.LogEntry{Value: []byte("message-2")}
+	entry2 := []byte("message-2")
 	offset2, err := lm.Append(entry2)
 	if err != nil {
 		t.Fatalf("Append error: %v", err)
@@ -116,7 +127,7 @@ func TestLogLeo(t *testing.T) {
 		t.Fatalf("expected offset 1, got %d", offset2)
 	}
 
-	entry3 := &common.LogEntry{Value: []byte("message-3")}
+	entry3 := []byte("message-3")
 	offset3, err := lm.Append(entry3)
 	if err != nil {
 		t.Fatalf("Append error: %v", err)
@@ -139,7 +150,7 @@ func TestLogLeoRestore(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// Append some entries
-	entry1 := &common.LogEntry{Value: []byte("message-1")}
+	entry1 := []byte("message-1")
 	offset1, err := lm.Append(entry1)
 	if err != nil {
 		t.Fatalf("Append error: %v", err)
@@ -148,7 +159,7 @@ func TestLogLeoRestore(t *testing.T) {
 		t.Fatalf("expected offset 0, got %d", offset1)
 	}
 
-	entry2 := &common.LogEntry{Value: []byte("message-2")}
+	entry2 := []byte("message-2")
 	offset2, err := lm.Append(entry2)
 	if err != nil {
 		t.Fatalf("Append error: %v", err)
@@ -157,13 +168,13 @@ func TestLogLeoRestore(t *testing.T) {
 		t.Fatalf("expected offset 1, got %d", offset2)
 	}
 
-	entry3 := &common.LogEntry{Value: []byte("message-3")}
+	entry3 := []byte("message-3")
 	offset3, err := lm.Append(entry3)
-	if err != nil {
-		t.Fatalf("Append error: %v", err)
-	}
 	if offset3 != 2 {
 		t.Fatalf("expected offset 2, got %d", offset3)
+	}
+	if err != nil {
+		t.Fatalf("Append error: %v", err)
 	}
 
 	lm.Close()
@@ -188,13 +199,10 @@ func TestLogLeoRestoreLarge(t *testing.T) {
 	const maxEntries = 100000
 	// Append some entries
 	for i := 0; i < maxEntries; i++ {
-		entry := &common.LogEntry{Value: []byte(fmt.Sprintf("message-%d", i))}
-		offset, err := lm.Append(entry)
+		entry := []byte(fmt.Sprintf("message-%d", i))
+		_, err := lm.Append(entry)
 		if err != nil {
 			t.Fatalf("Append error: %v", err)
-		}
-		if offset != uint64(i) {
-			t.Fatalf("expected offset 0, got %d", offset)
 		}
 	}
 
@@ -219,13 +227,10 @@ func BenchmarkLogManager_Append(b *testing.B) {
 	defer os.RemoveAll(dir)
 
 	for i := 0; i < b.N; i++ {
-		entry := &common.LogEntry{Value: []byte(fmt.Sprintf("message-%d", i))}
-		offset, err := lm.Append(entry)
+		entry := []byte(fmt.Sprintf("message-%d", i))
+		_, err := lm.Append(entry)
 		if err != nil {
 			b.Fatalf("Append error: %v", err)
-		}
-		if offset != uint64(i) {
-			b.Fatalf("expected offset 0, got %d", offset)
 		}
 	}
 	seconds := b.Elapsed().Seconds()
@@ -250,7 +255,7 @@ func BenchmarkLogManager_Read(b *testing.B) {
 
 	b.StopTimer()
 	for i := 0; i < numRecords; i++ {
-		if _, err := lm.Append(&common.LogEntry{Value: payload}); err != nil {
+		if _, err := lm.Append(payload); err != nil {
 			b.Fatalf("Append error: %v", err)
 		}
 	}
@@ -262,6 +267,42 @@ func BenchmarkLogManager_Read(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		_, err := lm.ReadUncommitted(uint64(i % numRecords))
+		if err != nil {
+			b.Fatalf("Read error: %v", err)
+		}
+	}
+	seconds := b.Elapsed().Seconds()
+	if seconds > 0 {
+		b.ReportMetric(float64(b.N)/seconds, "req/s")
+	}
+}
+
+func BenchmarkLogManager_Reader(b *testing.B) {
+	dir := filepath.Join(b.TempDir(), "test-log")
+	defer os.RemoveAll(dir)
+	lm, err := NewLogManager(dir)
+	if err != nil {
+		b.Fatalf("NewLogManager error: %v", err)
+	}
+	for i := 0; i < b.N; i++ {
+		entry := []byte(fmt.Sprintf("message-%d", i))
+		_, err := lm.Append(entry)
+		if err != nil {
+			b.Fatalf("Append error: %v", err)
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reader := lm.Reader()
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
+		if err != nil {
+			b.Fatalf("Read header error: %v", err)
+		}
+		require.Equal(b, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
+		payloadBuf := make([]byte, size)
+		n, err = reader.Read(payloadBuf)
 		if err != nil {
 			b.Fatalf("Read error: %v", err)
 		}
