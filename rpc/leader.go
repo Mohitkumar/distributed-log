@@ -9,7 +9,7 @@ import (
 )
 
 // CreateTopic creates a new topic with the specified replica count
-func (s *grpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
+func (s *rpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic name is required")
 	}
@@ -28,7 +28,7 @@ func (s *grpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicR
 }
 
 // DeleteTopic deletes a topic
-func (s *grpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
+func (s *rpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic name is required")
 	}
@@ -44,7 +44,7 @@ func (s *grpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicR
 }
 
 // RecordLEO records the Log End Offset (LEO) of a replica
-func (s *grpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
+func (s *rpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
 	if req.ReplicaId == "" {
 		return nil, fmt.Errorf("replica_id is required")
 	}

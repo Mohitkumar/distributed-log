@@ -8,7 +8,7 @@ import (
 )
 
 // CreateReplica creates a new replica for a topic on this broker
-func (s *grpcServer) CreateReplica(ctx context.Context, req *protocol.CreateReplicaRequest) (*protocol.CreateReplicaResponse, error) {
+func (s *rpcServer) CreateReplica(ctx context.Context, req *protocol.CreateReplicaRequest) (*protocol.CreateReplicaResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic is required")
 	}
@@ -30,7 +30,7 @@ func (s *grpcServer) CreateReplica(ctx context.Context, req *protocol.CreateRepl
 }
 
 // DeleteReplica deletes a replica for a topic
-func (s *grpcServer) DeleteReplica(ctx context.Context, req *protocol.DeleteReplicaRequest) (*protocol.DeleteReplicaResponse, error) {
+func (s *rpcServer) DeleteReplica(ctx context.Context, req *protocol.DeleteReplicaRequest) (*protocol.DeleteReplicaResponse, error) {
 	if req.ReplicaId == "" {
 		return nil, fmt.Errorf("replica_id is required")
 	}

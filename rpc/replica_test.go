@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"encoding/binary"
 	"testing"
 	"time"
 
@@ -27,7 +26,7 @@ func TestCreateReplica(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-		leaderClient := client.NewReplicationClient(leaderConn)
+	leaderClient := client.NewReplicationClient(leaderConn)
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        "test-topic",
 		ReplicaCount: 1,
@@ -129,7 +128,7 @@ func TestDeleteReplica(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-		leaderClient := client.NewReplicationClient(leaderConn)
+	leaderClient := client.NewReplicationClient(leaderConn)
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        "test-topic",
 		ReplicaCount: 1,
@@ -206,7 +205,7 @@ func TestCreateReplica_Integration(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-		leaderClient := client.NewReplicationClient(leaderConn)
+	leaderClient := client.NewReplicationClient(leaderConn)
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        "test-topic",
 		ReplicaCount: 1,
@@ -262,7 +261,7 @@ func TestReplication_VerifyMessages(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-		leaderClient := client.NewReplicationClient(leaderConn)
+	leaderClient := client.NewReplicationClient(leaderConn)
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
@@ -400,7 +399,7 @@ func TestReplication_WithAckAll(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-		leaderClient := client.NewReplicationClient(leaderConn)
+	leaderClient := client.NewReplicationClient(leaderConn)
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
@@ -620,7 +619,7 @@ func BenchmarkReplication_WithAckLeader(b *testing.B) {
 	}
 	defer leaderConn.Close()
 
-		leaderClient := client.NewReplicationClient(leaderConn)
+	leaderClient := client.NewReplicationClient(leaderConn)
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
@@ -698,7 +697,7 @@ func BenchmarkReplication_WithAckAll(b *testing.B) {
 	}
 	defer leaderConn.Close()
 
-		leaderClient := client.NewReplicationClient(leaderConn)
+	leaderClient := client.NewReplicationClient(leaderConn)
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
@@ -768,7 +767,7 @@ func BenchmarkReplication_VerifyReplication(b *testing.B) {
 	}
 	defer leaderConn.Close()
 
-		leaderClient := client.NewReplicationClient(leaderConn)
+	leaderClient := client.NewReplicationClient(leaderConn)
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,

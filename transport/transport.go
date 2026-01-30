@@ -13,7 +13,6 @@ type Transport struct {
 	MaxFrameSize uint32
 }
 
-// NewTransport returns a Transport with default settings.
 func NewTransport() *Transport {
 	return &Transport{
 		MaxFrameSize: MaxFrameSize,
@@ -93,7 +92,7 @@ func (c *Conn) LocalAddr() net.Addr {
 
 // Listener is a TCP listener that accepts frame-based Conns.
 type Listener struct {
-	ln     net.Listener
+	ln        net.Listener
 	transport *Transport
 }
 

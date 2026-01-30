@@ -10,7 +10,7 @@ import (
 
 // ServeTransportConn handles replication and leader RPCs on a single transport connection.
 // It runs until the connection is closed or an error occurs.
-func (s *grpcServer) ServeTransportConn(conn *transport.Conn) {
+func (s *rpcServer) ServeTransportConn(conn *transport.Conn) {
 	defer conn.Close()
 	ctx := context.Background()
 
@@ -187,7 +187,7 @@ func (s *grpcServer) ServeTransportConn(conn *transport.Conn) {
 	}
 }
 
-func (s *grpcServer) serveFetchStream(conn *transport.Conn, req *protocol.FetchRequest) {
+func (s *rpcServer) serveFetchStream(conn *transport.Conn, req *protocol.FetchRequest) {
 	send := func(resp *protocol.FetchResponse) error {
 		respBody, _ := protocol.MarshalJSON(resp)
 		return conn.Send(protocol.EncodeResponse(protocol.MsgFetchStreamResp, respBody))
@@ -196,7 +196,7 @@ func (s *grpcServer) serveFetchStream(conn *transport.Conn, req *protocol.FetchR
 }
 
 // serveReplicateStream runs the replication stream loop, sending ReplicateResponse frames.
-func (s *grpcServer) serveReplicateStream(conn *transport.Conn, req *protocol.ReplicateRequest) {
+func (s *rpcServer) serveReplicateStream(conn *transport.Conn, req *protocol.ReplicateRequest) {
 	leaderNode, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
 		return
@@ -240,9 +240,6 @@ func (s *grpcServer) serveReplicateStream(conn *transport.Conn, req *protocol.Re
 			}
 			continue
 		}
-		select {
-		case <-ticker.C:
-			continue
-		}
+		<-ticker.C
 	}
 }

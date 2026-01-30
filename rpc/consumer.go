@@ -8,7 +8,7 @@ import (
 	"github.com/mohitkumar/mlog/protocol"
 )
 
-func (s *grpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*protocol.FetchResponse, error) {
+func (s *rpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*protocol.FetchResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic is required")
 	}
@@ -47,7 +47,7 @@ func (s *grpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pr
 }
 
 // FetchStream streams log entries to the client (used over transport with polling).
-func (s *grpcServer) FetchStream(req *protocol.FetchRequest, send func(*protocol.FetchResponse) error) error {
+func (s *rpcServer) FetchStream(req *protocol.FetchRequest, send func(*protocol.FetchResponse) error) error {
 	if req.Topic == "" {
 		return fmt.Errorf("topic is required")
 	}
@@ -92,7 +92,7 @@ func (s *grpcServer) FetchStream(req *protocol.FetchRequest, send func(*protocol
 	}
 }
 
-func (s *grpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffsetRequest) (*protocol.CommitOffsetResponse, error) {
+func (s *rpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffsetRequest) (*protocol.CommitOffsetResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic is required")
 	}
@@ -108,7 +108,7 @@ func (s *grpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffse
 	return &protocol.CommitOffsetResponse{Success: true}, nil
 }
 
-func (s *grpcServer) FetchOffset(ctx context.Context, req *protocol.FetchOffsetRequest) (*protocol.FetchOffsetResponse, error) {
+func (s *rpcServer) FetchOffset(ctx context.Context, req *protocol.FetchOffsetRequest) (*protocol.FetchOffsetResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic is required")
 	}

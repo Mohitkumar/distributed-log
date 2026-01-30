@@ -7,7 +7,7 @@ import (
 	"github.com/mohitkumar/mlog/protocol"
 )
 
-func (srv *grpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest) (*protocol.ProduceResponse, error) {
+func (srv *rpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest) (*protocol.ProduceResponse, error) {
 	topicObj, err := srv.topicManager.GetTopic(req.Topic)
 	if err != nil {
 		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
@@ -22,7 +22,7 @@ func (srv *grpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest
 	return &protocol.ProduceResponse{Offset: offset}, err
 }
 
-func (srv *grpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBatchRequest) (*protocol.ProduceBatchResponse, error) {
+func (srv *rpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBatchRequest) (*protocol.ProduceBatchResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic is required")
 	}
