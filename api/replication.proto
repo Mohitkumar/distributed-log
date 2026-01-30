@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package replication;
+
+option go_package = "github.com/mohitkumar/mlog/api/replication";
+
+// ReplicationService defines the RPCs for log replication between brokers.
+service ReplicationService {
+  // CreateReplica creates a new replica for a topic.
+  rpc CreateReplica(CreateReplicaRequest) returns (CreateReplicaResponse);
+  // DeleteReplica deletes a replica for a topic.
+  rpc DeleteReplica(DeleteReplicaRequest) returns (DeleteReplicaResponse);
+}
+
+message CreateReplicaRequest {
+  string topic = 1;
+  string replica_id = 2;
+  string leader_addr = 3;
+}
+
+message CreateReplicaResponse {
+  string replica_id = 1;
+}
+
+message DeleteReplicaRequest {
+   string topic = 1;
+   string replica_id = 2; 
+}
+
+message DeleteReplicaResponse { }
+
+
