@@ -7,7 +7,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/mohitkumar/mlog/api/common"
 	"github.com/mohitkumar/mlog/segment"
 )
 
@@ -68,24 +67,7 @@ func NewLog(dir string) (*Log, error) {
 	return log, nil
 }
 
-func (l *Log) Append(record *common.LogEntry) (uint64, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	off, err := l.activeSegment.Append(record.Value)
-	if err != nil {
-		return 0, err
-	}
-	if l.activeSegment.IsFull() {
-		l.activeSegment, err = segment.NewSegment(l.activeSegment.NextOffset, l.Dir)
-		if err != nil {
-			return 0, err
-		}
-		l.segments = append(l.segments, l.activeSegment)
-	}
-	return off, nil
-}
-
-func (l *Log) AppendRaw(value []byte) (uint64, error) {
+func (l *Log) Append(value []byte) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	off, err := l.activeSegment.Append(value)
@@ -102,7 +84,7 @@ func (l *Log) AppendRaw(value []byte) (uint64, error) {
 	return off, nil
 }
 
-func (l *Log) ReadRaw(offset uint64) ([]byte, error) {
+func (l *Log) Read(offset uint64) ([]byte, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	var targetSegment *segment.Segment
@@ -119,30 +101,7 @@ func (l *Log) ReadRaw(offset uint64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.Value, nil
-}
-
-func (l *Log) Read(offset uint64) (*common.LogEntry, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	var targetSegment *segment.Segment
-	for _, seg := range l.segments {
-		if offset >= seg.BaseOffset && offset < seg.NextOffset {
-			targetSegment = seg
-			break
-		}
-	}
-	if targetSegment == nil || offset < targetSegment.BaseOffset || offset >= targetSegment.NextOffset {
-		return nil, fmt.Errorf("offset %d out of range", offset)
-	}
-	r, err := targetSegment.Read(offset)
-	if err != nil {
-		return nil, err
-	}
-	return &common.LogEntry{
-		Offset: r.Offset,
-		Value:  r.Value,
-	}, nil
+	return r[12:], nil
 }
 
 func (l *Log) LowestOffset() uint64 {

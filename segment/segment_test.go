@@ -2,7 +2,6 @@ package segment
 
 import (
 	"encoding/binary"
-	"fmt"
 	"os"
 	"strconv"
 	"testing"
@@ -51,7 +50,11 @@ func TestSegmentReadWrite(t *testing.T) {
 	}
 
 	for i, r := range records {
-		rec, err := segment.Read(offsets[i])
+		recBytes, err := segment.Read(offsets[i])
+		if err != nil {
+			t.Fatalf("failed to read record: %v", err)
+		}
+		rec, err := Decode(recBytes)
 		if err != nil {
 			t.Fatalf("failed to read record: %v", err)
 		}
@@ -77,9 +80,13 @@ func TestSegmentReadWriteLarge(t *testing.T) {
 
 	for i := 0; i < numRecords; i++ {
 		expectedValue := []byte("record number " + strconv.Itoa(i))
-		rec, err := segment.Read(uint64(i))
+		recBytes, err := segment.Read(uint64(i))
 		if err != nil {
-			t.Fatalf("failed to read record %d: %v", i, err)
+			t.Fatalf("failed to read record: %v", err)
+		}
+		rec, err := Decode(recBytes)
+		if err != nil {
+			t.Fatalf("failed to read record: %v", err)
 		}
 		if string(rec.Value) != string(expectedValue) {
 			t.Errorf("record %d mismatch: got %s, want %s", i, rec.Value, expectedValue)
@@ -136,7 +143,11 @@ func TestLoadExistingSegment(t *testing.T) {
 	defer loadedSegment.Close()
 
 	for i, r := range records {
-		rec, err := loadedSegment.Read(uint64(i))
+		recBytes, err := loadedSegment.Read(uint64(i))
+		if err != nil {
+			t.Fatalf("failed to read record: %v", err)
+		}
+		rec, err := Decode(recBytes)
 		if err != nil {
 			t.Fatalf("failed to read record: %v", err)
 		}
@@ -172,9 +183,13 @@ func TestLoadExistingSegmentLarge(t *testing.T) {
 
 	for i := 0; i < numRecords; i++ {
 		expectedValue := []byte("record number " + strconv.Itoa(i))
-		rec, err := loadedSegment.Read(uint64(i))
+		recBytes, err := loadedSegment.Read(uint64(i))
 		if err != nil {
-			t.Fatalf("failed to read record %d: %v", i, err)
+			t.Fatalf("failed to read record: %v", err)
+		}
+		rec, err := Decode(recBytes)
+		if err != nil {
+			t.Fatalf("failed to read record: %v", err)
 		}
 		if string(rec.Value) != string(expectedValue) {
 			t.Errorf("record %d mismatch: got %s, want %s", i, rec.Value, expectedValue)
@@ -202,19 +217,18 @@ func TestSegmentReader(t *testing.T) {
 	reader := segment.Reader()
 	var readRecords []string
 	for i := 0; i < len(records); i++ {
-		buf := make([]byte, 4+4)
-		n, err := reader.Read(buf)
+		// Header: offset (8 bytes) + length (4 bytes)
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
 		require.NoError(t, err)
-		require.Equal(t, 8, n)
-		size := binary.BigEndian.Uint32(buf[4:8])
+		require.Equal(t, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
 
 		payloadBuf := make([]byte, size)
 		n, err = reader.Read(payloadBuf)
-		fmt.Println(string(payloadBuf))
-
 		require.NoError(t, err)
 		require.Equal(t, int(size), n)
-		readRecords = append(readRecords, string(payloadBuf[8:]))
+		readRecords = append(readRecords, string(payloadBuf))
 	}
 	for i, r := range records {
 		if string(r) != readRecords[i] {

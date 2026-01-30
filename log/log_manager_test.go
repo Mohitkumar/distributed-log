@@ -126,7 +126,7 @@ func TestLogLeo(t *testing.T) {
 	}
 
 	if lm.LEO() != 3 {
-		t.Fatalf("expected LEO 3, got %d", offset3)
+		t.Fatalf("expected LEO 3, got %d", lm.LEO())
 	}
 }
 
