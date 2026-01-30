@@ -16,8 +16,9 @@ const (
 	MaxSegmentBytes    = 1024 * 1024 // 1MB
 	WriteBufferSize    = 64 * 1024   // 64KB
 
-	lenWidth = 4 // 4 bytes for message length
-	offWidth = 8
+	lenWidth         = 4 // 4 bytes for message length
+	offWidth         = 8
+	totalHeaderWidth = lenWidth + offWidth
 )
 
 var endian = binary.BigEndian
@@ -43,10 +44,6 @@ func NewSegment(baseOffset uint64, dir string) (*Segment, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := logFile.Truncate(MaxSegmentBytes); err != nil {
-		return nil, err
-	}
-
 	indexFilePath := dir + "/" + formatIndexFileName(baseOffset)
 	index, err := OpenIndex(indexFilePath)
 	if err != nil {
@@ -69,9 +66,7 @@ func LoadExistingSegment(baseOffset uint64, dir string) (*Segment, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := logFile.Truncate(MaxSegmentBytes); err != nil {
-		return nil, err
-	}
+
 	indexFilePath := dir + "/" + formatIndexFileName(baseOffset)
 	index, err := OpenIndex(indexFilePath)
 	if err != nil {
@@ -107,8 +102,8 @@ func (s *Segment) Append(value []byte) (uint64, error) {
 
 	offset := s.NextOffset
 	header := make([]byte, offWidth+lenWidth)
-	endian.PutUint64(header[0:8], offset)
-	endian.PutUint32(header[8:12], uint32(len(value)))
+	endian.PutUint64(header[0:offWidth], offset)
+	endian.PutUint32(header[offWidth:totalHeaderWidth], uint32(len(value)))
 	_, err := s.bufWriter.Write(header)
 	if err != nil {
 		return 0, err
@@ -118,7 +113,7 @@ func (s *Segment) Append(value []byte) (uint64, error) {
 		return 0, err
 	}
 
-	s.bytesSinceLastIndex += uint64(len(header) + len(value))
+	s.bytesSinceLastIndex += uint64(totalHeaderWidth + len(value))
 	if s.bytesSinceLastIndex >= IndexIntervalBytes || offset == s.BaseOffset {
 		// Flush buffer before indexing to ensure data is written
 		if err := s.bufWriter.Flush(); err != nil {
@@ -129,7 +124,7 @@ func (s *Segment) Append(value []byte) (uint64, error) {
 		}
 		s.bytesSinceLastIndex = 0
 	}
-	s.writePos += int64(len(header) + len(value))
+	s.writePos += int64(totalHeaderWidth + len(value))
 	s.NextOffset++
 	s.MaxOffset = offset
 	return offset, nil
@@ -137,59 +132,55 @@ func (s *Segment) Append(value []byte) (uint64, error) {
 
 func (s *Segment) Read(offset uint64) ([]byte, error) {
 	s.mu.Lock()
-	// Flush any pending writes before reading
 	if s.bufWriter != nil {
-		if err := s.bufWriter.Flush(); err != nil {
-			s.mu.Unlock()
-			return nil, err
-		}
+		_ = s.bufWriter.Flush()
 	}
+	writePos := s.writePos
 	s.mu.Unlock()
 
 	if offset < s.BaseOffset || offset >= s.NextOffset {
 		return nil, fmt.Errorf("offset %d out of range [%d, %d)", offset, s.BaseOffset, s.NextOffset)
 	}
 
+	// Start position: use index if we have an entry (sparse index gives position of record <= offset),
+	// otherwise start from the beginning of the segment file and do a full sequential search.
+	var currPos int64
 	relOffset := uint32(offset - s.BaseOffset)
-	indexEntry, found := s.index.Find(relOffset)
-	if !found {
-		return nil, fmt.Errorf("index entry not found for relative offset %d", relOffset)
+	if indexEntry, found := s.index.Find(relOffset); found {
+		currPos = int64(indexEntry.Position)
+	} else {
+		currPos = 0
 	}
-	currPos := int64(indexEntry.Position)
-	for {
+
+	for currPos < writePos {
 		// Read header: [Offset (8 bytes)][Len (4 bytes)]
-		header := make([]byte, 12)
-		_, err := s.logFile.ReadAt(header, currPos)
+		header := make([]byte, totalHeaderWidth)
+		n, err := s.logFile.ReadAt(header, currPos)
 		if err != nil {
 			return nil, err
 		}
-
-		foundOffset := endian.Uint64(header[0:8])
-		msgLen := endian.Uint32(header[8:12])
-
-		// If we found it, read the payload and return
-		if foundOffset == offset {
-			payload := make([]byte, msgLen)
-			_, err = s.logFile.ReadAt(payload, currPos+12)
-			return payload, err
+		if n < totalHeaderWidth {
+			return nil, io.ErrUnexpectedEOF
 		}
+		foundOffset := endian.Uint64(header[0:offWidth])
+		msgLen := endian.Uint32(header[offWidth:totalHeaderWidth])
 
-		// If we passed it, the offset doesn't exist
+		if foundOffset == offset {
+			// Found the record: read and return value only
+			if currPos+int64(totalHeaderWidth)+int64(msgLen) > writePos {
+				return nil, io.ErrUnexpectedEOF
+			}
+			value := make([]byte, offWidth+msgLen)
+			endian.PutUint64(header[0:offWidth], foundOffset)
+			_, err = s.logFile.ReadAt(value[offWidth:], currPos+totalHeaderWidth)
+			return value, err
+		}
 		if foundOffset > offset {
 			return nil, fmt.Errorf("offset not found")
 		}
-
-		// Skip to the next record in the log
-		currPos += int64(12 + msgLen)
-
-		// Safety check: don't read past the current write head
-		s.mu.Lock()
-		maxPos := s.writePos
-		s.mu.Unlock()
-		if currPos >= maxPos {
-			return nil, io.EOF
-		}
+		currPos += int64(totalHeaderWidth) + int64(msgLen)
 	}
+	return nil, io.EOF
 }
 
 // Reader returns an io.Reader that streams all records in the segment from BaseOffset.
