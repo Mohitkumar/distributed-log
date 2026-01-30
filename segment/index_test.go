@@ -108,3 +108,47 @@ func TestIndexEntry(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkIndexWrite(b *testing.B) {
+	b.TempDir()
+	index, err := OpenIndex(b.TempDir() + "/test.idx")
+	if err != nil {
+		b.Fatalf("failed to create index: %v", err)
+	}
+	defer index.Close()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := index.Write(uint32(i), uint64(i*100)); err != nil {
+			b.Fatalf("failed to write index entry: %v", err)
+		}
+	}
+	seconds := b.Elapsed().Seconds()
+	if seconds > 0 {
+		b.ReportMetric(float64(b.N)/seconds, "req/s")
+	}
+}
+
+func BenchmarkIndexFind(b *testing.B) {
+	b.TempDir()
+	index, err := OpenIndex(b.TempDir() + "/test.idx")
+	if err != nil {
+		b.Fatalf("failed to create index: %v", err)
+	}
+	defer index.Close()
+	for i := 0; i < b.N; i++ {
+		if err := index.Write(uint32(i), uint64(i*100)); err != nil {
+			b.Fatalf("failed to write index entry: %v", err)
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, found := index.Find(uint32(i))
+		if !found {
+			b.Fatalf("failed to find index entry: %v", i)
+		}
+	}
+	seconds := b.Elapsed().Seconds()
+	if seconds > 0 {
+		b.ReportMetric(float64(b.N)/seconds, "req/s")
+	}
+}
