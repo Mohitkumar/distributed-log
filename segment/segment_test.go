@@ -268,3 +268,27 @@ func BenchmarkSegmentRead(b *testing.B) {
 		b.ReportMetric(float64(b.N)/seconds, "req/s")
 	}
 }
+
+func BenchmarkSegmentStreamingRead(b *testing.B) {
+	b.TempDir()
+	segment, _, teardown := setupTestSegment(&testing.T{})
+	defer teardown()
+	for i := 0; i < b.N; i++ {
+		_, err := segment.Append([]byte("test record"))
+		if err != nil {
+			b.Fatalf("failed to append record: %v", err)
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reader := segment.Reader()
+		_, err := reader.Read(nil)
+		if err != nil {
+			b.Fatalf("failed to read record: %v", err)
+		}
+	}
+	seconds := b.Elapsed().Seconds()
+	if seconds > 0 {
+		b.ReportMetric(float64(b.N)/seconds, "req/s")
+	}
+}

@@ -101,7 +101,7 @@ func (l *Log) Read(offset uint64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r[12:], nil
+	return r, nil
 }
 
 func (l *Log) LowestOffset() uint64 {
