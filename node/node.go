@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/common"
-	"github.com/mohitkumar/mlog/api/leader"
 	"github.com/mohitkumar/mlog/broker"
+	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/log"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
 // Node represents a broker node that can be either a leader or replica for a topic
@@ -28,9 +28,9 @@ type Node struct {
 	followers map[string]*FollowerState
 
 	// Replica-specific fields
-	leaderAddr   string
-	leaderClient leader.LeaderServiceClient
-	stopChan     chan struct{}
+	leaderAddr      string
+	replicationClient *client.ReplicationClient
+	stopChan        chan struct{}
 	stopOnce     sync.Once
 	cancelFn     context.CancelFunc
 }
@@ -92,8 +92,8 @@ func (n *Node) StartReplication() error {
 		return fmt.Errorf("leader address not set for replica %s", n.ReplicaID)
 	}
 
-	// Create leader client if not already created
-	if n.leaderClient == nil {
+	// Create replication client if not already created
+	if n.replicationClient == nil {
 		if n.brokerManager == nil {
 			return fmt.Errorf("broker manager not set for replica %s", n.ReplicaID)
 		}
@@ -104,12 +104,12 @@ func (n *Node) StartReplication() error {
 			return fmt.Errorf("leader broker not found at address %s", n.leaderAddr)
 		}
 
-		// Get connection from broker manager
+		// Get transport connection from broker
 		conn, err := leaderBroker.GetConn()
 		if err != nil {
 			return fmt.Errorf("failed to connect to leader at %s: %w", n.leaderAddr, err)
 		}
-		n.leaderClient = leader.NewLeaderServiceClient(conn)
+		n.replicationClient = client.NewReplicationClient(conn)
 	}
 
 	n.mu.Lock()
@@ -160,14 +160,14 @@ func (n *Node) startReplication(ctx context.Context) {
 		currentOffset := n.Log.LEO()
 
 		// Create replication request
-		req := &leader.ReplicateRequest{
+		req := &protocol.ReplicateRequest{
 			Topic:     n.Topic,
 			Offset:    currentOffset,
 			BatchSize: 1000,
 		}
 
-		// Create stream to leader
-		stream, err := n.leaderClient.ReplicateStream(ctx, req)
+		// Create stream to leader over transport
+		stream, err := n.replicationClient.ReplicateStream(ctx, req)
 		if err != nil {
 			// Backoff on connection errors
 			time.Sleep(backoff)
@@ -189,7 +189,7 @@ func (n *Node) startReplication(ctx context.Context) {
 			default:
 			}
 
-			resp, err := stream.Recv()
+			resp, err := stream.Recv() // ReplicateStreamReader.Recv
 			if err != nil {
 				// Stream error, reconnect
 				break
@@ -217,7 +217,7 @@ func (n *Node) startReplication(ctx context.Context) {
 					break
 				}
 
-				_, appendErr := n.Log.Append(&common.LogEntry{Value: entry.Value})
+				_, appendErr := n.Log.Append(entry.Value)
 				if appendErr != nil {
 					fmt.Printf("replica %s: failed to append log entry at expected offset %d: %v", n.ReplicaID, expectedOffset, appendErr)
 					// Stop processing this batch; reconnect and retry.
@@ -240,16 +240,16 @@ func (n *Node) startReplication(ctx context.Context) {
 
 // reportLEO reports the current Log End Offset (LEO) to the leader
 func (n *Node) reportLEO(ctx context.Context, leo uint64) error {
-	if n.leaderClient == nil {
-		return fmt.Errorf("leader client not initialized")
+	if n.replicationClient == nil {
+		return fmt.Errorf("replication client not initialized")
 	}
 
-	req := &leader.RecordLEORequest{
+	req := &protocol.RecordLEORequest{
 		Topic:     n.Topic,
 		ReplicaId: n.ReplicaID,
 		Leo:       int64(leo),
 	}
 
-	_, err := n.leaderClient.RecordLEO(ctx, req)
+	_, err := n.replicationClient.RecordLEO(ctx, req)
 	return err
 }

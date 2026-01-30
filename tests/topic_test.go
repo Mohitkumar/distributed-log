@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/leader"
-	"github.com/mohitkumar/mlog/api/producer"
+	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
 func TestCreateTopic(t *testing.T) {
@@ -20,10 +20,11 @@ func TestCreateTopic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get leader connection: %v", err)
 	}
-	client := leader.NewLeaderServiceClient(leaderConn)
+	defer leaderConn.Close()
+	replClient := client.NewReplicationClient(leaderConn)
 
 	topicName := "test-topic-1"
-	resp, err := client.CreateTopic(ctx, &leader.CreateTopicRequest{
+	resp, err := replClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -51,11 +52,12 @@ func TestDeleteTopic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get leader connection: %v", err)
 	}
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	producerClient := producer.NewProducerServiceClient(leaderConn)
+	defer leaderConn.Close()
+	leaderClient := client.NewReplicationClient(leaderConn)
+	producerClient := client.NewProducerClient(leaderConn)
 
 	topicName := "test-delete-topic"
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -63,20 +65,17 @@ func TestDeleteTopic(t *testing.T) {
 		t.Fatalf("CreateTopic error: %v", err)
 	}
 
-	// Wait for replica to start replication.
 	time.Sleep(500 * time.Millisecond)
 
-	// Produce at least one message so files exist.
-	_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: topicName,
 		Value: []byte("test-message"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("Produce error: %v", err)
 	}
 
-	// Wait for replication.
 	time.Sleep(500 * time.Millisecond)
 
 	leaderTopicDir := filepath.Join(servers.leaderBaseDir, topicName)
@@ -90,7 +89,7 @@ func TestDeleteTopic(t *testing.T) {
 		t.Fatalf("expected replica directory %s to exist before deletion", replicaDir)
 	}
 
-	deleteResp, err := leaderClient.DeleteTopic(ctx, &leader.DeleteTopicRequest{Topic: topicName})
+	deleteResp, err := leaderClient.DeleteTopic(ctx, &protocol.DeleteTopicRequest{Topic: topicName})
 	if err != nil {
 		t.Fatalf("DeleteTopic error: %v", err)
 	}
@@ -98,7 +97,6 @@ func TestDeleteTopic(t *testing.T) {
 		t.Fatalf("expected deleted topic %s, got %s", topicName, deleteResp.Topic)
 	}
 
-	// Wait a bit for cleanup to complete.
 	time.Sleep(500 * time.Millisecond)
 
 	if _, err := os.Stat(leaderTopicDir); !os.IsNotExist(err) {
@@ -111,20 +109,17 @@ func TestDeleteTopic(t *testing.T) {
 		t.Fatalf("expected replica directory %s to be deleted, but it still exists", replicaDir)
 	}
 
-	// Producing to deleted topic should fail.
-	_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: topicName,
 		Value: []byte("should-fail"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err == nil {
 		t.Fatalf("expected Produce to fail for deleted topic, but it succeeded")
 	}
 
-	// Deleting a non-existent topic should return error.
-	_, err = leaderClient.DeleteTopic(ctx, &leader.DeleteTopicRequest{Topic: "non-existent-topic"})
+	_, err = leaderClient.DeleteTopic(ctx, &protocol.DeleteTopicRequest{Topic: "non-existent-topic"})
 	if err == nil {
 		t.Fatalf("expected DeleteTopic to fail for non-existent topic, but it succeeded")
 	}
 }
-

@@ -6,13 +6,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/consumer"
-	"github.com/mohitkumar/mlog/api/producer"
+	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/testutil"
 )
 
 func TestFetch(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -22,20 +24,18 @@ func TestFetch(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Produce a message first
-	producerClient := producer.NewProducerServiceClient(conn)
-	_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+	producerClient := client.NewProducerClient(conn)
+	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("hello"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("Produce: %v", err)
 	}
 
-	// Fetch the message
-	consumerClient := consumer.NewConsumerServiceClient(conn)
-	resp, err := consumerClient.Fetch(ctx, &consumer.FetchRequest{
+	consumerClient := client.NewConsumerClient(conn)
+	resp, err := consumerClient.Fetch(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
 		Offset: 0,
@@ -56,7 +56,7 @@ func TestFetch(t *testing.T) {
 
 func TestFetch_TopicNotFound(t *testing.T) {
 	comps := testutil.SetupTestServerComponents(t, "node-1", "consumer-test")
-	ts := testutil.StartTestServer(t, comps, NewGrpcServer)
+	ts := testutil.StartTestServer(t, comps, NewServer(comps.TopicManager, comps.ConsumerManager))
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -66,8 +66,8 @@ func TestFetch_TopicNotFound(t *testing.T) {
 	}
 	defer conn.Close()
 
-	consumerClient := consumer.NewConsumerServiceClient(conn)
-	_, err = consumerClient.Fetch(ctx, &consumer.FetchRequest{
+	consumerClient := client.NewConsumerClient(conn)
+	_, err = consumerClient.Fetch(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Topic:  "nonexistent-topic",
 		Offset: 0,
@@ -79,7 +79,7 @@ func TestFetch_TopicNotFound(t *testing.T) {
 
 func TestFetch_InvalidArguments(t *testing.T) {
 	comps := testutil.SetupTestServerComponents(t, "node-1", "consumer-test")
-	ts := testutil.StartTestServer(t, comps, NewGrpcServer)
+	ts := testutil.StartTestServer(t, comps, NewServer(comps.TopicManager, comps.ConsumerManager))
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -89,10 +89,8 @@ func TestFetch_InvalidArguments(t *testing.T) {
 	}
 	defer conn.Close()
 
-	consumerClient := consumer.NewConsumerServiceClient(conn)
-
-	// Missing topic should fail
-	_, err = consumerClient.Fetch(ctx, &consumer.FetchRequest{
+	consumerClient := client.NewConsumerClient(conn)
+	_, err = consumerClient.Fetch(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Offset: 0,
 	})
@@ -102,7 +100,9 @@ func TestFetch_InvalidArguments(t *testing.T) {
 }
 
 func TestFetchStream(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -114,25 +114,22 @@ func TestFetchStream(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Produce messages first
-	producerClient := producer.NewProducerServiceClient(conn)
+	producerClient := client.NewProducerClient(conn)
 	for i := 0; i < 3; i++ {
-		_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+		_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
 			Value: []byte("message-" + string(rune('0'+i))),
-			Acks:  producer.AckMode_ACK_LEADER,
+			Acks:  protocol.AckLeader,
 		})
 		if err != nil {
 			t.Fatalf("Produce: %v", err)
 		}
 	}
 
-	// Wait a bit for messages to be available and committed
 	time.Sleep(300 * time.Millisecond)
 
-	// Fetch stream
-	consumerClient := consumer.NewConsumerServiceClient(conn)
-	stream, err := consumerClient.FetchStream(ctx, &consumer.FetchRequest{
+	consumerClient := client.NewConsumerClient(conn)
+	stream, err := consumerClient.FetchStream(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
 		Offset: 0,
@@ -141,7 +138,6 @@ func TestFetchStream(t *testing.T) {
 		t.Fatalf("FetchStream: %v", err)
 	}
 
-	// Read at least one message from stream (stream polls every 100ms)
 	received := 0
 	seenOffsets := make(map[uint64]bool)
 	for received < 3 {
@@ -150,7 +146,6 @@ func TestFetchStream(t *testing.T) {
 			break
 		}
 		if err != nil {
-			// Context deadline is expected
 			if ctx.Err() != nil {
 				break
 			}
@@ -159,12 +154,10 @@ func TestFetchStream(t *testing.T) {
 		if resp.Entry == nil {
 			t.Fatal("expected non-nil entry")
 		}
-		// Avoid counting duplicates
 		if !seenOffsets[resp.Entry.Offset] {
 			seenOffsets[resp.Entry.Offset] = true
 			received++
 		}
-		// If we've received at least one message, the stream is working
 		if received >= 1 {
 			break
 		}
@@ -176,7 +169,9 @@ func TestFetchStream(t *testing.T) {
 }
 
 func TestCommitOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -186,8 +181,8 @@ func TestCommitOffset(t *testing.T) {
 	}
 	defer conn.Close()
 
-	consumerClient := consumer.NewConsumerServiceClient(conn)
-	resp, err := consumerClient.CommitOffset(ctx, &consumer.CommitOffsetRequest{
+	consumerClient := client.NewConsumerClient(conn)
+	resp, err := consumerClient.CommitOffset(ctx, &protocol.CommitOffsetRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
 		Offset: 42,
@@ -202,7 +197,7 @@ func TestCommitOffset(t *testing.T) {
 
 func TestCommitOffset_InvalidArguments(t *testing.T) {
 	comps := testutil.SetupTestServerComponents(t, "node-1", "consumer-test")
-	ts := testutil.StartTestServer(t, comps, NewGrpcServer)
+	ts := testutil.StartTestServer(t, comps, NewServer(comps.TopicManager, comps.ConsumerManager))
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -212,10 +207,8 @@ func TestCommitOffset_InvalidArguments(t *testing.T) {
 	}
 	defer conn.Close()
 
-	consumerClient := consumer.NewConsumerServiceClient(conn)
-
-	// Missing topic should fail
-	_, err = consumerClient.CommitOffset(ctx, &consumer.CommitOffsetRequest{
+	consumerClient := client.NewConsumerClient(conn)
+	_, err = consumerClient.CommitOffset(ctx, &protocol.CommitOffsetRequest{
 		Id:     "test-consumer",
 		Offset: 42,
 	})
@@ -225,7 +218,9 @@ func TestCommitOffset_InvalidArguments(t *testing.T) {
 }
 
 func TestFetchOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -235,10 +230,9 @@ func TestFetchOffset(t *testing.T) {
 	}
 	defer conn.Close()
 
-	consumerClient := consumer.NewConsumerServiceClient(conn)
+	consumerClient := client.NewConsumerClient(conn)
 
-	// Fetch offset when none committed (should return 0)
-	resp, err := consumerClient.FetchOffset(ctx, &consumer.FetchOffsetRequest{
+	resp, err := consumerClient.FetchOffset(ctx, &protocol.FetchOffsetRequest{
 		Id:    "test-consumer",
 		Topic: "test-topic",
 	})
@@ -249,8 +243,7 @@ func TestFetchOffset(t *testing.T) {
 		t.Fatalf("expected offset 0 for new consumer, got %d", resp.Offset)
 	}
 
-	// Commit an offset
-	_, err = consumerClient.CommitOffset(ctx, &consumer.CommitOffsetRequest{
+	_, err = consumerClient.CommitOffset(ctx, &protocol.CommitOffsetRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
 		Offset: 10,
@@ -259,8 +252,7 @@ func TestFetchOffset(t *testing.T) {
 		t.Fatalf("CommitOffset: %v", err)
 	}
 
-	// Fetch the committed offset
-	resp, err = consumerClient.FetchOffset(ctx, &consumer.FetchOffsetRequest{
+	resp, err = consumerClient.FetchOffset(ctx, &protocol.FetchOffsetRequest{
 		Id:    "test-consumer",
 		Topic: "test-topic",
 	})
@@ -274,7 +266,7 @@ func TestFetchOffset(t *testing.T) {
 
 func TestFetchOffset_InvalidArguments(t *testing.T) {
 	comps := testutil.SetupTestServerComponents(t, "node-1", "consumer-test")
-	ts := testutil.StartTestServer(t, comps, NewGrpcServer)
+	ts := testutil.StartTestServer(t, comps, NewServer(comps.TopicManager, comps.ConsumerManager))
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -284,10 +276,8 @@ func TestFetchOffset_InvalidArguments(t *testing.T) {
 	}
 	defer conn.Close()
 
-	consumerClient := consumer.NewConsumerServiceClient(conn)
-
-	// Missing topic should fail
-	_, err = consumerClient.FetchOffset(ctx, &consumer.FetchOffsetRequest{
+	consumerClient := client.NewConsumerClient(conn)
+	_, err = consumerClient.FetchOffset(ctx, &protocol.FetchOffsetRequest{
 		Id: "test-consumer",
 	})
 	if err == nil {
@@ -296,7 +286,9 @@ func TestFetchOffset_InvalidArguments(t *testing.T) {
 }
 
 func TestFetch_WithCachedOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -306,23 +298,21 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Produce messages
-	producerClient := producer.NewProducerServiceClient(conn)
+	producerClient := client.NewProducerClient(conn)
 	for i := 0; i < 3; i++ {
-		_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+		_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
 			Value: []byte("message"),
-			Acks:  producer.AckMode_ACK_LEADER,
+			Acks:  protocol.AckLeader,
 		})
 		if err != nil {
 			t.Fatalf("Produce: %v", err)
 		}
 	}
 
-	consumerClient := consumer.NewConsumerServiceClient(conn)
+	consumerClient := client.NewConsumerClient(conn)
 
-	// Read offset 0 first to ensure it's committed (high watermark advances)
-	_, err = consumerClient.Fetch(ctx, &consumer.FetchRequest{
+	_, err = consumerClient.Fetch(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
 		Offset: 0,
@@ -331,8 +321,7 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 		t.Fatalf("Fetch offset 0: %v", err)
 	}
 
-	// Commit offset 1 (meaning we've consumed up to offset 0)
-	_, err = consumerClient.CommitOffset(ctx, &consumer.CommitOffsetRequest{
+	_, err = consumerClient.CommitOffset(ctx, &protocol.CommitOffsetRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
 		Offset: 1,
@@ -341,10 +330,7 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 		t.Fatalf("CommitOffset: %v", err)
 	}
 
-	// Fetch with offset 0 (should use cached offset 1, which should read offset 1)
-	// But offset 1 might not be committed yet, so let's verify the cache is used
-	// by checking that FetchOffset returns the cached value
-	fetchOffsetResp, err := consumerClient.FetchOffset(ctx, &consumer.FetchOffsetRequest{
+	fetchOffsetResp, err := consumerClient.FetchOffset(ctx, &protocol.FetchOffsetRequest{
 		Id:    "test-consumer",
 		Topic: "test-topic",
 	})
@@ -357,7 +343,9 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 }
 
 func BenchmarkFetch(b *testing.B) {
-	ts := testutil.SetupTestServerWithTopic(b, "node-1", "consumer-bench", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(b, "node-1", "consumer-bench", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -367,31 +355,28 @@ func BenchmarkFetch(b *testing.B) {
 	}
 	defer conn.Close()
 
-	// Produce messages first
-	producerClient := producer.NewProducerServiceClient(conn)
+	producerClient := client.NewProducerClient(conn)
 	for i := 0; i < 100; i++ {
-		_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+		_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
 			Value: []byte("bench-value"),
-			Acks:  producer.AckMode_ACK_LEADER,
+			Acks:  protocol.AckLeader,
 		})
 		if err != nil {
 			b.Fatalf("Produce: %v", err)
 		}
 	}
 
-	// Wait for messages to be committed
 	time.Sleep(100 * time.Millisecond)
 
-	consumerClient := consumer.NewConsumerServiceClient(conn)
-	req := &consumer.FetchRequest{
+	consumerClient := client.NewConsumerClient(conn)
+	req := &protocol.FetchRequest{
 		Id:     "bench-consumer",
 		Topic:  "test-topic",
 		Offset: 0,
 	}
 
 	b.ResetTimer()
-	// Read offset 0 repeatedly (it's always available and committed)
 	for i := 0; i < b.N; i++ {
 		_, err := consumerClient.Fetch(ctx, req)
 		if err != nil {

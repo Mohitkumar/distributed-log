@@ -2,18 +2,19 @@ package rpc
 
 import (
 	"context"
+	"encoding/binary"
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/common"
-	"github.com/mohitkumar/mlog/api/leader"
-	"github.com/mohitkumar/mlog/api/producer"
-	"github.com/mohitkumar/mlog/api/replication"
+	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/testutil"
 )
 
 func TestCreateReplica(t *testing.T) {
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -26,8 +27,8 @@ func TestCreateReplica(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+		leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        "test-topic",
 		ReplicaCount: 1,
 	})
@@ -42,8 +43,8 @@ func TestCreateReplica(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	resp, err := replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	resp, err := replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      "test-topic",
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -57,7 +58,9 @@ func TestCreateReplica(t *testing.T) {
 }
 
 func TestCreateReplica_InvalidArguments(t *testing.T) {
-	_, follower := testutil.SetupTwoTestServers(t, NewGrpcServer)
+	_, follower := testutil.SetupTwoTestServers(t, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer follower.Cleanup()
 
 	ctx := context.Background()
@@ -67,16 +70,16 @@ func TestCreateReplica_InvalidArguments(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
+	replicationClient := client.NewReplicationClient(followerConn)
 
 	tests := []struct {
 		name    string
-		req     *replication.CreateReplicaRequest
+		req     *protocol.CreateReplicaRequest
 		wantErr bool
 	}{
 		{
 			name: "missing topic",
-			req: &replication.CreateReplicaRequest{
+			req: &protocol.CreateReplicaRequest{
 				ReplicaId:  "replica-0",
 				LeaderAddr: "127.0.0.1:9092",
 			},
@@ -84,7 +87,7 @@ func TestCreateReplica_InvalidArguments(t *testing.T) {
 		},
 		{
 			name: "missing replica_id",
-			req: &replication.CreateReplicaRequest{
+			req: &protocol.CreateReplicaRequest{
 				Topic:      "test-topic",
 				LeaderAddr: "127.0.0.1:9092",
 			},
@@ -92,7 +95,7 @@ func TestCreateReplica_InvalidArguments(t *testing.T) {
 		},
 		{
 			name: "missing leader_addr",
-			req: &replication.CreateReplicaRequest{
+			req: &protocol.CreateReplicaRequest{
 				Topic:     "test-topic",
 				ReplicaId: "replica-0",
 			},
@@ -111,7 +114,9 @@ func TestCreateReplica_InvalidArguments(t *testing.T) {
 }
 
 func TestDeleteReplica(t *testing.T) {
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -124,8 +129,8 @@ func TestDeleteReplica(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+		leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        "test-topic",
 		ReplicaCount: 1,
 	})
@@ -140,8 +145,8 @@ func TestDeleteReplica(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      "test-topic",
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -151,7 +156,7 @@ func TestDeleteReplica(t *testing.T) {
 	}
 
 	// Delete replica
-	_, err = replicationClient.DeleteReplica(ctx, &replication.DeleteReplicaRequest{
+	_, err = replicationClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
 		Topic:     "test-topic",
 		ReplicaId: "replica-0",
 	})
@@ -161,7 +166,9 @@ func TestDeleteReplica(t *testing.T) {
 }
 
 func TestDeleteReplica_InvalidArguments(t *testing.T) {
-	_, follower := testutil.SetupTwoTestServers(t, NewGrpcServer)
+	_, follower := testutil.SetupTwoTestServers(t, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer follower.Cleanup()
 
 	ctx := context.Background()
@@ -171,10 +178,10 @@ func TestDeleteReplica_InvalidArguments(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
+	replicationClient := client.NewReplicationClient(followerConn)
 
 	// Missing replica_id should fail
-	_, err = replicationClient.DeleteReplica(ctx, &replication.DeleteReplicaRequest{
+	_, err = replicationClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
 		Topic: "test-topic",
 	})
 	if err == nil {
@@ -184,7 +191,9 @@ func TestDeleteReplica_InvalidArguments(t *testing.T) {
 
 func TestCreateReplica_Integration(t *testing.T) {
 	// Test that creating a replica and producing messages works end-to-end
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -197,8 +206,8 @@ func TestCreateReplica_Integration(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+		leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        "test-topic",
 		ReplicaCount: 1,
 	})
@@ -213,8 +222,8 @@ func TestCreateReplica_Integration(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      "test-topic",
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -224,11 +233,11 @@ func TestCreateReplica_Integration(t *testing.T) {
 	}
 
 	// Produce a message to leader
-	producerClient := producer.NewProducerServiceClient(leaderConn)
-	_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+	producerClient := client.NewProducerClient(leaderConn)
+	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("test-message"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("Produce: %v", err)
@@ -237,7 +246,9 @@ func TestCreateReplica_Integration(t *testing.T) {
 
 func TestReplication_VerifyMessages(t *testing.T) {
 	// Test that messages produced to leader are replicated to follower
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -251,8 +262,8 @@ func TestReplication_VerifyMessages(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+		leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -270,8 +281,8 @@ func TestReplication_VerifyMessages(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      topicName,
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -284,7 +295,7 @@ func TestReplication_VerifyMessages(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Produce multiple messages to leader
-	producerClient := producer.NewProducerServiceClient(leaderConn)
+	producerClient := client.NewProducerClient(leaderConn)
 	messages := []string{
 		"message-0",
 		"message-1",
@@ -295,10 +306,10 @@ func TestReplication_VerifyMessages(t *testing.T) {
 
 	var lastOffset uint64
 	for i, msg := range messages {
-		resp, err := producerClient.Produce(ctx, &producer.ProduceRequest{
+		resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: topicName,
 			Value: []byte(msg),
-			Acks:  producer.AckMode_ACK_LEADER,
+			Acks:  protocol.AckLeader,
 		})
 		if err != nil {
 			t.Fatalf("Produce message %d: %v", i, err)
@@ -322,34 +333,37 @@ func TestReplication_VerifyMessages(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read offset %d from leader log: %v", i, err)
 		}
-		if string(entry.Value) != expectedMsg {
-			t.Fatalf("leader log offset %d: expected %q, got %q", i, expectedMsg, string(entry.Value))
+		// Segment returns [offset 8 bytes][value]
+		const offWidth = 8
+		if len(entry) < offWidth {
+			t.Fatalf("leader log offset %d: short read", i)
 		}
-		if entry.Offset != uint64(i) {
-			t.Fatalf("leader log offset %d: expected offset %d, got %d", i, i, entry.Offset)
+		entryValue := entry[offWidth:]
+		if string(entryValue) != expectedMsg {
+			t.Fatalf("leader log offset %d: expected %q, got %q", i, expectedMsg, string(entryValue))
 		}
 	}
 
 	// Wait for replication to catch up
 	time.Sleep(2 * time.Second)
-	// Verify messages on follower replica - use the existing LogManager from the replica node
-	// instead of creating a new one from disk (which won't have buffered writes flushed)
 	replicaNode, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
 	if err != nil {
 		t.Fatalf("failed to get replica node: %v", err)
 	}
-	replicaLogMgr := replicaNode.Log // Use the existing LogManager instance
+	replicaLogMgr := replicaNode.Log
 
 	for i, expectedMsg := range messages {
 		entry, err := replicaLogMgr.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("failed to read offset %d from replica log: %v", i, err)
 		}
-		if string(entry.Value) != expectedMsg {
-			t.Fatalf("replica log offset %d: expected %q, got %q", i, expectedMsg, string(entry.Value))
+		const offWidth = 8
+		if len(entry) < offWidth {
+			t.Fatalf("replica log offset %d: short read", i)
 		}
-		if entry.Offset != uint64(i) {
-			t.Fatalf("replica log offset %d: expected offset %d, got %d", i, i, entry.Offset)
+		entryValue := entry[offWidth:]
+		if string(entryValue) != expectedMsg {
+			t.Fatalf("replica log offset %d: expected %q, got %q", i, expectedMsg, string(entryValue))
 		}
 	}
 
@@ -370,7 +384,9 @@ func TestReplication_VerifyMessages(t *testing.T) {
 
 func TestReplication_WithAckAll(t *testing.T) {
 	// Test that ACK_ALL waits for replication before returning
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -384,8 +400,8 @@ func TestReplication_WithAckAll(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+		leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -403,8 +419,8 @@ func TestReplication_WithAckAll(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      topicName,
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -417,12 +433,12 @@ func TestReplication_WithAckAll(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Produce message with ACK_ALL (should wait for replication)
-	producerClient := producer.NewProducerServiceClient(leaderConn)
+	producerClient := client.NewProducerClient(leaderConn)
 	startTime := time.Now()
-	resp, err := producerClient.Produce(ctx, &producer.ProduceRequest{
+	resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: topicName,
 		Value: []byte("ack-all-message"),
-		Acks:  producer.AckMode_ACK_ALL,
+		Acks:  protocol.AckAll,
 	})
 	produceDuration := time.Since(startTime)
 	if err != nil {
@@ -449,13 +465,17 @@ func TestReplication_WithAckAll(t *testing.T) {
 	}
 	replicaLogMgr := replicaNode.Log // Use the existing LogManager instance
 
-	// Message should be available immediately after ACK_ALL returns
+	// Message should be available immediately after ACK_ALL returns (segment returns [offset 8 bytes][value])
 	entry, err := replicaLogMgr.ReadUncommitted(0)
 	if err != nil {
 		t.Fatalf("failed to read offset 0 from replica log after ACK_ALL: %v", err)
 	}
-	if string(entry.Value) != "ack-all-message" {
-		t.Fatalf("replica log: expected 'ack-all-message', got %q", string(entry.Value))
+	const offWidth = 8
+	if len(entry) < offWidth {
+		t.Fatalf("replica log: short read")
+	}
+	if string(entry[offWidth:]) != "ack-all-message" {
+		t.Fatalf("replica log: expected 'ack-all-message', got %q", string(entry[offWidth:]))
 	}
 
 	t.Logf("ACK_ALL verified: message replicated to follower in %v", produceDuration)
@@ -466,7 +486,9 @@ func TestReplication_CatchUpTime_10000Messages(t *testing.T) {
 		t.Skip("skipping 10k replication catch-up test in -short mode")
 	}
 
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(t, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -486,8 +508,8 @@ func TestReplication_CatchUpTime_10000Messages(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      topicName,
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -505,7 +527,7 @@ func TestReplication_CatchUpTime_10000Messages(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-	producerClient := producer.NewProducerServiceClient(leaderConn)
+	producerClient := client.NewProducerClient(leaderConn)
 
 	const n = 10000
 	const batchSize = 100 // Batch 100 messages at a time
@@ -524,10 +546,10 @@ func TestReplication_CatchUpTime_10000Messages(t *testing.T) {
 			values[j] = []byte("msg")
 		}
 
-		resp, err := producerClient.ProduceBatch(ctx, &producer.ProduceBatchRequest{
+		resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
 			Topic:  topicName,
 			Values: values,
-			Acks:   producer.AckMode_ACK_LEADER,
+			Acks:   protocol.AckLeader,
 		})
 		if err != nil {
 			t.Fatalf("ProduceBatch at i=%d: %v", i, err)
@@ -582,7 +604,9 @@ func TestReplication_CatchUpTime_10000Messages(t *testing.T) {
 
 func BenchmarkReplication_WithAckLeader(b *testing.B) {
 	// Benchmark producing messages with ACK_LEADER and verifying replication
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(b, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(b, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -596,8 +620,8 @@ func BenchmarkReplication_WithAckLeader(b *testing.B) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+		leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -615,8 +639,8 @@ func BenchmarkReplication_WithAckLeader(b *testing.B) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      topicName,
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -628,7 +652,7 @@ func BenchmarkReplication_WithAckLeader(b *testing.B) {
 	// Wait for replica to start replication
 	time.Sleep(500 * time.Millisecond)
 
-	producerClient := producer.NewProducerServiceClient(leaderConn)
+	producerClient := client.NewProducerClient(leaderConn)
 	// Use ProduceBatch with 10 messages per batch for better throughput
 	batchValues := [][]byte{
 		[]byte("bench-msg-0"), []byte("bench-msg-1"), []byte("bench-msg-2"),
@@ -636,10 +660,10 @@ func BenchmarkReplication_WithAckLeader(b *testing.B) {
 		[]byte("bench-msg-6"), []byte("bench-msg-7"), []byte("bench-msg-8"),
 		[]byte("bench-msg-9"),
 	}
-	req := &producer.ProduceBatchRequest{
+	req := &protocol.ProduceBatchRequest{
 		Topic:  topicName,
 		Values: batchValues,
-		Acks:   producer.AckMode_ACK_LEADER,
+		Acks:   protocol.AckLeader,
 	}
 
 	b.ResetTimer()
@@ -658,7 +682,9 @@ func BenchmarkReplication_WithAckLeader(b *testing.B) {
 
 func BenchmarkReplication_WithAckAll(b *testing.B) {
 	// Benchmark producing messages with ACK_ALL (waits for replication)
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(b, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(b, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -672,8 +698,8 @@ func BenchmarkReplication_WithAckAll(b *testing.B) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+		leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -691,8 +717,8 @@ func BenchmarkReplication_WithAckAll(b *testing.B) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      topicName,
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -704,11 +730,11 @@ func BenchmarkReplication_WithAckAll(b *testing.B) {
 	// Wait for replica to start replication
 	time.Sleep(500 * time.Millisecond)
 
-	producerClient := producer.NewProducerServiceClient(leaderConn)
-	req := &producer.ProduceRequest{
+	producerClient := client.NewProducerClient(leaderConn)
+	req := &protocol.ProduceRequest{
 		Topic: topicName,
 		Value: []byte("bench-message"),
-		Acks:  producer.AckMode_ACK_ALL,
+		Acks:  protocol.AckAll,
 	}
 
 	b.ResetTimer()
@@ -726,7 +752,9 @@ func BenchmarkReplication_WithAckAll(b *testing.B) {
 
 func BenchmarkReplication_VerifyReplication(b *testing.B) {
 	// Benchmark producing messages and verifying they are replicated
-	leaderSrv, followerSrv := testutil.SetupTwoTestServers(b, NewGrpcServer)
+	leaderSrv, followerSrv := testutil.SetupTwoTestServers(b, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer leaderSrv.Cleanup()
 	defer followerSrv.Cleanup()
 
@@ -740,8 +768,8 @@ func BenchmarkReplication_VerifyReplication(b *testing.B) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+		leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -759,8 +787,8 @@ func BenchmarkReplication_VerifyReplication(b *testing.B) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      topicName,
 		ReplicaId:  "replica-0",
 		LeaderAddr: leaderSrv.Addr,
@@ -772,7 +800,7 @@ func BenchmarkReplication_VerifyReplication(b *testing.B) {
 	// Wait for replica to start replication
 	time.Sleep(500 * time.Millisecond)
 
-	producerClient := producer.NewProducerServiceClient(leaderConn)
+	producerClient := client.NewProducerClient(leaderConn)
 
 	// Get existing log managers from nodes for verification (not from disk)
 	leaderNode, err := leaderSrv.TopicManager.GetLeader(topicName)
@@ -790,10 +818,10 @@ func BenchmarkReplication_VerifyReplication(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Produce message
-		resp, err := producerClient.Produce(ctx, &producer.ProduceRequest{
+		resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: topicName,
 			Value: []byte("bench-verify-message"),
-			Acks:  producer.AckMode_ACK_LEADER,
+			Acks:  protocol.AckLeader,
 		})
 		if err != nil {
 			b.Fatalf("Produce: %v", err)
@@ -802,8 +830,8 @@ func BenchmarkReplication_VerifyReplication(b *testing.B) {
 		// Wait a bit for the message to be written and indexed
 		time.Sleep(50 * time.Millisecond)
 
-		// Verify on leader (with retry in case of indexing delay)
-		var leaderEntry *common.LogEntry
+		// Verify on leader (with retry in case of indexing delay); segment returns [offset 8 bytes][value]
+		var leaderEntry []byte
 		for retry := 0; retry < 5; retry++ {
 			var err error
 			leaderEntry, err = leaderLogMgr.ReadUncommitted(resp.Offset)
@@ -813,18 +841,18 @@ func BenchmarkReplication_VerifyReplication(b *testing.B) {
 			time.Sleep(20 * time.Millisecond)
 		}
 		if leaderEntry == nil {
-			// Skip if we can't read (shouldn't happen, but be lenient in benchmark)
 			continue
 		}
-		if string(leaderEntry.Value) != "bench-verify-message" {
-			b.Fatalf("leader log offset %d: expected 'bench-verify-message', got %q", resp.Offset, string(leaderEntry.Value))
+		const offW = 8
+		if len(leaderEntry) >= offW && string(leaderEntry[offW:]) != "bench-verify-message" {
+			b.Fatalf("leader log offset %d: expected 'bench-verify-message', got %q", resp.Offset, string(leaderEntry[offW:]))
 		}
 
 		// Wait for replication
 		time.Sleep(100 * time.Millisecond)
 
 		// Verify on replica (with retry for replication lag)
-		var replicaEntry *common.LogEntry
+		var replicaEntry []byte
 		for retry := 0; retry < 10; retry++ {
 			var err error
 			replicaEntry, err = replicaLogMgr.ReadUncommitted(resp.Offset)
@@ -834,11 +862,10 @@ func BenchmarkReplication_VerifyReplication(b *testing.B) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		if replicaEntry == nil {
-			// Skip if replication hasn't caught up (acceptable for benchmark)
 			continue
 		}
-		if string(replicaEntry.Value) != "bench-verify-message" {
-			b.Fatalf("replica log offset %d: expected 'bench-verify-message', got %q", resp.Offset, string(replicaEntry.Value))
+		if len(replicaEntry) >= 8 && string(replicaEntry[8:]) != "bench-verify-message" {
+			b.Fatalf("replica log offset %d: expected 'bench-verify-message', got %q", resp.Offset, string(replicaEntry[8:]))
 		}
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mohitkumar/mlog/api/common"
 	"github.com/mohitkumar/mlog/broker"
 )
 
@@ -42,7 +41,7 @@ func TestTopicManager_CreateTopicLeaderOnly(t *testing.T) {
 
 	// Append a record and read it back.
 	wantVal := []byte("hello-replication")
-	off, err := leader.Log.Append(&common.LogEntry{Value: wantVal})
+	off, err := leader.Log.Append(wantVal)
 	if err != nil {
 		t.Fatalf("Append error = %v", err)
 	}
@@ -54,8 +53,13 @@ func TestTopicManager_CreateTopicLeaderOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read error = %v", err)
 	}
-	if string(got.Value) != string(wantVal) {
-		t.Fatalf("Read value = %q, want %q", got.Value, wantVal)
+	// Segment returns [offset 8 bytes][value]
+	const offWidth = 8
+	if len(got) < offWidth {
+		t.Fatalf("Read returned short data")
+	}
+	if string(got[offWidth:]) != string(wantVal) {
+		t.Fatalf("Read value = %q, want %q", got[offWidth:], wantVal)
 	}
 }
 

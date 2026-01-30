@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"os"
 
 	"github.com/mohitkumar/mlog/broker"
 	"github.com/mohitkumar/mlog/consumer"
 	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/rpc"
+	"github.com/mohitkumar/mlog/transport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -23,12 +23,14 @@ func main() {
 
 	rootCmd := &cobra.Command{
 		Use:   "server",
-		Short: "Run the mlog gRPC server",
+		Short: "Run the mlog TCP transport server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ln, err := net.Listen("tcp", addr)
+			tr := transport.NewTransport()
+			ln, err := tr.Listen(addr)
 			if err != nil {
 				return fmt.Errorf("listen %s: %w", addr, err)
 			}
+			defer ln.Close()
 
 			// Create self broker (connection will be established lazily when needed)
 			selfBroker := broker.NewBroker(nodeID, addr)
@@ -57,16 +59,19 @@ func main() {
 				return fmt.Errorf("create consumer manager: %w", err)
 			}
 
-			gsrv, err := rpc.NewGrpcServer(topicMgr, consumerMgr)
-			if err != nil {
-				return fmt.Errorf("create grpc server: %w", err)
-			}
+			srv := rpc.NewServer(topicMgr, consumerMgr)
 
-			return gsrv.Serve(ln)
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return err
+				}
+				go srv.ServeTransportConn(conn)
+			}
 		},
 	}
 
-	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "gRPC listen address")
+	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP listen address")
 	rootCmd.Flags().StringVar(&dataDir, "data-dir", "/tmp/mlog", "data directory")
 	rootCmd.Flags().StringVar(&nodeID, "node-id", "node-1", "broker node ID")
 	rootCmd.Flags().StringSliceVar(&peers, "peer", nil, "peer brokers (nodeID=addr), repeatable")

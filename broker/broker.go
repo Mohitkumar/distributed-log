@@ -3,28 +3,29 @@ package broker
 import (
 	"sync"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/mohitkumar/mlog/transport"
 )
 
 type Broker struct {
 	NodeID string
 	Addr   string
 	mu     sync.Mutex
-	conn   *grpc.ClientConn
+	conn   *transport.Conn
+	tr     *transport.Transport
 }
 
 func NewBroker(nodeID string, addr string) *Broker {
 	return &Broker{
 		NodeID: nodeID,
 		Addr:   addr,
+		tr:     transport.NewTransport(),
 	}
 }
 
-// GetConn returns the gRPC client connection, creating it if necessary.
-// This method is thread-safe and will lazily establish the connection
-// on first call.
-func (b *Broker) GetConn() (*grpc.ClientConn, error) {
+// GetConn returns the TCP transport connection, creating it if necessary.
+// Replication (and producer/consumer) use this connection for frame-based RPC.
+// This method is thread-safe and will lazily establish the connection on first call.
+func (b *Broker) GetConn() (*transport.Conn, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -32,7 +33,7 @@ func (b *Broker) GetConn() (*grpc.ClientConn, error) {
 		return b.conn, nil
 	}
 
-	conn, err := grpc.NewClient(b.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := b.tr.Connect(b.Addr)
 	if err != nil {
 		return nil, err
 	}

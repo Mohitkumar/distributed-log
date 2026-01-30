@@ -6,11 +6,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/producer"
+	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/transport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -25,20 +25,26 @@ func main() {
 		Use:   "producer",
 		Short: "Produce messages to a topic",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			tr := transport.NewTransport()
+			conn, err := tr.Connect(addr)
 			if err != nil {
 				return err
 			}
 			defer conn.Close()
 
-			client := producer.NewProducerServiceClient(conn)
+			producerClient := client.NewProducerClient(conn)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			resp, err := client.Produce(ctx, &producer.ProduceRequest{
+			ackMode := protocol.AckMode(acks)
+			if ackMode != protocol.AckNone && ackMode != protocol.AckLeader && ackMode != protocol.AckAll {
+				ackMode = protocol.AckLeader
+			}
+
+			resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 				Topic: topic,
 				Value: []byte(value),
-				Acks:  producer.AckMode(acks),
+				Acks:  ackMode,
 			})
 			if err != nil {
 				return err
@@ -49,10 +55,10 @@ func main() {
 		},
 	}
 
-	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "gRPC server address")
+	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP server address")
 	rootCmd.Flags().StringVar(&topic, "topic", "", "topic name (required)")
 	rootCmd.Flags().StringVar(&value, "value", "", "message value (required)")
-	rootCmd.Flags().Int32Var(&acks, "acks", int32(producer.AckMode_ACK_LEADER), "acks: 0=none,1=leader,2=all")
+	rootCmd.Flags().Int32Var(&acks, "acks", int32(protocol.AckLeader), "acks: 0=none,1=leader,2=all")
 
 	viper.SetEnvPrefix("mlog")
 	viper.AutomaticEnv()

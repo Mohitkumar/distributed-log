@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/consumer"
+	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/transport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -27,32 +27,29 @@ func main() {
 		Use:   "consumer",
 		Short: "Consume messages from a topic (streaming)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			tr := transport.NewTransport()
+			conn, err := tr.Connect(addr)
 			if err != nil {
 				return err
 			}
 			defer conn.Close()
 
-			client := consumer.NewConsumerServiceClient(conn)
+			consumerClient := client.NewConsumerClient(conn)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			// Determine starting offset
 			offsetExplicitlySet := cmd.Flags().Changed("offset")
 			startOffset := offset
 
 			if fromBeginning {
-				// --from-beginning flag takes precedence
 				fmt.Fprintf(os.Stderr, "Starting from beginning (offset 0)\n")
 				startOffset = 0
 			} else if offsetExplicitlySet {
-				// User explicitly set an offset, use it
 				fmt.Fprintf(os.Stderr, "Starting from offset %d (explicitly specified)\n", startOffset)
 			} else {
-				// Default behavior: fetch the last committed offset to resume from where we left off
 				fetchCtx, fetchCancel := context.WithTimeout(ctx, 5*time.Second)
-				resp, err := client.FetchOffset(fetchCtx, &consumer.FetchOffsetRequest{
+				resp, err := consumerClient.FetchOffset(fetchCtx, &protocol.FetchOffsetRequest{
 					Id:    id,
 					Topic: topic,
 				})
@@ -66,7 +63,7 @@ func main() {
 				}
 			}
 
-			stream, err := client.FetchStream(ctx, &consumer.FetchRequest{
+			stream, err := consumerClient.FetchStream(ctx, &protocol.FetchRequest{
 				Id:     id,
 				Topic:  topic,
 				Offset: startOffset,
@@ -89,19 +86,18 @@ func main() {
 
 				fmt.Printf("%d\t%s\n", resp.Entry.Offset, string(resp.Entry.Value))
 
-				// Commit the next offset
-				commitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				_, _ = client.CommitOffset(commitCtx, &consumer.CommitOffsetRequest{
+				commitCtx, commitCancel := context.WithTimeout(ctx, 5*time.Second)
+				_, _ = consumerClient.CommitOffset(commitCtx, &protocol.CommitOffsetRequest{
 					Id:     id,
 					Topic:  topic,
 					Offset: resp.Entry.Offset + 1,
 				})
-				cancel()
+				commitCancel()
 			}
 		},
 	}
 
-	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "gRPC server address")
+	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP server address")
 	rootCmd.Flags().StringVar(&id, "id", "default", "consumer id")
 	rootCmd.Flags().StringVar(&topic, "topic", "", "topic name (required)")
 	rootCmd.Flags().Uint64Var(&offset, "offset", 0, "start from specific offset (default: resume from last committed)")

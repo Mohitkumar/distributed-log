@@ -34,7 +34,7 @@ func (c *ConsumerManager) CommitOffset(id string, topic string, offset uint64) e
 		c.offsetCache[id] = make(map[string]uint64)
 	}
 	c.offsetCache[id][topic] = offset
-	_, err := c.offsetLog.AppendRaw([]byte(fmt.Sprintf("%s,%s,%d", id, topic, offset)))
+	_, err := c.offsetLog.Append([]byte(fmt.Sprintf("%s,%s,%d", id, topic, offset)))
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func (c *ConsumerManager) Recover() error {
 
 	highestOffset := c.offsetLog.HighestOffset()
 	for ; offset < highestOffset; offset++ {
-		data, err := c.offsetLog.ReadRaw(offset)
+		data, err := c.offsetLog.Read(offset)
 		if err != nil {
 			return err
 		}

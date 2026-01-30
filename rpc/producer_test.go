@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/mohitkumar/mlog/api/producer"
+	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/testutil"
 )
 
 func TestProduce(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -20,11 +23,11 @@ func TestProduce(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
-	resp, err := client.Produce(ctx, &producer.ProduceRequest{
+	client := client.NewProducerClient(conn)
+	resp, err := client.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("hello"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("Produce: %v", err)
@@ -33,10 +36,10 @@ func TestProduce(t *testing.T) {
 		t.Fatalf("expected offset 0, got %d", resp.Offset)
 	}
 
-	resp2, err := client.Produce(ctx, &producer.ProduceRequest{
+	resp2, err := client.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("world"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("Produce second: %v", err)
@@ -47,7 +50,9 @@ func TestProduce(t *testing.T) {
 }
 
 func TestProduce_TopicNotFound(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -57,11 +62,11 @@ func TestProduce_TopicNotFound(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
-	_, err = client.Produce(ctx, &producer.ProduceRequest{
+	client := client.NewProducerClient(conn)
+	_, err = client.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "nonexistent-topic",
 		Value: []byte("x"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown topic")
@@ -69,7 +74,9 @@ func TestProduce_TopicNotFound(t *testing.T) {
 }
 
 func TestProduce_WithAckLeader(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -79,11 +86,11 @@ func TestProduce_WithAckLeader(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
-	resp, err := client.Produce(ctx, &producer.ProduceRequest{
+	client := client.NewProducerClient(conn)
+	resp, err := client.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("ack-leader"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("Produce: %v", err)
@@ -94,7 +101,9 @@ func TestProduce_WithAckLeader(t *testing.T) {
 }
 
 func TestProduce_Verify(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -104,12 +113,12 @@ func TestProduce_Verify(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
+	client := client.NewProducerClient(conn)
 	for i := 0; i < 100; i++ {
-		resp, err := client.Produce(ctx, &producer.ProduceRequest{
+		resp, err := client.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
 			Value: []byte(fmt.Sprintf("message-%d", i)),
-			Acks:  producer.AckMode_ACK_LEADER,
+			Acks:  protocol.AckLeader,
 		})
 		if err != nil {
 			t.Fatalf("Produce: %v", err)
@@ -122,7 +131,9 @@ func TestProduce_Verify(t *testing.T) {
 }
 
 func TestProduceBatch_Verify(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -132,15 +143,15 @@ func TestProduceBatch_Verify(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
+	client := client.NewProducerClient(conn)
 	messages := make([][]byte, 0)
 	for i := 0; i < 100; i++ {
 		messages = append(messages, []byte(fmt.Sprintf("message-%d", i)))
 	}
-	resp, err := client.ProduceBatch(ctx, &producer.ProduceBatchRequest{
+	resp, err := client.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: messages,
-		Acks:   producer.AckMode_ACK_LEADER,
+		Acks:   protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("Produce: %v", err)
@@ -156,7 +167,9 @@ func TestProduceBatch_Verify(t *testing.T) {
 
 func TestProduce_WithAckAll_NoReplicas(t *testing.T) {
 	// With 0 replicas, ACK_ALL behaves like ACK_LEADER (returns immediately).
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -166,11 +179,11 @@ func TestProduce_WithAckAll_NoReplicas(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
-	resp, err := client.Produce(ctx, &producer.ProduceRequest{
+	client := client.NewProducerClient(conn)
+	resp, err := client.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("ack-all"),
-		Acks:  producer.AckMode_ACK_ALL,
+		Acks:  protocol.AckAll,
 	})
 	if err != nil {
 		t.Fatalf("Produce: %v", err)
@@ -181,7 +194,9 @@ func TestProduce_WithAckAll_NoReplicas(t *testing.T) {
 }
 
 func BenchmarkProduce(b *testing.B) {
-	ts := testutil.SetupTestServerWithTopic(b, "node-1", "producer-bench", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(b, "node-1", "producer-bench", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	conn, err := ts.GetConn()
@@ -190,12 +205,12 @@ func BenchmarkProduce(b *testing.B) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
+	client := client.NewProducerClient(conn)
 	ctx := context.Background()
-	req := &producer.ProduceRequest{
+	req := &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("bench-value"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	}
 
 	for b.Loop() {
@@ -211,7 +226,9 @@ func BenchmarkProduce(b *testing.B) {
 }
 
 func TestProduceBatch(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	conn, err := ts.GetConn()
@@ -220,12 +237,12 @@ func TestProduceBatch(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
+	client := client.NewProducerClient(conn)
 	ctx := context.Background()
-	resp, err := client.ProduceBatch(ctx, &producer.ProduceBatchRequest{
+	resp, err := client.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: [][]byte{[]byte("a"), []byte("b"), []byte("c")},
-		Acks:   producer.AckMode_ACK_LEADER,
+		Acks:   protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("ProduceBatch: %v", err)
@@ -239,7 +256,9 @@ func TestProduceBatch(t *testing.T) {
 }
 
 func TestProduceBatch_TopicNotFound(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	conn, err := ts.GetConn()
@@ -248,11 +267,11 @@ func TestProduceBatch_TopicNotFound(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
-	_, err = client.ProduceBatch(context.Background(), &producer.ProduceBatchRequest{
+	client := client.NewProducerClient(conn)
+	_, err = client.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
 		Topic:  "missing",
 		Values: [][]byte{[]byte("x")},
-		Acks:   producer.AckMode_ACK_LEADER,
+		Acks:   protocol.AckLeader,
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown topic")
@@ -260,7 +279,9 @@ func TestProduceBatch_TopicNotFound(t *testing.T) {
 }
 
 func TestProduceBatch_InvalidArgs(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	conn, err := ts.GetConn()
@@ -269,21 +290,21 @@ func TestProduceBatch_InvalidArgs(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
+	client := client.NewProducerClient(conn)
 
-	_, err = client.ProduceBatch(context.Background(), &producer.ProduceBatchRequest{
+	_, err = client.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
 		Topic:  "",
 		Values: [][]byte{[]byte("x")},
-		Acks:   producer.AckMode_ACK_LEADER,
+		Acks:   protocol.AckLeader,
 	})
 	if err == nil {
 		t.Fatal("expected error for empty topic")
 	}
 
-	_, err = client.ProduceBatch(context.Background(), &producer.ProduceBatchRequest{
+	_, err = client.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: nil,
-		Acks:   producer.AckMode_ACK_LEADER,
+		Acks:   protocol.AckLeader,
 	})
 	if err == nil {
 		t.Fatal("expected error for empty values")
@@ -291,7 +312,9 @@ func TestProduceBatch_InvalidArgs(t *testing.T) {
 }
 
 func BenchmarkProduceBatch(b *testing.B) {
-	ts := testutil.SetupTestServerWithTopic(b, "node-1", "producer-bench", "test-topic", 0, NewGrpcServer)
+	ts := testutil.SetupTestServerWithTopic(b, "node-1", "producer-bench", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+		return NewServer(comps.TopicManager, comps.ConsumerManager)
+	})
 	defer ts.Cleanup()
 
 	conn, err := ts.GetConn()
@@ -300,12 +323,12 @@ func BenchmarkProduceBatch(b *testing.B) {
 	}
 	defer conn.Close()
 
-	client := producer.NewProducerServiceClient(conn)
+	client := client.NewProducerClient(conn)
 	ctx := context.Background()
-	req := &producer.ProduceBatchRequest{
+	req := &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: [][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("d"), []byte("e"), []byte("f"), []byte("g"), []byte("h"), []byte("i"), []byte("j")},
-		Acks:   producer.AckMode_ACK_LEADER,
+		Acks:   protocol.AckLeader,
 	}
 
 	for b.Loop() {

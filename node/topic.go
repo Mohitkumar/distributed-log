@@ -8,11 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/common"
-	"github.com/mohitkumar/mlog/api/producer"
-	"github.com/mohitkumar/mlog/api/replication"
 	"github.com/mohitkumar/mlog/broker"
+	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/log"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
 // Topic represents a topic with its leader and replicas
@@ -93,7 +92,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 	for i, replicaBroker := range replicaBrokers {
 		replicaID := fmt.Sprintf("replica-%d", i)
 
-		// Create replica on remote broker via gRPC
+		// Create replica on remote broker via TCP transport
 		conn, err := replicaBroker.GetConn()
 		if err != nil {
 			// Cleanup on error
@@ -101,9 +100,9 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 			logManager.Close()
 			return fmt.Errorf("failed to connect to broker %s: %w", replicaBroker.NodeID, err)
 		}
-		replicaClient := replication.NewReplicationServiceClient(conn)
+		replicaClient := client.NewReplicationClient(conn)
 		ctx := context.Background()
-		_, err = replicaClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+		_, err = replicaClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 			Topic:      topic,
 			ReplicaId:  replicaID,
 			LeaderAddr: tm.currentBroker.Addr, // Pass leader address
@@ -150,8 +149,8 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 		if err != nil {
 			return fmt.Errorf("failed to connect to broker %s: %w", replica.broker.NodeID, err)
 		}
-		replicaClient := replication.NewReplicationServiceClient(conn)
-		_, err = replicaClient.DeleteReplica(context.Background(), &replication.DeleteReplicaRequest{
+		replicaClient := client.NewReplicationClient(conn)
+		_, err = replicaClient.DeleteReplica(context.Background(), &protocol.DeleteReplicaRequest{
 			Topic:     topic,
 			ReplicaId: replica.ReplicaID,
 		})
@@ -288,33 +287,33 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string, replicaID string) erro
 }
 
 // HandleProduce handles produce requests (leader only)
-func (t *Topic) HandleProduce(ctx context.Context, logEntry *common.LogEntry, acks producer.AckMode) (uint64, error) {
+func (t *Topic) HandleProduce(ctx context.Context, logEntry *protocol.LogEntry, acks protocol.AckMode) (uint64, error) {
 	if t.leader == nil {
 		return 0, fmt.Errorf("topic %s has no leader", t.Name)
 	}
 
 	// Use LogManager.Append which automatically updates LEO
-	offset, err := t.leader.Log.Append(logEntry)
+	offset, err := t.leader.Log.Append(logEntry.Value)
 	if err != nil {
 		return 0, err
 	}
 	switch acks {
-	case producer.AckMode_ACK_LEADER:
+	case protocol.AckLeader:
 		return offset, nil
-	case producer.AckMode_ACK_ALL:
+	case protocol.AckAll:
 		err := t.waitForAllFollowersToCatchUp(ctx, offset)
 		if err != nil {
 			return 0, fmt.Errorf("failed to wait for all followers to catch up: %w", err)
 		}
 	default:
-		return 0, fmt.Errorf("invalid ack mode: %s", acks)
+		return 0, fmt.Errorf("invalid ack mode: %d", int32(acks))
 	}
 	return offset, nil
 }
 
 // HandleProduceBatch appends multiple records and returns (baseOffset, lastOffset).
 // For ACK_ALL, it waits once for the last offset to be replicated.
-func (t *Topic) HandleProduceBatch(ctx context.Context, values [][]byte, acks producer.AckMode) (uint64, uint64, error) {
+func (t *Topic) HandleProduceBatch(ctx context.Context, values [][]byte, acks protocol.AckMode) (uint64, uint64, error) {
 	if t.leader == nil {
 		return 0, 0, fmt.Errorf("topic %s has no leader", t.Name)
 	}
@@ -327,7 +326,7 @@ func (t *Topic) HandleProduceBatch(ctx context.Context, values [][]byte, acks pr
 		last uint64
 	)
 	for i, v := range values {
-		off, err := t.leader.Log.Append(&common.LogEntry{Value: v})
+		off, err := t.leader.Log.Append(v)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -338,15 +337,15 @@ func (t *Topic) HandleProduceBatch(ctx context.Context, values [][]byte, acks pr
 	}
 
 	switch acks {
-	case producer.AckMode_ACK_LEADER:
+	case protocol.AckLeader:
 		return base, last, nil
-	case producer.AckMode_ACK_ALL:
+	case protocol.AckAll:
 		if err := t.waitForAllFollowersToCatchUp(ctx, last); err != nil {
 			return 0, 0, fmt.Errorf("failed to wait for all followers to catch up: %w", err)
 		}
 		return base, last, nil
 	default:
-		return 0, 0, fmt.Errorf("invalid ack mode: %s", acks)
+		return 0, 0, fmt.Errorf("invalid ack mode: %d", int32(acks))
 	}
 }
 

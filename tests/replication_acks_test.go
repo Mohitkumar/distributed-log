@@ -6,9 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/leader"
-	"github.com/mohitkumar/mlog/api/producer"
-	"github.com/mohitkumar/mlog/api/replication"
+	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
 func TestProduceWithAckLeader_10000Messages(t *testing.T) {
@@ -29,8 +28,8 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+	leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -48,8 +47,8 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      topicName,
 		ReplicaId:  "replica-0",
 		LeaderAddr: servers.leaderBroker.Addr,
@@ -62,11 +61,11 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Produce warmup message
-	producerClient := producer.NewProducerServiceClient(leaderConn)
-	_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+	producerClient := client.NewProducerClient(leaderConn)
+	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: topicName,
 		Value: []byte("warmup"),
-		Acks:  producer.AckMode_ACK_LEADER,
+		Acks:  protocol.AckLeader,
 	})
 	if err != nil {
 		t.Fatalf("warmup produce error: %v", err)
@@ -89,10 +88,10 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 			values[j] = []byte(fmt.Sprintf("msg-%d", i+j))
 		}
 
-		resp, err := producerClient.ProduceBatch(ctx, &producer.ProduceBatchRequest{
+		resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
 			Topic:  topicName,
 			Values: values,
-			Acks:   producer.AckMode_ACK_LEADER,
+			Acks:   protocol.AckLeader,
 		})
 		if err != nil {
 			t.Fatalf("ProduceBatch ACK_LEADER at i=%d error: %v", i, err)
@@ -175,8 +174,8 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	}
 	defer leaderConn.Close()
 
-	leaderClient := leader.NewLeaderServiceClient(leaderConn)
-	_, err = leaderClient.CreateTopic(ctx, &leader.CreateTopicRequest{
+	leaderClient := client.NewReplicationClient(leaderConn)
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -194,8 +193,8 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	}
 	defer followerConn.Close()
 
-	replicationClient := replication.NewReplicationServiceClient(followerConn)
-	_, err = replicationClient.CreateReplica(ctx, &replication.CreateReplicaRequest{
+	replicationClient := client.NewReplicationClient(followerConn)
+	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 		Topic:      topicName,
 		ReplicaId:  "replica-0",
 		LeaderAddr: servers.leaderBroker.Addr,
@@ -208,11 +207,11 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Produce warmup message
-	producerClient := producer.NewProducerServiceClient(leaderConn)
-	_, err = producerClient.Produce(ctx, &producer.ProduceRequest{
+	producerClient := client.NewProducerClient(leaderConn)
+	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: topicName,
 		Value: []byte("warmup"),
-		Acks:  producer.AckMode_ACK_ALL,
+		Acks:  protocol.AckAll,
 	})
 	if err != nil {
 		t.Fatalf("warmup produce error: %v", err)
@@ -235,10 +234,10 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 			values[j] = []byte(fmt.Sprintf("msg-%d", i+j))
 		}
 
-		resp, err := producerClient.ProduceBatch(ctx, &producer.ProduceBatchRequest{
+		resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
 			Topic:  topicName,
 			Values: values,
-			Acks:   producer.AckMode_ACK_ALL,
+			Acks:   protocol.AckAll,
 		})
 		if err != nil {
 			t.Fatalf("ProduceBatch ACK_ALL at i=%d error: %v", i, err)

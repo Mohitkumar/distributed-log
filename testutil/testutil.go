@@ -1,7 +1,6 @@
 package testutil
 
 import (
-	"net"
 	"path"
 	"sync"
 	"testing"
@@ -10,12 +9,15 @@ import (
 	"github.com/mohitkumar/mlog/broker"
 	consumermgr "github.com/mohitkumar/mlog/consumer"
 	"github.com/mohitkumar/mlog/node"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/mohitkumar/mlog/transport"
 )
 
+// TransportHandler handles TCP transport connections (e.g. rpc.Server).
+type TransportHandler interface {
+	ServeTransportConn(conn *transport.Conn)
+}
+
 // TestServerComponents contains the components needed to create a test server.
-// The caller is responsible for creating and starting the gRPC server.
 type TestServerComponents struct {
 	TopicManager    *node.TopicManager
 	ConsumerManager *consumermgr.ConsumerManager
@@ -24,14 +26,15 @@ type TestServerComponents struct {
 	BaseDir         string
 }
 
-// TestServer represents a test gRPC server with its components.
+// TestServer represents a test TCP transport server with its components.
 type TestServer struct {
 	*TestServerComponents
-	GrpcServer *grpc.Server
-	Listener   net.Listener
-	Addr       string
-	conn       *grpc.ClientConn
-	connMu     sync.Mutex
+	Listener *transport.Listener
+	Addr     string
+	conn     *transport.Conn
+	connMu   sync.Mutex
+	tr       *transport.Transport
+	handler  TransportHandler
 }
 
 // Cleanup closes all resources associated with the test server.
@@ -43,9 +46,6 @@ func (ts *TestServer) Cleanup() {
 	}
 	ts.connMu.Unlock()
 
-	if ts.GrpcServer != nil {
-		ts.GrpcServer.Stop()
-	}
 	if ts.Listener != nil {
 		_ = ts.Listener.Close()
 	}
@@ -54,8 +54,8 @@ func (ts *TestServer) Cleanup() {
 	}
 }
 
-// GetConn returns a gRPC client connection to the test server, reusing the connection if available.
-func (ts *TestServer) GetConn() (*grpc.ClientConn, error) {
+// GetConn returns a TCP transport connection to the test server, reusing the connection if available.
+func (ts *TestServer) GetConn() (*transport.Conn, error) {
 	ts.connMu.Lock()
 	defer ts.connMu.Unlock()
 
@@ -63,7 +63,7 @@ func (ts *TestServer) GetConn() (*grpc.ClientConn, error) {
 		return ts.conn, nil
 	}
 
-	conn, err := grpc.NewClient(ts.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := ts.tr.Connect(ts.Addr)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,6 @@ func (ts *TestServer) GetConn() (*grpc.ClientConn, error) {
 }
 
 // SetupTestServerComponents creates the components needed for a test server.
-// The caller must create and start the gRPC server using these components.
 func SetupTestServerComponents(t testing.TB, nodeID string, baseDirSuffix string) *TestServerComponents {
 	t.Helper()
 
@@ -100,62 +99,62 @@ func SetupTestServerComponents(t testing.TB, nodeID string, baseDirSuffix string
 	}
 }
 
-// StartTestServer starts a gRPC server using the provided components and server factory.
-// The factory function should create and register all services on the server.
-func StartTestServer(t testing.TB, comps *TestServerComponents, serverFactory func(*node.TopicManager, *consumermgr.ConsumerManager) (*grpc.Server, error)) *TestServer {
+// StartTestServer starts a TCP transport server using the provided components and handler.
+func StartTestServer(t testing.TB, comps *TestServerComponents, handler TransportHandler) *TestServer {
 	t.Helper()
 
-	gsrv, err := serverFactory(comps.TopicManager, comps.ConsumerManager)
-	if err != nil {
-		t.Fatalf("serverFactory: %v", err)
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	tr := transport.NewTransport()
+	ln, err := tr.Listen("127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	comps.Broker.Addr = ln.Addr().String()
 
 	go func() {
-		_ = gsrv.Serve(ln)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handler.ServeTransportConn(conn)
+		}
 	}()
 
-	// Wait for server to be ready
 	time.Sleep(100 * time.Millisecond)
 
 	return &TestServer{
 		TestServerComponents: comps,
-		GrpcServer:           gsrv,
 		Listener:             ln,
 		Addr:                 ln.Addr().String(),
+		tr:                   tr,
+		handler:              handler,
 	}
 }
 
 // SetupTestServerWithTopic creates a test server and creates a topic with the specified replica count.
-func SetupTestServerWithTopic(t testing.TB, nodeID string, baseDirSuffix string, topic string, replicaCount int, serverFactory func(*node.TopicManager, *consumermgr.ConsumerManager) (*grpc.Server, error)) *TestServer {
+// handlerFactory is called with the components to create the transport handler (e.g. rpc.NewServer(comps.TopicManager, comps.ConsumerManager)).
+func SetupTestServerWithTopic(t testing.TB, nodeID string, baseDirSuffix string, topic string, replicaCount int, handlerFactory func(*TestServerComponents) TransportHandler) *TestServer {
 	t.Helper()
 
 	comps := SetupTestServerComponents(t, nodeID, baseDirSuffix)
 	if err := comps.TopicManager.CreateTopic(topic, replicaCount); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	return StartTestServer(t, comps, serverFactory)
+	return StartTestServer(t, comps, handlerFactory(comps))
 }
 
 // SetupTwoTestServers creates two test servers (useful for replication tests).
-// Returns leader and follower servers.
-func SetupTwoTestServers(t testing.TB, serverFactory func(*node.TopicManager, *consumermgr.ConsumerManager) (*grpc.Server, error)) (*TestServer, *TestServer) {
+func SetupTwoTestServers(t testing.TB, handlerFactory func(*TestServerComponents) TransportHandler) (*TestServer, *TestServer) {
 	t.Helper()
 
 	leaderComps := SetupTestServerComponents(t, "node-1", "leader")
 	followerComps := SetupTestServerComponents(t, "node-2", "follower")
 
-	// Add each broker to the other's broker manager so they can communicate
 	leaderComps.BrokerManager.AddBroker(followerComps.Broker)
 	followerComps.BrokerManager.AddBroker(leaderComps.Broker)
 
-	leader := StartTestServer(t, leaderComps, serverFactory)
-	follower := StartTestServer(t, followerComps, serverFactory)
+	leader := StartTestServer(t, leaderComps, handlerFactory(leaderComps))
+	follower := StartTestServer(t, followerComps, handlerFactory(followerComps))
 
 	return leader, follower
 }

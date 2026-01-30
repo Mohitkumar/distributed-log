@@ -2,7 +2,6 @@ package tests
 
 import (
 	"fmt"
-	"net"
 	"path"
 	"testing"
 	"time"
@@ -11,7 +10,7 @@ import (
 	"github.com/mohitkumar/mlog/consumer"
 	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/rpc"
-	"google.golang.org/grpc"
+	"github.com/mohitkumar/mlog/transport"
 )
 
 type testServers struct {
@@ -21,100 +20,82 @@ type testServers struct {
 	followerTopicMgr *node.TopicManager
 	leaderBaseDir    string
 	followerBaseDir  string
+	leaderLn         *transport.Listener
+	followerLn       *transport.Listener
 	cleanup          func()
 }
 
-func (ts *testServers) getLeaderConn() (*grpc.ClientConn, error) {
+func (ts *testServers) getLeaderConn() (*transport.Conn, error) {
 	return ts.leaderBroker.GetConn()
 }
 
-func (ts *testServers) getFollowerConn() (*grpc.ClientConn, error) {
+func (ts *testServers) getFollowerConn() (*transport.Conn, error) {
 	return ts.followerBroker.GetConn()
 }
 
-// setupServer creates and starts a gRPC server for a broker on a pre-bound listener.
-// Returns the server, listener, and topic manager.
-func setupServer(t *testing.T, bm *broker.BrokerManager, baseDir string, nodeID string, serverName string, ln net.Listener) (*grpc.Server, net.Listener, *node.TopicManager, error) {
+func setupServer(t *testing.T, bm *broker.BrokerManager, baseDir string, nodeID string, serverName string, tr *transport.Transport) (*transport.Listener, *node.TopicManager, error) {
 	t.Helper()
 
 	b := bm.GetBroker(nodeID)
 	if b == nil {
-		return nil, nil, nil, fmt.Errorf("broker %s not found", nodeID)
+		return nil, nil, fmt.Errorf("broker %s not found", nodeID)
 	}
 
 	topicMgr, err := node.NewTopicManager(baseDir, bm, b)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create topic manager: %w", err)
+		return nil, nil, fmt.Errorf("create topic manager: %w", err)
 	}
 
 	consumerMgr, err := consumer.NewConsumerManager(baseDir)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create consumer manager: %w", err)
+		return nil, nil, fmt.Errorf("create consumer manager: %w", err)
 	}
 
-	gsrv, err := rpc.NewGrpcServer(topicMgr, consumerMgr)
+	ln, err := tr.Listen("127.0.0.1:0")
 	if err != nil {
-		_ = ln.Close()
-		return nil, nil, nil, fmt.Errorf("create grpc server: %w", err)
+		return nil, nil, err
 	}
 
+	srv := rpc.NewServer(topicMgr, consumerMgr)
 	go func() {
-		if err := gsrv.Serve(ln); err != nil {
-			t.Logf("%s server error: %v", serverName, err)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go srv.ServeTransportConn(conn)
 		}
 	}()
 
-	return gsrv, ln, topicMgr, nil
-}
-
-func setupLeaderServer(t *testing.T, bm *broker.BrokerManager, baseDir string) (*grpc.Server, net.Listener, *node.TopicManager, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return setupServer(t, bm, baseDir, "node-1", "leader", ln)
-}
-
-func setupFollowerServer(t *testing.T, bm *broker.BrokerManager, baseDir string) (*grpc.Server, net.Listener, *node.TopicManager, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return setupServer(t, bm, baseDir, "node-2", "follower", ln)
+	return ln, topicMgr, nil
 }
 
 func setupTestServers(t *testing.T) *testServers {
 	t.Helper()
 
-	// We'll allocate ports by starting servers first, then set broker addrs to match.
-	leaderAddr := "127.0.0.1:0"
-	followerAddr := "127.0.0.1:0"
-
-	// Create broker manager with brokers (connections are created lazily).
+	tr := transport.NewTransport()
 	bm := broker.NewBrokerManager()
-	leaderBroker := broker.NewBroker("node-1", leaderAddr)
-	followerBroker := broker.NewBroker("node-2", followerAddr)
+	leaderBroker := broker.NewBroker("node-1", "127.0.0.1:0")
+	followerBroker := broker.NewBroker("node-2", "127.0.0.1:0")
 	bm.AddBroker(leaderBroker)
 	bm.AddBroker(followerBroker)
 
 	leaderBaseDir := path.Join(t.TempDir(), "leader")
 	followerBaseDir := path.Join(t.TempDir(), "follower")
 
-	leaderSrv, leaderLn, leaderTopicMgr, err := setupLeaderServer(t, bm, leaderBaseDir)
+	leaderLn, leaderTopicMgr, err := setupServer(t, bm, leaderBaseDir, "node-1", "leader", tr)
 	if err != nil {
 		t.Fatalf("setupLeaderServer error: %v", err)
 	}
 	leaderBroker.Addr = leaderLn.Addr().String()
 
-	followerSrv, followerLn, followerTopicMgr, err := setupFollowerServer(t, bm, followerBaseDir)
+	followerLn, followerTopicMgr, err := setupServer(t, bm, followerBaseDir, "node-2", "follower", tr)
 	if err != nil {
-		leaderSrv.Stop()
 		_ = leaderLn.Close()
 		t.Fatalf("setupFollowerServer error: %v", err)
 	}
 	followerBroker.Addr = followerLn.Addr().String()
 
-	// Wait for servers to be ready.
 	time.Sleep(300 * time.Millisecond)
 
 	return &testServers{
@@ -124,11 +105,11 @@ func setupTestServers(t *testing.T) *testServers {
 		followerTopicMgr: followerTopicMgr,
 		leaderBaseDir:    leaderBaseDir,
 		followerBaseDir:  followerBaseDir,
+		leaderLn:         leaderLn,
+		followerLn:       followerLn,
 		cleanup: func() {
 			_ = leaderBroker.Close()
 			_ = followerBroker.Close()
-			leaderSrv.Stop()
-			followerSrv.Stop()
 			_ = leaderLn.Close()
 			_ = followerLn.Close()
 		},

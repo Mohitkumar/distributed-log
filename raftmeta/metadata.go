@@ -1,9 +1,9 @@
-package broker
+package raftmeta
 
 import (
 	"sync"
 
-	"github.com/mohitkumar/mlog/api/metadata"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
 type PartitionMetadata struct {
@@ -32,38 +32,49 @@ func (ms *MetadataStore) GetPartitionMetadata(PartitionID string) (*PartitionMet
 	return partition, exists
 }
 
-func (ms *MetadataStore) Apply(ev *metadata.MetadataEvent) {
+func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
-	switch e := ev.Event.(type) {
-	case *metadata.MetadataEvent_CreatePartition:
+	if ev.CreatePartition != nil {
+		e := ev.CreatePartition
 		replicas := make(map[string]bool)
-		for _, r := range e.CreatePartition.Replicas {
+		for _, r := range e.Replicas {
 			replicas[r] = true
 		}
-		ms.partitions[e.CreatePartition.PartitionId] = &PartitionMetadata{
-			PartitionID: e.CreatePartition.PartitionId,
+		ms.partitions[e.PartitionId] = &PartitionMetadata{
+			PartitionID: e.PartitionId,
 			ISR:         replicas,
 			HW:          -1,
 		}
-	case *metadata.MetadataEvent_LeaderChange:
-		p := ms.partitions[e.LeaderChange.PartitionId]
+		return
+	}
+	if ev.LeaderChange != nil {
+		e := ev.LeaderChange
+		p := ms.partitions[e.PartitionId]
 		if p != nil {
-			p.LeaderID = e.LeaderChange.LeaderId
-			p.LeaderEpoch = e.LeaderChange.LeaderEpoch
+			p.LeaderID = e.LeaderId
+			p.LeaderEpoch = e.LeaderEpoch
 		}
-	case *metadata.MetadataEvent_IsrUpdate:
-		p := ms.partitions[e.IsrUpdate.PartitionId]
+		return
+	}
+	if ev.IsrUpdate != nil {
+		e := ev.IsrUpdate
+		p := ms.partitions[e.PartitionId]
 		if p != nil {
 			newISR := make(map[string]bool)
-			for _, r := range e.IsrUpdate.Isr {
+			for _, r := range e.Isr {
 				newISR[r] = true
 			}
 			p.ISR = newISR
 		}
-	case *metadata.MetadataEvent_HwUpdate:
-		p := ms.partitions[e.HwUpdate.PartitionId]
-		p.HW = e.HwUpdate.Offset
+		return
+	}
+	if ev.HwUpdate != nil {
+		e := ev.HwUpdate
+		p := ms.partitions[e.PartitionId]
+		if p != nil {
+			p.HW = e.Offset
+		}
 	}
 }

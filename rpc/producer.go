@@ -4,28 +4,25 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/mohitkumar/mlog/api/common"
-	"github.com/mohitkumar/mlog/api/producer"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
-var _ producer.ProducerServiceServer = (*grpcServer)(nil)
-
-func (srv *grpcServer) Produce(ctx context.Context, req *producer.ProduceRequest) (*producer.ProduceResponse, error) {
+func (srv *grpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest) (*protocol.ProduceResponse, error) {
 	topicObj, err := srv.topicManager.GetTopic(req.Topic)
 	if err != nil {
 		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
 	}
 
-	offset, err := topicObj.HandleProduce(ctx, &common.LogEntry{
+	offset, err := topicObj.HandleProduce(ctx, &protocol.LogEntry{
 		Value: req.Value,
 	}, req.Acks)
 	if err != nil {
 		return nil, err
 	}
-	return &producer.ProduceResponse{Offset: offset}, err
+	return &protocol.ProduceResponse{Offset: offset}, err
 }
 
-func (srv *grpcServer) ProduceBatch(ctx context.Context, req *producer.ProduceBatchRequest) (*producer.ProduceBatchResponse, error) {
+func (srv *grpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBatchRequest) (*protocol.ProduceBatchResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic is required")
 	}
@@ -42,7 +39,7 @@ func (srv *grpcServer) ProduceBatch(ctx context.Context, req *producer.ProduceBa
 	if err != nil {
 		return nil, err
 	}
-	return &producer.ProduceBatchResponse{
+	return &protocol.ProduceBatchResponse{
 		BaseOffset: base,
 		LastOffset: last,
 		Count:      uint32(len(req.Values)),
