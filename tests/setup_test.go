@@ -30,7 +30,7 @@ func (ts *testServers) getFollowerBroker() *broker.Broker {
 func setupTestServers(t *testing.T) *testServers {
 	t.Helper()
 
-	leader, follower := rpc.SetupTwoTestServers(t)
+	leader, follower := rpc.SetupTwoTestServers(t, "leader", "follower")
 	time.Sleep(300 * time.Millisecond)
 
 	return &testServers{
