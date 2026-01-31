@@ -51,10 +51,11 @@ func main() {
 				return fmt.Errorf("create consumer manager: %w", err)
 			}
 
-			srv := rpc.NewServer(topicMgr, consumerMgr)
-			srv.Addr = addr
-			srv.Start() // blocks
-			return nil
+			srv := rpc.NewRpcServer(addr, topicMgr, consumerMgr)
+			if err := srv.Start(); err != nil {
+				return fmt.Errorf("start server: %w", err)
+			}
+			select {} // block forever
 		},
 	}
 

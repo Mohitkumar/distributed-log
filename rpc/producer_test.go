@@ -7,20 +7,22 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/testutil"
 )
 
 func TestProduce(t *testing.T) {
-	ts := SetupTestServer(t, "127.0.0.1:0", "node-1", "producer-test")
+	ts := StartTestServer(t, "leader")
 	defer ts.Cleanup()
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 
 	ctx := context.Background()
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
-	resp, err := client.Produce(ctx, &protocol.ProduceRequest{
+	defer producerClient.Close()
+	resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("hello"),
 		Acks:  protocol.AckLeader,
@@ -32,7 +34,7 @@ func TestProduce(t *testing.T) {
 		t.Fatalf("expected offset 0, got %d", resp.Offset)
 	}
 
-	resp2, err := client.Produce(ctx, &protocol.ProduceRequest{
+	resp2, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("world"),
 		Acks:  protocol.AckLeader,
@@ -43,21 +45,38 @@ func TestProduce(t *testing.T) {
 	if resp2.Offset != 1 {
 		t.Fatalf("expected offset 1, got %d", resp2.Offset)
 	}
+
+	// Verify messages on leader
+	leaderNode, err := ts.TopicManager.GetLeader("test-topic")
+	if err != nil {
+		t.Fatalf("GetLeader: %v", err)
+	}
+	const offWidth = 8
+	for i, want := range []string{"hello", "world"} {
+		entry, err := leaderNode.Log.ReadUncommitted(uint64(i))
+		if err != nil {
+			t.Fatalf("ReadUncommitted(%d): %v", i, err)
+		}
+		if len(entry) < offWidth {
+			t.Fatalf("offset %d: short read", i)
+		}
+		if got := string(entry[offWidth:]); got != want {
+			t.Fatalf("offset %d: got %q, want %q", i, got, want)
+		}
+	}
 }
 
 func TestProduce_TopicNotFound(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
-	_, err = client.Produce(ctx, &protocol.ProduceRequest{
+	defer producerClient.Close()
+	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "nonexistent-topic",
 		Value: []byte("x"),
 		Acks:  protocol.AckLeader,
@@ -68,18 +87,19 @@ func TestProduce_TopicNotFound(t *testing.T) {
 }
 
 func TestProduce_WithAckLeader(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	ctx := context.Background()
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
-	resp, err := client.Produce(ctx, &protocol.ProduceRequest{
+	defer producerClient.Close()
+	resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("ack-leader"),
 		Acks:  protocol.AckLeader,
@@ -93,19 +113,20 @@ func TestProduce_WithAckLeader(t *testing.T) {
 }
 
 func TestProduce_Verify(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
+	defer producerClient.Close()
 	for i := 0; i < 100; i++ {
-		resp, err := client.Produce(ctx, &protocol.ProduceRequest{
+		resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
 			Value: []byte(fmt.Sprintf("message-%d", i)),
 			Acks:  protocol.AckLeader,
@@ -121,22 +142,23 @@ func TestProduce_Verify(t *testing.T) {
 }
 
 func TestProduceBatch_Verify(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
+	defer producerClient.Close()
 	messages := make([][]byte, 0)
 	for i := 0; i < 100; i++ {
 		messages = append(messages, []byte(fmt.Sprintf("message-%d", i)))
 	}
-	resp, err := client.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
+	resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: messages,
 		Acks:   protocol.AckLeader,
@@ -155,18 +177,19 @@ func TestProduceBatch_Verify(t *testing.T) {
 
 func TestProduce_WithAckAll_NoReplicas(t *testing.T) {
 	// With 0 replicas, ACK_ALL behaves like ACK_LEADER (returns immediately).
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
-	resp, err := client.Produce(ctx, &protocol.ProduceRequest{
+	defer producerClient.Close()
+	resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("ack-all"),
 		Acks:  protocol.AckAll,
@@ -180,16 +203,17 @@ func TestProduce_WithAckAll_NoReplicas(t *testing.T) {
 }
 
 func BenchmarkProduce(b *testing.B) {
-	ts := testutil.SetupTestServerWithTopic(b, "node-1", "producer-bench", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(b, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		b.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
+	defer producerClient.Close()
 	ctx := context.Background()
 	req := &protocol.ProduceRequest{
 		Topic: "test-topic",
@@ -198,7 +222,7 @@ func BenchmarkProduce(b *testing.B) {
 	}
 
 	for b.Loop() {
-		_, err = client.Produce(ctx, req)
+		_, err = producerClient.Produce(ctx, req)
 		if err != nil {
 			b.Fatalf("Produce: %v", err)
 		}
@@ -210,18 +234,19 @@ func BenchmarkProduce(b *testing.B) {
 }
 
 func TestProduceBatch(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
+	defer producerClient.Close()
 	ctx := context.Background()
-	resp, err := client.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
+	resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: [][]byte{[]byte("a"), []byte("b"), []byte("c")},
 		Acks:   protocol.AckLeader,
@@ -238,17 +263,15 @@ func TestProduceBatch(t *testing.T) {
 }
 
 func TestProduceBatch_TopicNotFound(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
-	_, err = client.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
+	defer producerClient.Close()
+	_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
 		Topic:  "missing",
 		Values: [][]byte{[]byte("x")},
 		Acks:   protocol.AckLeader,
@@ -259,18 +282,19 @@ func TestProduceBatch_TopicNotFound(t *testing.T) {
 }
 
 func TestProduceBatch_InvalidArgs(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "producer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
+	defer producerClient.Close()
 
-	_, err = client.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
+	_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
 		Topic:  "",
 		Values: [][]byte{[]byte("x")},
 		Acks:   protocol.AckLeader,
@@ -279,7 +303,7 @@ func TestProduceBatch_InvalidArgs(t *testing.T) {
 		t.Fatal("expected error for empty topic")
 	}
 
-	_, err = client.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
+	_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: nil,
 		Acks:   protocol.AckLeader,
@@ -290,16 +314,17 @@ func TestProduceBatch_InvalidArgs(t *testing.T) {
 }
 
 func BenchmarkProduceBatch(b *testing.B) {
-	ts := testutil.SetupTestServerWithTopic(b, "node-1", "producer-bench", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(b, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		b.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
-	client, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
-	defer client.Close()
+	defer producerClient.Close()
 	ctx := context.Background()
 	req := &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
@@ -308,7 +333,7 @@ func BenchmarkProduceBatch(b *testing.B) {
 	}
 
 	for b.Loop() {
-		_, err := client.ProduceBatch(ctx, req)
+		_, err = producerClient.ProduceBatch(ctx, req)
 		if err != nil {
 			b.Fatalf("ProduceBatch: %v", err)
 		}

@@ -17,7 +17,7 @@ type RpcServer struct {
 	transport       *transport.Transport
 }
 
-func NewServer(addr string, topicManager *node.TopicManager, consumerManager *consumermgr.ConsumerManager) *RpcServer {
+func NewRpcServer(addr string, topicManager *node.TopicManager, consumerManager *consumermgr.ConsumerManager) *RpcServer {
 	srv := &RpcServer{
 		Addr:            addr,
 		topicManager:    topicManager,
@@ -80,8 +80,15 @@ func (s *RpcServer) RegisterHandlers() {
 	})
 }
 
-func (s *RpcServer) Start() {
-	s.transport.ListenAndServe(s.Addr)
+// Start binds to Addr (use "127.0.0.1:0" for dynamic port), sets Addr to the bound address, and serves in a goroutine.
+func (s *RpcServer) Start() error {
+	ln, err := s.transport.Listen(s.Addr)
+	if err != nil {
+		return err
+	}
+	s.Addr = s.transport.Addr()
+	go s.transport.Serve(ln)
+	return nil
 }
 
 func (s *RpcServer) Stop() error {

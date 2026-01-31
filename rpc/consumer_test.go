@@ -8,17 +8,17 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/testutil"
 )
 
 func TestFetch(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestFetch(t *testing.T) {
 		t.Fatalf("Produce: %v", err)
 	}
 
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -57,12 +57,11 @@ func TestFetch(t *testing.T) {
 }
 
 func TestFetch_TopicNotFound(t *testing.T) {
-	comps := testutil.SetupTestServerComponents(t, "node-1", "consumer-test")
-	ts := testutil.StartTestServer(t, comps, NewServer(comps.TopicManager, comps.ConsumerManager))
+	ts := StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -78,12 +77,11 @@ func TestFetch_TopicNotFound(t *testing.T) {
 }
 
 func TestFetch_InvalidArguments(t *testing.T) {
-	comps := testutil.SetupTestServerComponents(t, "node-1", "consumer-test")
-	ts := testutil.StartTestServer(t, comps, NewServer(comps.TopicManager, comps.ConsumerManager))
+	ts := StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -98,15 +96,16 @@ func TestFetch_InvalidArguments(t *testing.T) {
 }
 
 func TestFetchStream(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	producerClient, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -124,7 +123,7 @@ func TestFetchStream(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -169,13 +168,14 @@ func TestFetchStream(t *testing.T) {
 }
 
 func TestCommitOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -194,12 +194,11 @@ func TestCommitOffset(t *testing.T) {
 }
 
 func TestCommitOffset_InvalidArguments(t *testing.T) {
-	comps := testutil.SetupTestServerComponents(t, "node-1", "consumer-test")
-	ts := testutil.StartTestServer(t, comps, NewServer(comps.TopicManager, comps.ConsumerManager))
+	ts := StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -214,13 +213,14 @@ func TestCommitOffset_InvalidArguments(t *testing.T) {
 }
 
 func TestFetchOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -259,12 +259,11 @@ func TestFetchOffset(t *testing.T) {
 }
 
 func TestFetchOffset_InvalidArguments(t *testing.T) {
-	comps := testutil.SetupTestServerComponents(t, "node-1", "consumer-test")
-	ts := testutil.StartTestServer(t, comps, NewServer(comps.TopicManager, comps.ConsumerManager))
+	ts := StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -278,13 +277,14 @@ func TestFetchOffset_InvalidArguments(t *testing.T) {
 }
 
 func TestFetch_WithCachedOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(t, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 		}
 	}
 
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -337,13 +337,14 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 }
 
 func BenchmarkFetch(b *testing.B) {
-	ts := testutil.SetupTestServerWithTopic(b, "node-1", "consumer-bench", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
-		return NewServer(comps.TopicManager, comps.ConsumerManager)
-	})
+	ts := StartTestServer(b, "leader")
+	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+		b.Fatalf("CreateTopic: %v", err)
+	}
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Broker.GetAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
@@ -361,7 +362,7 @@ func BenchmarkFetch(b *testing.B) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	consumerClient, err := client.NewConsumerClient(ts.Addr)
 	if err != nil {
 		b.Fatalf("NewConsumerClient: %v", err)
 	}

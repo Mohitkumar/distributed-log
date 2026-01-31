@@ -61,11 +61,14 @@ func SetupTestServerComponents(t testing.TB, addr string, nodeID string, baseDir
 }
 
 // StartTestServer starts a TCP transport server using the provided components and RPC server (handler-style).
-func StartTestServer(t testing.TB, comps *TestServerComponents) *TestServer {
+func StartTestServer(t testing.TB, baseDirSuffix string) *TestServer {
 	t.Helper()
 
-	srv := NewServer(comps.Addr, comps.TopicManager, comps.ConsumerManager)
-	srv.Start()
+	comps := SetupTestServerComponents(t, "127.0.0.1:0", "node-1", baseDirSuffix)
+	srv := NewRpcServer(comps.Addr, comps.TopicManager, comps.ConsumerManager)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 
 	return &TestServer{
 		TestServerComponents: comps,
@@ -75,17 +78,17 @@ func StartTestServer(t testing.TB, comps *TestServerComponents) *TestServer {
 }
 
 // SetupTwoTestServers creates two test servers (useful for replication tests).
-func SetupTwoTestServers(t testing.TB) (*TestServer, *TestServer) {
+func SetupTwoTestServers(t testing.TB, baseDir1Suffix string, baseDir2Suffix string) (*TestServer, *TestServer) {
 	t.Helper()
 
-	leaderComps := SetupTestServerComponents(t, "127.0.0.1:0", "node-1", "leader")
-	followerComps := SetupTestServerComponents(t, "127.0.0.1:1", "node-2", "follower")
+	leaderComps := SetupTestServerComponents(t, "127.0.0.1:0", "node-1", baseDir1Suffix)
+	followerComps := SetupTestServerComponents(t, "127.0.0.1:1", "node-2", baseDir2Suffix)
 
 	leaderComps.BrokerManager.AddBroker(followerComps.Broker)
 	followerComps.BrokerManager.AddBroker(leaderComps.Broker)
 
-	leader := StartTestServer(t, leaderComps)
-	follower := StartTestServer(t, followerComps)
+	leader := StartTestServer(t, leaderComps.BaseDir)
+	follower := StartTestServer(t, followerComps.BaseDir)
 
 	return leader, follower
 }

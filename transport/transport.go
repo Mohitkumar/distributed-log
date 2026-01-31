@@ -95,11 +95,11 @@ func (t *Transport) handleConn(conn net.Conn) {
 		resp, err := handler(context.Background(), msg)
 		if err != nil {
 			fmt.Println("Handler error:", err)
-			continue
+			return // close conn so client gets an error instead of hanging
 		}
 		if err := t.Codec.Encode(conn, resp); err != nil {
 			fmt.Println("Encode error:", err)
-			continue
+			return
 		}
 	}
 }

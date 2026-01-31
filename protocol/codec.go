@@ -16,70 +16,70 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	var payload []byte
 	var err error
 	switch v := msg.(type) {
-	case CreateReplicaRequest:
+	case CreateReplicaRequest, *CreateReplicaRequest:
 		mType = MsgCreateReplica
 		payload, err = json.Marshal(v)
-	case CreateReplicaResponse:
+	case CreateReplicaResponse, *CreateReplicaResponse:
 		mType = MsgCreateReplicaResp
 		payload, err = json.Marshal(v)
-	case DeleteReplicaRequest:
+	case DeleteReplicaRequest, *DeleteReplicaRequest:
 		mType = MsgDeleteReplica
 		payload, err = json.Marshal(v)
-	case DeleteReplicaResponse:
+	case DeleteReplicaResponse, *DeleteReplicaResponse:
 		mType = MsgDeleteReplicaResp
 		payload, err = json.Marshal(v)
-	case ReplicateRequest:
+	case ReplicateRequest, *ReplicateRequest:
 		mType = MsgReplicateStream
 		payload, err = json.Marshal(v)
-	case ReplicateResponse:
+	case ReplicateResponse, *ReplicateResponse:
 		mType = MsgReplicateResp
 		payload, err = json.Marshal(v)
-	case RecordLEORequest:
+	case RecordLEORequest, *RecordLEORequest:
 		mType = MsgRecordLEO
 		payload, err = json.Marshal(v)
-	case RecordLEOResponse:
+	case RecordLEOResponse, *RecordLEOResponse:
 		mType = MsgRecordLEOResp
 		payload, err = json.Marshal(v)
-	case ProduceRequest:
+	case ProduceRequest, *ProduceRequest:
 		mType = MsgProduce
 		payload, err = json.Marshal(v)
-	case ProduceResponse:
+	case ProduceResponse, *ProduceResponse:
 		mType = MsgProduceResp
 		payload, err = json.Marshal(v)
-	case ProduceBatchRequest:
+	case ProduceBatchRequest, *ProduceBatchRequest:
 		mType = MsgProduceBatch
 		payload, err = json.Marshal(v)
-	case ProduceBatchResponse:
+	case ProduceBatchResponse, *ProduceBatchResponse:
 		mType = MsgProduceBatchResp
 		payload, err = json.Marshal(v)
-	case FetchRequest:
+	case FetchRequest, *FetchRequest:
 		mType = MsgFetch
 		payload, err = json.Marshal(v)
-	case FetchResponse:
+	case FetchResponse, *FetchResponse:
 		mType = MsgFetchResp
 		payload, err = json.Marshal(v)
-	case CommitOffsetRequest:
+	case CommitOffsetRequest, *CommitOffsetRequest:
 		mType = MsgCommitOffset
 		payload, err = json.Marshal(v)
-	case CommitOffsetResponse:
+	case CommitOffsetResponse, *CommitOffsetResponse:
 		mType = MsgCommitOffsetResp
 		payload, err = json.Marshal(v)
-	case FetchOffsetRequest:
+	case FetchOffsetRequest, *FetchOffsetRequest:
 		mType = MsgFetchOffset
 		payload, err = json.Marshal(v)
-	case FetchOffsetResponse:
+	case FetchOffsetResponse, *FetchOffsetResponse:
 		mType = MsgFetchOffsetResp
 		payload, err = json.Marshal(v)
-	case CreateTopicRequest:
+	case CreateTopicRequest, *CreateTopicRequest:
 		mType = MsgCreateTopic
 		payload, err = json.Marshal(v)
-	case CreateTopicResponse:
+	case CreateTopicResponse, *CreateTopicResponse:
 		mType = MsgCreateTopicResp
 		payload, err = json.Marshal(v)
-	case DeleteTopicRequest:
+	case DeleteTopicRequest, *DeleteTopicRequest:
 		mType = MsgDeleteTopic
 		payload, err = json.Marshal(v)
-	case DeleteTopicResponse:
+	case DeleteTopicResponse, *DeleteTopicResponse:
 		mType = MsgDeleteTopicResp
 		payload, err = json.Marshal(v)
 	default:
