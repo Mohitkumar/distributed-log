@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/mohitkumar/mlog/broker"
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
 )
@@ -187,5 +189,166 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 		t.Fatalf("topic dir %q should not exist after last replica deleted", topicDir)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat topic dir: %v", err)
+	}
+}
+
+// TestReplication_ReadMessagesViaReplicationClient verifies that after the leader produces messages,
+// we can read them back using the replication client (Replicate RPC) and verify content.
+func TestReplication_ReadMessagesViaReplicationClient(t *testing.T) {
+	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader-repl", "follower-repl")
+	defer leaderSrv.Cleanup()
+	defer followerSrv.Cleanup()
+
+	topicName := "repl-topic"
+	if err := leaderSrv.TopicManager.CreateTopic(topicName, 1); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Produce messages on leader
+	producerClient, err := client.NewProducerClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewProducerClient: %v", err)
+	}
+	defer producerClient.Close()
+
+	messages := []string{"msg-0", "msg-1", "msg-2"}
+	for i, msg := range messages {
+		resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
+			Topic: topicName,
+			Value: []byte(msg),
+			Acks:  protocol.AckLeader,
+		})
+		if err != nil {
+			t.Fatalf("Produce %d: %v", i, err)
+		}
+		if resp.Offset != uint64(i) {
+			t.Fatalf("expected offset %d, got %d", i, resp.Offset)
+		}
+	}
+
+	// Read messages via replication client (use a dedicated broker so we don't share connection with follower's replica)
+	leaderBrokerForClient := broker.NewBroker("test-leader", leaderSrv.Addr)
+	replClient := client.NewReplicationClient(leaderBrokerForClient)
+	defer leaderBrokerForClient.Close()
+	stream, err := replClient.ReplicateStream(ctx, &protocol.ReplicateRequest{
+		Topic:     topicName,
+		Offset:    0,
+		BatchSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("ReplicateStream: %v", err)
+	}
+
+	var allEntries []*protocol.LogEntry
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			if len(allEntries) == 0 {
+				t.Fatalf("Recv failed before any entries: %v", err)
+			}
+			break
+		}
+		if len(resp.Entries) == 0 {
+			break
+		}
+		allEntries = append(allEntries, resp.Entries...)
+	}
+
+	if len(allEntries) != len(messages) {
+		t.Fatalf("expected %d entries, got %d", len(messages), len(allEntries))
+	}
+
+	// Segment format: [offset 8 bytes][value]; Replicate returns raw ReadUncommitted bytes
+	const offWidth = 8
+	for i, entry := range allEntries {
+		if entry.Offset != uint64(i) {
+			t.Fatalf("entry %d: expected offset %d, got %d", i, i, entry.Offset)
+		}
+		payload := entry.Value
+		if len(payload) >= offWidth {
+			payload = payload[offWidth:]
+		}
+		if string(payload) != messages[i] {
+			t.Fatalf("entry %d: expected value %q, got %q", i, messages[i], string(payload))
+		}
+	}
+}
+
+// TestReplication_FollowerHasMessagesAfterReplication verifies that after producing on the leader,
+// the follower replica eventually has the same messages (replication runs in background).
+func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
+	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
+	defer leaderSrv.Cleanup()
+	defer followerSrv.Cleanup()
+
+	topicName := "repl-topic2"
+	if err := leaderSrv.TopicManager.CreateTopic(topicName, 1); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	ctx := context.Background()
+	producerClient, err := client.NewProducerClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewProducerClient: %v", err)
+	}
+	defer producerClient.Close()
+
+	messages := []string{"hello", "world"}
+	for i, msg := range messages {
+		_, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
+			Topic: topicName,
+			Value: []byte(msg),
+			Acks:  protocol.AckLeader,
+		})
+		if err != nil {
+			t.Fatalf("Produce %d: %v", i, err)
+		}
+	}
+
+	// Wait for replication to catch up (follower replica fetches from leader)
+	// Then verify follower's replica log has the same messages
+	replicaNode, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	if err != nil {
+		t.Fatalf("GetReplica: %v", err)
+	}
+	if replicaNode.Log == nil {
+		t.Fatal("replica should have Log")
+	}
+
+	// Poll until we have at least len(messages) entries (replication may be async)
+	var lastLEO uint64
+	for try := 0; try < 50; try++ {
+		lastLEO = replicaNode.Log.LEO()
+		if lastLEO >= uint64(len(messages)) {
+			break
+		}
+		if try < 49 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if lastLEO < uint64(len(messages)) {
+		t.Fatalf("replica LEO %d < %d (replication did not catch up)", lastLEO, len(messages))
+	}
+
+	// Replica appends entry.Value from leader; leader's Value is segment format [8-byte offset][payload].
+	// Replica's segment then stores that as record value, so Read returns [8-byte seg prefix][leader value].
+	const offWidth = 8
+	for i, want := range messages {
+		raw, err := replicaNode.Log.ReadUncommitted(uint64(i))
+		if err != nil {
+			t.Fatalf("ReadUncommitted(%d): %v", i, err)
+		}
+		if len(raw) < offWidth {
+			t.Fatalf("entry %d: short read (len=%d)", i, len(raw))
+		}
+		payload := raw[offWidth:] // strip segment's 8-byte offset
+		if len(payload) >= offWidth {
+			payload = payload[offWidth:] // strip leader's 8-byte offset in value
+		}
+		if string(payload) != want {
+			t.Fatalf("entry %d: got %q, want %q", i, string(payload), want)
+		}
 	}
 }

@@ -117,6 +117,10 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		var msg ReplicateRequest
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
+	case MsgReplicateResp:
+		var msg ReplicateResponse
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
 	case MsgRecordLEO:
 		var msg RecordLEORequest
 		err = json.Unmarshal(payload, &msg)
