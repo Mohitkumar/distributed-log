@@ -1,90 +1,65 @@
 package transport
 
 import (
-	"bytes"
-	"net"
+	"context"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/mohitkumar/mlog/protocol"
 )
 
-func TestTransport_Connect_Send_Receive(t *testing.T) {
-	tr := NewTransport()
-	ln, err := tr.Listen("127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
+func TestTransport_ListenAndServe_Send(t *testing.T) {
+	addr := "127.0.0.1:19999"
+	srv := NewTransport(addr)
 
-	addr := ln.Addr().String()
+	var received protocol.ProduceRequest
+	var receivedMu sync.Mutex
+	done := make(chan struct{})
 
-	var clientRecv []byte
-	var clientErr error
-	var wg sync.WaitGroup
-	wg.Add(1)
+	srv.RegisterHandler(protocol.MsgProduce, func(ctx context.Context, msg any) (any, error) {
+		receivedMu.Lock()
+		received = msg.(protocol.ProduceRequest)
+		receivedMu.Unlock()
+		close(done)
+		return protocol.ProduceResponse{Offset: 1}, nil
+	})
+
 	go func() {
-		defer wg.Done()
-		client, err := tr.Connect(addr)
-		if err != nil {
-			clientErr = err
-			return
-		}
-		defer client.Close()
-		if err := client.Send([]byte("ping")); err != nil {
-			clientErr = err
-			return
-		}
-		clientRecv, clientErr = client.Receive()
+		_ = srv.ListenAndServe()
 	}()
+	time.Sleep(50 * time.Millisecond) // allow server to bind
 
-	serverConn, err := ln.Accept()
-	if err != nil {
+	client := NewTransport(addr)
+	req := protocol.ProduceRequest{Topic: "test", Value: []byte("ping"), Acks: protocol.AckLeader}
+	if err := client.Send(req); err != nil {
 		t.Fatal(err)
 	}
-	recv, err := serverConn.Receive()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(recv, []byte("ping")) {
-		t.Errorf("server recv = %q, want ping", recv)
-	}
-	if err := serverConn.Send([]byte("pong")); err != nil {
-		t.Fatal(err)
-	}
-	serverConn.Close()
 
-	wg.Wait()
-	if clientErr != nil {
-		t.Fatal(clientErr)
-	}
-	if !bytes.Equal(clientRecv, []byte("pong")) {
-		t.Errorf("client recv = %q, want pong", clientRecv)
+	<-done
+	receivedMu.Lock()
+	got := received
+	receivedMu.Unlock()
+	if got.Topic != "test" || string(got.Value) != "ping" {
+		t.Errorf("server received Topic=%q Value=%q, want Topic=test Value=ping", got.Topic, string(got.Value))
 	}
 }
 
-func TestTransport_Listen_InvalidAddr(t *testing.T) {
-	tr := NewTransport()
-	_, err := tr.Listen("invalid:addr:here")
+func TestTransport_ListenAndServe_InvalidAddr(t *testing.T) {
+	tr := NewTransport("invalid:addr:here")
+	err := tr.ListenAndServe()
 	if err == nil {
 		t.Fatal("expected error for invalid address")
 	}
 }
 
-func TestConn_Close(t *testing.T) {
-	tr := NewTransport()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	conn, err := tr.Connect(ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := conn.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := conn.Send([]byte("x")); err != ErrClosed {
-		t.Errorf("Send after Close: got %v, want ErrClosed", err)
+func TestTransport_Send_Unreachable(t *testing.T) {
+	// Use an address that is not listening (no server).
+	addr := "127.0.0.1:19998"
+	client := NewTransport(addr)
+	req := protocol.ProduceRequest{Topic: "test", Value: []byte("x"), Acks: protocol.AckNone}
+	err := client.Send(req)
+	if err == nil {
+		t.Fatal("expected error when sending to unreachable address")
 	}
 }

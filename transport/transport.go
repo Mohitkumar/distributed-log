@@ -1,125 +1,76 @@
 package transport
 
 import (
-	"bufio"
+	"context"
+	"fmt"
+	"io"
 	"net"
-	"sync"
+
+	"github.com/mohitkumar/mlog/protocol"
 )
 
 // Transport manages TCP connections with a length-prefixed frame protocol.
 // Producer, consumer, and replication use it to Send and Receive raw bytes.
 type Transport struct {
-	// MaxFrameSize can be overridden per-transport; default is from codec.
-	MaxFrameSize uint32
+	Addr     string
+	Codec    *protocol.Codec
+	handlers map[protocol.MessageType]func(context.Context, any) (any, error)
 }
 
-func NewTransport() *Transport {
+func NewTransport(addr string) *Transport {
 	return &Transport{
-		MaxFrameSize: MaxFrameSize,
+		Addr:     addr,
+		Codec:    &protocol.Codec{},
+		handlers: make(map[protocol.MessageType]func(context.Context, any) (any, error)),
 	}
 }
 
-// Conn is a TCP connection that encodes/decodes length-prefixed frames.
-// Safe for concurrent Send; Receive should typically be used from a single goroutine per Conn.
-type Conn struct {
-	conn   net.Conn
-	rbuf   *bufio.Reader
-	wbuf   *bufio.Writer
-	mu     sync.Mutex
-	closed bool
+func (t *Transport) RegisterHandler(msgType protocol.MessageType, handler func(context.Context, any) (any, error)) {
+	t.handlers[msgType] = handler
 }
 
-// Connect establishes a TCP connection to addr and returns a frame-based Conn.
-func (t *Transport) Connect(addr string) (*Conn, error) {
-	conn, err := net.Dial("tcp", addr)
+func (t *Transport) ListenAndServe() error {
+	ln, err := net.Listen("tcp", t.Addr)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return t.wrapConn(conn), nil
-}
-
-// wrapConn wraps an existing net.Conn with buffered I/O and frame codec.
-func (t *Transport) wrapConn(conn net.Conn) *Conn {
-	return &Conn{
-		conn: conn,
-		rbuf: bufio.NewReader(conn),
-		wbuf: bufio.NewWriter(conn),
+	fmt.Println("Listening on", ln.Addr())
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+		go t.handleConn(conn)
 	}
 }
 
-// Send encodes payload as a length-prefixed frame and writes it. Thread-safe.
-func (c *Conn) Send(payload []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return ErrClosed
+func (t *Transport) handleConn(conn net.Conn) {
+	defer conn.Close()
+	for {
+		mType, msg, err := t.Codec.Decode(conn)
+		if err != nil {
+			if err != io.EOF {
+				fmt.Println("Read error:", err)
+			}
+			return
+		}
+		resp, err := t.handlers[mType](context.Background(), msg)
+		if err != nil {
+			fmt.Println("Handler error:", err)
+			continue
+		}
+		if err := t.Codec.Encode(conn, resp); err != nil {
+			fmt.Println("Encode error:", err)
+			continue
+		}
 	}
-	return EncodeFrame(c.wbuf, payload)
 }
 
-// Receive reads one length-prefixed frame and returns the payload.
-// Typically used from a single goroutine; not safe for concurrent use with other Receive calls.
-func (c *Conn) Receive() ([]byte, error) {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, ErrClosed
-	}
-	c.mu.Unlock()
-	return DecodeFrame(c.rbuf)
-}
-
-// Close closes the underlying TCP connection.
-func (c *Conn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil
-	}
-	c.closed = true
-	return c.conn.Close()
-}
-
-// RemoteAddr returns the remote network address.
-func (c *Conn) RemoteAddr() net.Addr {
-	return c.conn.RemoteAddr()
-}
-
-// LocalAddr returns the local network address.
-func (c *Conn) LocalAddr() net.Addr {
-	return c.conn.LocalAddr()
-}
-
-// Listener is a TCP listener that accepts frame-based Conns.
-type Listener struct {
-	ln        net.Listener
-	transport *Transport
-}
-
-// Listen starts listening on addr and returns a Listener that accepts Conns.
-func (t *Transport) Listen(addr string) (*Listener, error) {
-	ln, err := net.Listen("tcp", addr)
+func (t *Transport) Send(msg any) error {
+	conn, err := net.Dial("tcp", t.Addr)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return &Listener{ln: ln, transport: t}, nil
-}
-
-// Accept blocks until a new connection is established and returns a frame-based Conn.
-func (l *Listener) Accept() (*Conn, error) {
-	conn, err := l.ln.Accept()
-	if err != nil {
-		return nil, err
-	}
-	return l.transport.wrapConn(conn), nil
-}
-
-// Addr returns the listener's address.
-func (l *Listener) Addr() net.Addr {
-	return l.ln.Addr()
-}
-
-// Close stops accepting new connections.
-func (l *Listener) Close() error {
-	return l.ln.Close()
+	defer conn.Close()
+	return t.Codec.Encode(conn, msg)
 }
