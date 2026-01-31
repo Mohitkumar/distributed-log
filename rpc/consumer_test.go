@@ -12,19 +12,17 @@ import (
 )
 
 func TestFetch(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
 		return NewServer(comps.TopicManager, comps.ConsumerManager)
 	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	producerClient, err := client.NewProducerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer conn.Close()
-
-	producerClient := client.NewProducerClient(conn)
+	defer producerClient.Close()
 	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("hello"),
@@ -34,7 +32,11 @@ func TestFetch(t *testing.T) {
 		t.Fatalf("Produce: %v", err)
 	}
 
-	consumerClient := client.NewConsumerClient(conn)
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	if err != nil {
+		t.Fatalf("NewConsumerClient: %v", err)
+	}
+	defer consumerClient.Close()
 	resp, err := consumerClient.Fetch(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
@@ -60,13 +62,11 @@ func TestFetch_TopicNotFound(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewConsumerClient: %v", err)
 	}
-	defer conn.Close()
-
-	consumerClient := client.NewConsumerClient(conn)
+	defer consumerClient.Close()
 	_, err = consumerClient.Fetch(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Topic:  "nonexistent-topic",
@@ -83,13 +83,11 @@ func TestFetch_InvalidArguments(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewConsumerClient: %v", err)
 	}
-	defer conn.Close()
-
-	consumerClient := client.NewConsumerClient(conn)
+	defer consumerClient.Close()
 	_, err = consumerClient.Fetch(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Offset: 0,
@@ -100,7 +98,7 @@ func TestFetch_InvalidArguments(t *testing.T) {
 }
 
 func TestFetchStream(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
 		return NewServer(comps.TopicManager, comps.ConsumerManager)
 	})
 	defer ts.Cleanup()
@@ -108,13 +106,11 @@ func TestFetchStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	conn, err := ts.GetConn()
+	producerClient, err := client.NewProducerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer conn.Close()
-
-	producerClient := client.NewProducerClient(conn)
+	defer producerClient.Close()
 	for i := 0; i < 3; i++ {
 		_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
@@ -128,7 +124,11 @@ func TestFetchStream(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 
-	consumerClient := client.NewConsumerClient(conn)
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	if err != nil {
+		t.Fatalf("NewConsumerClient: %v", err)
+	}
+	defer consumerClient.Close()
 	stream, err := consumerClient.FetchStream(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
@@ -169,19 +169,17 @@ func TestFetchStream(t *testing.T) {
 }
 
 func TestCommitOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
 		return NewServer(comps.TopicManager, comps.ConsumerManager)
 	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewConsumerClient: %v", err)
 	}
-	defer conn.Close()
-
-	consumerClient := client.NewConsumerClient(conn)
+	defer consumerClient.Close()
 	resp, err := consumerClient.CommitOffset(ctx, &protocol.CommitOffsetRequest{
 		Id:     "test-consumer",
 		Topic:  "test-topic",
@@ -201,13 +199,11 @@ func TestCommitOffset_InvalidArguments(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewConsumerClient: %v", err)
 	}
-	defer conn.Close()
-
-	consumerClient := client.NewConsumerClient(conn)
+	defer consumerClient.Close()
 	_, err = consumerClient.CommitOffset(ctx, &protocol.CommitOffsetRequest{
 		Id:     "test-consumer",
 		Offset: 42,
@@ -218,19 +214,17 @@ func TestCommitOffset_InvalidArguments(t *testing.T) {
 }
 
 func TestFetchOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
 		return NewServer(comps.TopicManager, comps.ConsumerManager)
 	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewConsumerClient: %v", err)
 	}
-	defer conn.Close()
-
-	consumerClient := client.NewConsumerClient(conn)
+	defer consumerClient.Close()
 
 	resp, err := consumerClient.FetchOffset(ctx, &protocol.FetchOffsetRequest{
 		Id:    "test-consumer",
@@ -270,13 +264,11 @@ func TestFetchOffset_InvalidArguments(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewConsumerClient: %v", err)
 	}
-	defer conn.Close()
-
-	consumerClient := client.NewConsumerClient(conn)
+	defer consumerClient.Close()
 	_, err = consumerClient.FetchOffset(ctx, &protocol.FetchOffsetRequest{
 		Id: "test-consumer",
 	})
@@ -286,21 +278,19 @@ func TestFetchOffset_InvalidArguments(t *testing.T) {
 }
 
 func TestFetch_WithCachedOffset(t *testing.T) {
-	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+	ts := testutil.SetupTestServerWithTopic(t, "node-1", "consumer-test", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
 		return NewServer(comps.TopicManager, comps.ConsumerManager)
 	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	producerClient, err := client.NewProducerClient(ts.Broker.GetAddr())
 	if err != nil {
-		t.Fatalf("GetConn: %v", err)
+		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer conn.Close()
-
-	producerClient := client.NewProducerClient(conn)
+	defer producerClient.Close()
 	for i := 0; i < 3; i++ {
-		_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
+		_, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
 			Value: []byte("message"),
 			Acks:  protocol.AckLeader,
@@ -310,7 +300,11 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 		}
 	}
 
-	consumerClient := client.NewConsumerClient(conn)
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	if err != nil {
+		t.Fatalf("NewConsumerClient: %v", err)
+	}
+	defer consumerClient.Close()
 
 	_, err = consumerClient.Fetch(ctx, &protocol.FetchRequest{
 		Id:     "test-consumer",
@@ -343,19 +337,17 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 }
 
 func BenchmarkFetch(b *testing.B) {
-	ts := testutil.SetupTestServerWithTopic(b, "node-1", "consumer-bench", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.TransportHandler {
+	ts := testutil.SetupTestServerWithTopic(b, "node-1", "consumer-bench", "test-topic", 0, func(comps *testutil.TestServerComponents) testutil.RPCServer {
 		return NewServer(comps.TopicManager, comps.ConsumerManager)
 	})
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	conn, err := ts.GetConn()
+	producerClient, err := client.NewProducerClient(ts.Broker.GetAddr())
 	if err != nil {
-		b.Fatalf("GetConn: %v", err)
+		b.Fatalf("NewProducerClient: %v", err)
 	}
-	defer conn.Close()
-
-	producerClient := client.NewProducerClient(conn)
+	defer producerClient.Close()
 	for i := 0; i < 100; i++ {
 		_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
@@ -369,7 +361,11 @@ func BenchmarkFetch(b *testing.B) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	consumerClient := client.NewConsumerClient(conn)
+	consumerClient, err := client.NewConsumerClient(ts.Broker.GetAddr())
+	if err != nil {
+		b.Fatalf("NewConsumerClient: %v", err)
+	}
+	defer consumerClient.Close()
 	req := &protocol.FetchRequest{
 		Id:     "bench-consumer",
 		Topic:  "test-topic",
@@ -378,7 +374,7 @@ func BenchmarkFetch(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := consumerClient.Fetch(ctx, req)
+		_, err = consumerClient.Fetch(ctx, req)
 		if err != nil {
 			b.Fatalf("Fetch: %v", err)
 		}

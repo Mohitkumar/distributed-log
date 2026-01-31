@@ -16,12 +16,7 @@ func TestCreateTopic(t *testing.T) {
 	defer servers.cleanup()
 
 	ctx := context.Background()
-	leaderConn, err := servers.getLeaderConn()
-	if err != nil {
-		t.Fatalf("failed to get leader connection: %v", err)
-	}
-	defer leaderConn.Close()
-	replClient := client.NewReplicationClient(leaderConn)
+	replClient := client.NewReplicationClient(servers.getLeaderBroker())
 
 	topicName := "test-topic-1"
 	resp, err := replClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
@@ -48,13 +43,13 @@ func TestDeleteTopic(t *testing.T) {
 	defer servers.cleanup()
 
 	ctx := context.Background()
-	leaderConn, err := servers.getLeaderConn()
+	leaderBroker := servers.getLeaderBroker()
+	leaderClient := client.NewReplicationClient(leaderBroker)
+	producerClient, err := client.NewProducerClient(leaderBroker.GetAddr())
 	if err != nil {
-		t.Fatalf("failed to get leader connection: %v", err)
+		t.Fatalf("NewProducerClient: %v", err)
 	}
-	defer leaderConn.Close()
-	leaderClient := client.NewReplicationClient(leaderConn)
-	producerClient := client.NewProducerClient(leaderConn)
+	defer producerClient.Close()
 
 	topicName := "test-delete-topic"
 	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{

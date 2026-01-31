@@ -20,20 +20,20 @@ type testServers struct {
 	followerTopicMgr *node.TopicManager
 	leaderBaseDir    string
 	followerBaseDir  string
-	leaderLn         *transport.Listener
-	followerLn       *transport.Listener
+	leaderTr         *transport.Transport
+	followerTr       *transport.Transport
 	cleanup          func()
 }
 
-func (ts *testServers) getLeaderConn() (*transport.Conn, error) {
-	return ts.leaderBroker.GetConn()
+func (ts *testServers) getLeaderBroker() *broker.Broker {
+	return ts.leaderBroker
 }
 
-func (ts *testServers) getFollowerConn() (*transport.Conn, error) {
-	return ts.followerBroker.GetConn()
+func (ts *testServers) getFollowerBroker() *broker.Broker {
+	return ts.followerBroker
 }
 
-func setupServer(t *testing.T, bm *broker.BrokerManager, baseDir string, nodeID string, serverName string, tr *transport.Transport) (*transport.Listener, *node.TopicManager, error) {
+func setupServer(t *testing.T, bm *broker.BrokerManager, baseDir string, nodeID string, serverName string) (*transport.Transport, *node.TopicManager, error) {
 	t.Helper()
 
 	b := bm.GetBroker(nodeID)
@@ -51,29 +51,21 @@ func setupServer(t *testing.T, bm *broker.BrokerManager, baseDir string, nodeID 
 		return nil, nil, fmt.Errorf("create consumer manager: %w", err)
 	}
 
+	tr := transport.NewTransport()
+	srv := rpc.NewServer(topicMgr, consumerMgr)
+	srv.RegisterHandlers(tr)
 	ln, err := tr.Listen("127.0.0.1:0")
 	if err != nil {
 		return nil, nil, err
 	}
+	go tr.Serve(ln)
 
-	srv := rpc.NewServer(topicMgr, consumerMgr)
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go srv.ServeTransportConn(conn)
-		}
-	}()
-
-	return ln, topicMgr, nil
+	return tr, topicMgr, nil
 }
 
 func setupTestServers(t *testing.T) *testServers {
 	t.Helper()
 
-	tr := transport.NewTransport()
 	bm := broker.NewBrokerManager()
 	leaderBroker := broker.NewBroker("node-1", "127.0.0.1:0")
 	followerBroker := broker.NewBroker("node-2", "127.0.0.1:0")
@@ -83,18 +75,18 @@ func setupTestServers(t *testing.T) *testServers {
 	leaderBaseDir := path.Join(t.TempDir(), "leader")
 	followerBaseDir := path.Join(t.TempDir(), "follower")
 
-	leaderLn, leaderTopicMgr, err := setupServer(t, bm, leaderBaseDir, "node-1", "leader", tr)
+	leaderTr, leaderTopicMgr, err := setupServer(t, bm, leaderBaseDir, "node-1", "leader")
 	if err != nil {
 		t.Fatalf("setupLeaderServer error: %v", err)
 	}
-	leaderBroker.Addr = leaderLn.Addr().String()
+	leaderBroker.Addr = leaderTr.Addr()
 
-	followerLn, followerTopicMgr, err := setupServer(t, bm, followerBaseDir, "node-2", "follower", tr)
+	followerTr, followerTopicMgr, err := setupServer(t, bm, followerBaseDir, "node-2", "follower")
 	if err != nil {
-		_ = leaderLn.Close()
+		_ = leaderTr.Close()
 		t.Fatalf("setupFollowerServer error: %v", err)
 	}
-	followerBroker.Addr = followerLn.Addr().String()
+	followerBroker.Addr = followerTr.Addr()
 
 	time.Sleep(300 * time.Millisecond)
 
@@ -105,13 +97,13 @@ func setupTestServers(t *testing.T) *testServers {
 		followerTopicMgr: followerTopicMgr,
 		leaderBaseDir:    leaderBaseDir,
 		followerBaseDir:  followerBaseDir,
-		leaderLn:         leaderLn,
-		followerLn:       followerLn,
+		leaderTr:         leaderTr,
+		followerTr:       followerTr,
 		cleanup: func() {
 			_ = leaderBroker.Close()
 			_ = followerBroker.Close()
-			_ = leaderLn.Close()
-			_ = followerLn.Close()
+			_ = leaderTr.Close()
+			_ = followerTr.Close()
 		},
 	}
 }

@@ -93,14 +93,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 		replicaID := fmt.Sprintf("replica-%d", i)
 
 		// Create replica on remote broker via TCP transport
-		conn, err := replicaBroker.GetConn()
-		if err != nil {
-			// Cleanup on error
-			delete(tm.topics, topic)
-			logManager.Close()
-			return fmt.Errorf("failed to connect to broker %s: %w", replicaBroker.NodeID, err)
-		}
-		replicaClient := client.NewReplicationClient(conn)
+		replicaClient := client.NewReplicationClient(replicaBroker)
 		ctx := context.Background()
 		_, err = replicaClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
 			Topic:      topic,
@@ -144,13 +137,8 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 
 	// Delete replica from remote broker
 	for _, replica := range topicObj.replicas {
-		// Create client to replica broker to call DeleteReplica
-		conn, err := replica.broker.GetConn()
-		if err != nil {
-			return fmt.Errorf("failed to connect to broker %s: %w", replica.broker.NodeID, err)
-		}
-		replicaClient := client.NewReplicationClient(conn)
-		_, err = replicaClient.DeleteReplica(context.Background(), &protocol.DeleteReplicaRequest{
+		replicaClient := client.NewReplicationClient(replica.broker)
+		_, err := replicaClient.DeleteReplica(context.Background(), &protocol.DeleteReplicaRequest{
 			Topic:     topic,
 			ReplicaId: replica.ReplicaID,
 		})

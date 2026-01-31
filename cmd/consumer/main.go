@@ -9,7 +9,6 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/transport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -27,14 +26,11 @@ func main() {
 		Use:   "consumer",
 		Short: "Consume messages from a topic (streaming)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tr := transport.NewTransport()
-			conn, err := tr.Connect(addr)
+			consumerClient, err := client.NewConsumerClient(addr)
 			if err != nil {
 				return err
 			}
-			defer conn.Close()
-
-			consumerClient := client.NewConsumerClient(conn)
+			defer consumerClient.Close()
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

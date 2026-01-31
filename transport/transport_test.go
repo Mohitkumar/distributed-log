@@ -9,15 +9,15 @@ import (
 	"github.com/mohitkumar/mlog/protocol"
 )
 
-func TestTransport_ListenAndServe_Send(t *testing.T) {
+func TestTransport_ListenAndServe_TransportClient_Call(t *testing.T) {
 	addr := "127.0.0.1:19999"
-	srv := NewTransport(addr)
+	tr := NewTransport()
 
 	var received protocol.ProduceRequest
 	var receivedMu sync.Mutex
 	done := make(chan struct{})
 
-	srv.RegisterHandler(protocol.MsgProduce, func(ctx context.Context, msg any) (any, error) {
+	tr.RegisterHandler(protocol.MsgProduce, func(ctx context.Context, msg any) (any, error) {
 		receivedMu.Lock()
 		received = msg.(protocol.ProduceRequest)
 		receivedMu.Unlock()
@@ -26,14 +26,23 @@ func TestTransport_ListenAndServe_Send(t *testing.T) {
 	})
 
 	go func() {
-		_ = srv.ListenAndServe()
+		_ = tr.ListenAndServe(addr)
 	}()
 	time.Sleep(50 * time.Millisecond) // allow server to bind
 
-	client := NewTransport(addr)
-	req := protocol.ProduceRequest{Topic: "test", Value: []byte("ping"), Acks: protocol.AckLeader}
-	if err := client.Send(req); err != nil {
+	client, err := Dial(addr)
+	if err != nil {
 		t.Fatal(err)
+	}
+	defer client.Close()
+
+	req := protocol.ProduceRequest{Topic: "test", Value: []byte("ping"), Acks: protocol.AckLeader}
+	resp, err := client.Call(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.(protocol.ProduceResponse).Offset != 1 {
+		t.Errorf("expected offset 1, got %v", resp)
 	}
 
 	<-done
@@ -46,20 +55,16 @@ func TestTransport_ListenAndServe_Send(t *testing.T) {
 }
 
 func TestTransport_ListenAndServe_InvalidAddr(t *testing.T) {
-	tr := NewTransport("invalid:addr:here")
-	err := tr.ListenAndServe()
+	tr := NewTransport()
+	err := tr.ListenAndServe("invalid:addr:here")
 	if err == nil {
 		t.Fatal("expected error for invalid address")
 	}
 }
 
-func TestTransport_Send_Unreachable(t *testing.T) {
-	// Use an address that is not listening (no server).
-	addr := "127.0.0.1:19998"
-	client := NewTransport(addr)
-	req := protocol.ProduceRequest{Topic: "test", Value: []byte("x"), Acks: protocol.AckNone}
-	err := client.Send(req)
+func TestTransportClient_Dial_Unreachable(t *testing.T) {
+	_, err := Dial("127.0.0.1:19998")
 	if err == nil {
-		t.Fatal("expected error when sending to unreachable address")
+		t.Fatal("expected error when dialing unreachable address")
 	}
 }

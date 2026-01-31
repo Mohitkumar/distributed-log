@@ -10,51 +10,43 @@ type Broker struct {
 	NodeID string
 	Addr   string
 	mu     sync.Mutex
-	conn   *transport.Conn
-	tr     *transport.Transport
+	client *transport.TransportClient
 }
 
 func NewBroker(nodeID string, addr string) *Broker {
 	return &Broker{
 		NodeID: nodeID,
 		Addr:   addr,
-		tr:     transport.NewTransport(),
 	}
 }
 
-// GetConn returns the TCP transport connection, creating it if necessary.
-// Replication (and producer/consumer) use this connection for frame-based RPC.
-// This method is thread-safe and will lazily establish the connection on first call.
-func (b *Broker) GetConn() (*transport.Conn, error) {
+// GetClient returns the transport client for this broker, dialing once and caching the connection.
+func (b *Broker) GetClient() (*transport.TransportClient, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	if b.conn != nil {
-		return b.conn, nil
+	if b.client == nil {
+		client, err := transport.Dial(b.Addr)
+		if err != nil {
+			return nil, err
+		}
+		b.client = client
 	}
+	return b.client, nil
+}
 
-	conn, err := b.tr.Connect(b.Addr)
-	if err != nil {
-		return nil, err
-	}
-	b.conn = conn
-	return b.conn, nil
+func (b *Broker) GetAddr() string {
+	return b.Addr
 }
 
 func (b *Broker) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	if b.conn != nil {
-		err := b.conn.Close()
-		b.conn = nil
+	if b.client != nil {
+		err := b.client.Close()
+		b.client = nil
 		return err
 	}
 	return nil
-}
-
-func (b *Broker) GetAddr() string {
-	return b.Addr
 }
 
 type BrokerManager struct {

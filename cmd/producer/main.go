@@ -8,7 +8,6 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/transport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -25,14 +24,11 @@ func main() {
 		Use:   "producer",
 		Short: "Produce messages to a topic",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tr := transport.NewTransport()
-			conn, err := tr.Connect(addr)
+			producerClient, err := client.NewProducerClient(addr)
 			if err != nil {
 				return err
 			}
-			defer conn.Close()
-
-			producerClient := client.NewProducerClient(conn)
+			defer producerClient.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 

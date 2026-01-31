@@ -8,7 +8,6 @@ import (
 	"github.com/mohitkumar/mlog/consumer"
 	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/rpc"
-	"github.com/mohitkumar/mlog/transport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -25,14 +24,7 @@ func main() {
 		Use:   "server",
 		Short: "Run the mlog TCP transport server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tr := transport.NewTransport()
-			ln, err := tr.Listen(addr)
-			if err != nil {
-				return fmt.Errorf("listen %s: %w", addr, err)
-			}
-			defer ln.Close()
-
-			// Create self broker (connection will be established lazily when needed)
+			// Create self broker (clients dial this addr)
 			selfBroker := broker.NewBroker(nodeID, addr)
 
 			bm := broker.NewBrokerManager()
@@ -60,14 +52,9 @@ func main() {
 			}
 
 			srv := rpc.NewServer(topicMgr, consumerMgr)
-
-			for {
-				conn, err := ln.Accept()
-				if err != nil {
-					return err
-				}
-				go srv.ServeTransportConn(conn)
-			}
+			srv.Addr = addr
+			srv.Start() // blocks
+			return nil
 		},
 	}
 

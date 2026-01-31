@@ -104,12 +104,7 @@ func (n *Node) StartReplication() error {
 			return fmt.Errorf("leader broker not found at address %s", n.leaderAddr)
 		}
 
-		// Get transport connection from broker
-		conn, err := leaderBroker.GetConn()
-		if err != nil {
-			return fmt.Errorf("failed to connect to leader at %s: %w", n.leaderAddr, err)
-		}
-		n.replicationClient = client.NewReplicationClient(conn)
+		n.replicationClient = client.NewReplicationClient(leaderBroker)
 	}
 
 	n.mu.Lock()
