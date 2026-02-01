@@ -261,3 +261,113 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	t.Logf("ACK_ALL verified: %d messages replicated to follower in %v (replica LEO=%d, leader LEO=%d)",
 		n, produceDuration, replicaLEO, actualLEO)
 }
+
+
+const (
+	benchmarkReplicationNumMsgs   = 1000
+	benchmarkReplicationBatch    = 100
+	benchmarkReplicationPollMs   = 10
+	benchmarkReplicationTimeout  = 30 * time.Second
+)
+
+// waitReplicaCatchUp polls until replica LEO >= targetLEO or timeout. Returns catch-up duration.
+func (ts *testServers) waitReplicaCatchUp(topicName string, targetLEO uint64) (time.Duration, bool) {
+	deadline := time.Now().Add(benchmarkReplicationTimeout)
+	start := time.Now()
+	for time.Now().Before(deadline) {
+		replicaNode, err := ts.followerTopicMgr.GetReplica(topicName, "replica-0")
+		if err != nil || replicaNode.Log == nil {
+			time.Sleep(benchmarkReplicationPollMs * time.Millisecond)
+			continue
+		}
+		if replicaNode.Log.LEO() >= targetLEO {
+			return time.Since(start), true
+		}
+		time.Sleep(benchmarkReplicationPollMs * time.Millisecond)
+	}
+	return time.Since(start), false
+}
+
+// BenchmarkReplicationCatchUp measures how fast the replica catches up after the leader has produced messages.
+// It produces a fixed number of messages on the leader (AckLeader so replication is async), then measures
+// the time until the replica LEO reaches the leader LEO. Reports catch-up time and replication throughput (msgs/s).
+func BenchmarkReplicationCatchUp(b *testing.B) {
+	servers := setupTestServers(b)
+	defer servers.cleanup()
+
+	ctx := context.Background()
+	topicName := "bench-replication-catchup"
+
+	leaderClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		b.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        topicName,
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		b.Fatalf("CreateTopic: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+	if err != nil {
+		b.Fatalf("NewProducerClient: %v", err)
+	}
+	defer producerClient.Close()
+	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
+		Topic: topicName,
+		Value: []byte("warmup"),
+		Acks:  protocol.AckLeader,
+	})
+	if err != nil {
+		b.Fatalf("warmup produce: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	numMsgs := benchmarkReplicationNumMsgs
+	batchSize := benchmarkReplicationBatch
+
+	var totalCatchUp time.Duration
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Produce numMsgs on leader (AckLeader = don't wait for replica)
+		for j := 0; j < numMsgs; j += batchSize {
+			n := batchSize
+			if j+batchSize > numMsgs {
+				n = numMsgs - j
+			}
+			values := make([][]byte, n)
+			for k := 0; k < n; k++ {
+				values[k] = []byte(fmt.Sprintf("msg-%d-%d", i, j+k))
+			}
+			_, err = producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
+				Topic:  topicName,
+				Values: values,
+				Acks:   protocol.AckLeader,
+			})
+			if err != nil {
+				b.Fatalf("ProduceBatch: %v", err)
+			}
+		}
+		leaderNode, err := servers.leaderTopicMgr.GetLeader(topicName)
+		if err != nil {
+			b.Fatalf("GetLeader: %v", err)
+		}
+		targetLEO := leaderNode.Log.LEO()
+		catchUp, ok := servers.waitReplicaCatchUp(topicName, targetLEO)
+		totalCatchUp += catchUp
+		if !ok {
+			b.Fatalf("replica did not catch up within %v (target LEO %d)", benchmarkReplicationTimeout, targetLEO)
+		}
+	}
+	elapsed := b.Elapsed()
+	secs := elapsed.Seconds()
+	if secs > 0 {
+		avgCatchUp := totalCatchUp.Seconds() / float64(b.N)
+		b.ReportMetric(avgCatchUp, "catch_up_sec/op")
+		b.ReportMetric(float64(numMsgs)/avgCatchUp, "replication_msgs/s")
+		b.ReportMetric(float64(b.N)*float64(numMsgs)/secs, "produce_msgs/s")
+	}
+}

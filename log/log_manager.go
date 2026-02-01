@@ -1,7 +1,6 @@
 package log
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
@@ -99,28 +98,4 @@ func (l *LogManager) ReadUncommitted(offset uint64) ([]byte, error) {
 // Stream format: for each record, [Offset 8 bytes][Len 4 bytes][Value]. Use for replication with raw bytes.
 func (lm *LogManager) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	return lm.Log.ReaderFrom(startOffset)
-}
-
-// AppendRawChunk parses chunk as segment-format records [Offset 8][Len 4][Value] and appends each value to the log.
-// Returns the number of records appended. Used by replica when receiving raw replication data.
-func (lm *LogManager) AppendRawChunk(chunk []byte) (n int, err error) {
-	const headerSize = 8 + 4 // offset 8, len 4
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-	for len(chunk) >= headerSize {
-		msgLen := binary.BigEndian.Uint32(chunk[8:12])
-		recordSize := headerSize + int(msgLen)
-		if len(chunk) < recordSize {
-			break
-		}
-		value := chunk[headerSize:recordSize]
-		offset, err := lm.Log.Append(value)
-		if err != nil {
-			return n, err
-		}
-		lm.leo = offset + 1
-		n++
-		chunk = chunk[recordSize:]
-	}
-	return n, nil
 }

@@ -354,12 +354,7 @@ func (t *Topic) StopReplication() {
 	})
 }
 
-// replicationInterval is how often a replica polls the leader for new data.
-const replicationInterval = 200 * time.Millisecond
-
 func (t *Topic) runReplication(ctx context.Context) {
-	ticker := time.NewTicker(replicationInterval)
-	defer ticker.Stop()
 	backoff := 50 * time.Millisecond
 	maxBackoff := 1 * time.Second
 
@@ -369,23 +364,26 @@ func (t *Topic) runReplication(ctx context.Context) {
 			return
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			currentOffset := t.Log.LEO()
-			req := &protocol.ReplicateRequest{
-				Topic:     t.Name,
-				Offset:    currentOffset,
-				BatchSize: 1000,
-			}
-			if err := t.streamClient.ReplicateStream(ctx, req); err != nil {
-				time.Sleep(backoff)
-				if backoff < maxBackoff {
-					backoff *= 2
-				}
-				continue
-			}
-			backoff = 50 * time.Millisecond
-			t.replicateStream(ctx)
+		default:
 		}
+
+		// Send one request to leader (non-blocking). Then block in apply loop until stream is done.
+		currentOffset := t.Log.LEO()
+		req := &protocol.ReplicateRequest{
+			Topic:     t.Name,
+			Offset:    currentOffset,
+			BatchSize: 1000,
+		}
+		if err := t.streamClient.ReplicateStream(ctx, req); err != nil {
+			fmt.Println("Error in replicate stream, reconnecting", err)
+			time.Sleep(backoff)
+			if backoff < maxBackoff {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = 50 * time.Millisecond
+		t.replicateStream(ctx)
 	}
 }
 
@@ -398,20 +396,34 @@ func (t *Topic) replicateStream(ctx context.Context) {
 			return
 		default:
 		}
+		if t.Log == nil {
+			return
+		}
 
 		resp, err := t.streamClient.Recv()
 		if err != nil {
 			break
 		}
 		if len(resp.RawChunk) > 0 {
-			_, appendErr := t.Log.AppendRawChunk(resp.RawChunk)
+			records, decodeErr := protocol.DecodeReplicationBatch(resp.RawChunk)
+			if decodeErr != nil {
+				break
+			}
+			var appendErr error
+			for _, rec := range records {
+				_, appendErr = t.Log.Append(rec.Value)
+				if appendErr != nil {
+					break
+				}
+			}
 			if appendErr != nil {
 				break
 			}
 		}
 		if resp.EndOfStream {
-			fmt.Println("EndOfStream", t.Log.LEO())
-			_ = t.reportLEO(ctx, t.Log.LEO())
+			if t.Log != nil {
+				_ = t.reportLEO(ctx, t.Log.LEO())
+			}
 			break
 		}
 	}

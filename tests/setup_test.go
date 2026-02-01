@@ -26,10 +26,10 @@ func (ts *testServers) getFollowerAddr() string {
 	return ts.follower.Addr
 }
 
-func setupTestServers(t *testing.T) *testServers {
-	t.Helper()
+func setupTestServers(tb testing.TB) *testServers {
+	tb.Helper()
 
-	leader, follower := rpc.SetupTwoTestServers(t, "leader", "follower")
+	leader, follower := rpc.SetupTwoTestServers(tb, "leader", "follower")
 	time.Sleep(300 * time.Millisecond)
 
 	return &testServers{

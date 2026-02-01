@@ -161,54 +161,6 @@ func buildRawChunk(entries []rawChunkEntry) []byte {
 	return buf
 }
 
-func TestLogManager_AppendRawChunk(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "test-log-raw")
-	lm, err := NewLogManager(dir)
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-
-	messages := []string{"msg-0", "msg-1", "msg-2"}
-	entries := make([]rawChunkEntry, len(messages))
-	for i, m := range messages {
-		entries[i] = rawChunkEntry{offset: uint64(i), value: []byte(m)}
-	}
-	chunk := buildRawChunk(entries)
-
-	n, err := lm.AppendRawChunk(chunk)
-	require.NoError(t, err)
-	require.Equal(t, len(messages), n, "expected %d records appended", len(messages))
-
-	require.Equal(t, uint64(len(messages)), lm.LEO(), "LEO should equal number of appended messages")
-
-	for i, want := range messages {
-		raw, err := lm.ReadUncommitted(uint64(i))
-		require.NoError(t, err)
-		rec, err := segment.Decode(raw)
-		require.NoError(t, err)
-		require.Equal(t, want, string(rec.Value), "entry %d value", i)
-	}
-
-	// Append a second chunk (e.g. next batch from replication); LEO should advance
-	more := []rawChunkEntry{
-		{offset: 3, value: []byte("msg-3")},
-		{offset: 4, value: []byte("msg-4")},
-	}
-	chunk2 := buildRawChunk(more)
-	n2, err := lm.AppendRawChunk(chunk2)
-	require.NoError(t, err)
-	require.Equal(t, 2, n2)
-	require.Equal(t, uint64(5), lm.LEO(), "LEO after second chunk")
-
-	allMessages := append(messages, "msg-3", "msg-4")
-	for i, want := range allMessages {
-		raw, err := lm.ReadUncommitted(uint64(i))
-		require.NoError(t, err)
-		rec, err := segment.Decode(raw)
-		require.NoError(t, err)
-		require.Equal(t, want, string(rec.Value), "entry %d value", i)
-	}
-}
-
 func TestLogLeoRestore(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "test-log")
 	lm, err := NewLogManager(dir)

@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -343,6 +344,85 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 			payload = raw[offWidth:]
 		}
 		if string(payload) != want {
+			t.Fatalf("entry %d: got %q, want %q", i, string(payload), want)
+		}
+	}
+}
+
+func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
+	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
+	defer leaderSrv.Cleanup()
+	defer followerSrv.Cleanup()
+
+	topicName := "repl-topic2"
+	ctx := context.Background()
+	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        topicName,
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic via client: %v", err)
+	}
+	producerClient, err := client.NewProducerClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewProducerClient: %v", err)
+	}
+	defer producerClient.Close()
+
+	values := make([][]byte, 10000)
+	for i := 0; i < 10000; i++ {
+		values[i] = []byte(fmt.Sprintf("message-%d", i))
+	}
+	_, err = producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
+		Topic:  topicName,
+		Values: values,
+		Acks:   protocol.AckLeader,
+	})
+	if err != nil {
+		t.Fatalf("ProduceBatch: %v", err)
+	}
+
+	// Wait for replication to catch up (follower replica fetches from leader)
+	// Then verify follower's replica log has the same messages
+	replicaNode, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	if err != nil {
+		t.Fatalf("GetReplica: %v", err)
+	}
+	if replicaNode.Log == nil {
+		t.Fatal("replica should have Log")
+	}
+
+	// Poll until we have at least len(messages) entries (replication may be async)
+	var lastLEO uint64
+	for try := 0; try < 50; try++ {
+		lastLEO = replicaNode.Log.LEO()
+		if lastLEO >= uint64(len(values)) {
+			break
+		}
+		if try < 49 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if lastLEO < uint64(len(values)) {
+		t.Fatalf("replica LEO %d < %d (replication did not catch up)", lastLEO, len(values))
+	}
+
+	// Replica stores payload only (from raw chunk); segment.Read returns [offset 8][payload].
+	const offWidth = 8
+	for i, want := range values {
+		raw, err := replicaNode.Log.ReadUncommitted(uint64(i))
+		if err != nil {
+			t.Fatalf("ReadUncommitted(%d): %v", i, err)
+		}
+		payload := raw
+		if len(raw) >= offWidth {
+			payload = raw[offWidth:]
+		}
+		if string(payload) != string(want) {
 			t.Fatalf("entry %d: got %q, want %q", i, string(payload), want)
 		}
 	}
