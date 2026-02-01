@@ -4,27 +4,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/broker"
-	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/rpc"
+	"github.com/mohitkumar/mlog/topic"
 )
 
 type testServers struct {
-	leaderBroker     *broker.Broker
-	followerBroker   *broker.Broker
-	leaderTopicMgr   *node.TopicManager
-	followerTopicMgr *node.TopicManager
-	leaderBaseDir    string
-	followerBaseDir  string
-	cleanup          func()
+	leader            *rpc.TestServer
+	follower          *rpc.TestServer
+	leaderTopicMgr    *topic.TopicManager
+	followerTopicMgr  *topic.TopicManager
+	leaderBaseDir     string
+	followerBaseDir   string
+	cleanup           func()
 }
 
-func (ts *testServers) getLeaderBroker() *broker.Broker {
-	return ts.leaderBroker
+func (ts *testServers) getLeaderAddr() string {
+	return ts.leader.Addr
 }
 
-func (ts *testServers) getFollowerBroker() *broker.Broker {
-	return ts.followerBroker
+func (ts *testServers) getFollowerAddr() string {
+	return ts.follower.Addr
 }
 
 func setupTestServers(t *testing.T) *testServers {
@@ -34,8 +33,8 @@ func setupTestServers(t *testing.T) *testServers {
 	time.Sleep(300 * time.Millisecond)
 
 	return &testServers{
-		leaderBroker:     leader.Broker,
-		followerBroker:   follower.Broker,
+		leader:           leader,
+		follower:         follower,
 		leaderTopicMgr:   leader.TopicManager,
 		followerTopicMgr: follower.TopicManager,
 		leaderBaseDir:    leader.BaseDir,

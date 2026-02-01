@@ -1,6 +1,7 @@
 package log
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -143,6 +144,49 @@ func (l *Log) Reader() io.Reader {
 		readers = append(readers, r)
 	}
 	return io.MultiReader(readers...)
+}
+
+func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
+	l.mu.RLock()
+	if l.activeSegment != nil {
+		_ = l.activeSegment.Flush()
+	}
+	endOffset := uint64(0)
+	if l.activeSegment != nil {
+		endOffset = l.activeSegment.NextOffset
+	}
+	if startOffset >= endOffset {
+		l.mu.RUnlock()
+		return bytes.NewReader(nil), nil
+	}
+	var targetIdx int = -1
+	for i, seg := range l.segments {
+		if startOffset >= seg.BaseOffset && startOffset < seg.NextOffset {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		l.mu.RUnlock()
+		return nil, fmt.Errorf("offset %d out of range", startOffset)
+	}
+	seg := l.segments[targetIdx]
+	r, err := seg.NewStreamingReader(startOffset)
+	if err != nil {
+		l.mu.RUnlock()
+		return nil, err
+	}
+	if targetIdx == len(l.segments)-1 {
+		l.mu.RUnlock()
+		return r, nil
+	}
+	readers := make([]io.Reader, 0, len(l.segments)-targetIdx)
+	readers = append(readers, r)
+	for i := targetIdx + 1; i < len(l.segments); i++ {
+		readers = append(readers, l.segments[i].Reader())
+	}
+	l.mu.RUnlock()
+	return io.MultiReader(readers...), nil
 }
 
 func (l *Log) Delete() error {

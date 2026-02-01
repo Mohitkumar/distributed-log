@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mohitkumar/mlog/broker"
 	"github.com/mohitkumar/mlog/consumer"
-	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/rpc"
+	"github.com/mohitkumar/mlog/topic"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -24,24 +23,20 @@ func main() {
 		Use:   "server",
 		Short: "Run the mlog TCP transport server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Create self broker (clients dial this addr)
-			selfBroker := broker.NewBroker(nodeID, addr)
-
-			bm := broker.NewBrokerManager()
-			bm.AddBroker(selfBroker)
-
-			// Add peers from config: "nodeID=addr"
-			for _, p := range peers {
-				var peerNode, peerAddr string
-				n, _ := fmt.Sscanf(p, "%[^=]=%s", &peerNode, &peerAddr)
-				if n != 2 {
-					continue
+			getOtherNodes := func() []topic.NodeInfo {
+				var nodes []topic.NodeInfo
+				for _, p := range peers {
+					var peerNode, peerAddr string
+					n, _ := fmt.Sscanf(p, "%[^=]=%s", &peerNode, &peerAddr)
+					if n != 2 {
+						continue
+					}
+					nodes = append(nodes, topic.NodeInfo{NodeID: peerNode, Addr: peerAddr})
 				}
-				b := broker.NewBroker(peerNode, peerAddr)
-				bm.AddBroker(b)
+				return nodes
 			}
 
-			topicMgr, err := node.NewTopicManager(dataDir, bm, selfBroker)
+			topicMgr, err := topic.NewTopicManager(dataDir, nodeID, addr, getOtherNodes)
 			if err != nil {
 				return fmt.Errorf("create topic manager: %w", err)
 			}
@@ -61,8 +56,8 @@ func main() {
 
 	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP listen address")
 	rootCmd.Flags().StringVar(&dataDir, "data-dir", "/tmp/mlog", "data directory")
-	rootCmd.Flags().StringVar(&nodeID, "node-id", "node-1", "broker node ID")
-	rootCmd.Flags().StringSliceVar(&peers, "peer", nil, "peer brokers (nodeID=addr), repeatable")
+	rootCmd.Flags().StringVar(&nodeID, "node-id", "node-1", "node ID")
+	rootCmd.Flags().StringSliceVar(&peers, "peer", nil, "peer nodes (nodeID=addr), repeatable")
 
 	viper.SetEnvPrefix("mlog")
 	viper.AutomaticEnv()

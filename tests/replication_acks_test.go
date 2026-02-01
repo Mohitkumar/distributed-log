@@ -21,9 +21,12 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	ctx := context.Background()
 	topicName := "ack-leader-10k-topic"
 
-	// Create topic on leader
-	leaderClient := client.NewReplicationClient(servers.getLeaderBroker())
-	_, err := leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+	// Create topic on leader with 1 replica (leader creates replica on follower via RPC)
+	leaderClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewReplicationClient: %v", err)
+	}
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -31,25 +34,11 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	// Wait for topic creation
-	time.Sleep(200 * time.Millisecond)
-
-	// Create replica on follower
-	replicationClient := client.NewReplicationClient(servers.getFollowerBroker())
-	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
-		Topic:      topicName,
-		ReplicaId:  "replica-0",
-		LeaderAddr: servers.leaderBroker.Addr,
-	})
-	if err != nil {
-		t.Fatalf("CreateReplica: %v", err)
-	}
-
-	// Wait for replica to start
+	// Wait for topic and replica to be ready
 	time.Sleep(500 * time.Millisecond)
 
 	// Produce warmup message
-	producerClient, err := client.NewProducerClient(servers.getLeaderBroker().GetAddr())
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -159,9 +148,12 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	ctx := context.Background()
 	topicName := "ack-all-10k-topic"
 
-	// Create topic on leader
-	leaderClient := client.NewReplicationClient(servers.getLeaderBroker())
-	_, err := leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+	// Create topic on leader with 1 replica (leader creates replica on follower via RPC)
+	leaderClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewReplicationClient: %v", err)
+	}
+	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
@@ -169,25 +161,11 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	// Wait for topic creation
-	time.Sleep(200 * time.Millisecond)
-
-	// Create replica on follower
-	replicationClient := client.NewReplicationClient(servers.getFollowerBroker())
-	_, err = replicationClient.CreateReplica(ctx, &protocol.CreateReplicaRequest{
-		Topic:      topicName,
-		ReplicaId:  "replica-0",
-		LeaderAddr: servers.leaderBroker.Addr,
-	})
-	if err != nil {
-		t.Fatalf("CreateReplica: %v", err)
-	}
-
-	// Wait for replica to start
+	// Wait for topic and replica to be ready
 	time.Sleep(500 * time.Millisecond)
 
 	// Produce warmup message
-	producerClient, err := client.NewProducerClient(servers.getLeaderBroker().GetAddr())
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}

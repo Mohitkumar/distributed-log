@@ -4,20 +4,20 @@ import (
 	"context"
 
 	consumermgr "github.com/mohitkumar/mlog/consumer"
-	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/topic"
 	"github.com/mohitkumar/mlog/transport"
 )
 
 // RpcServer holds topic manager and consumer manager for TCP transport RPCs.
 type RpcServer struct {
 	Addr            string
-	topicManager    *node.TopicManager
+	topicManager    *topic.TopicManager
 	consumerManager *consumermgr.ConsumerManager
 	transport       *transport.Transport
 }
 
-func NewRpcServer(addr string, topicManager *node.TopicManager, consumerManager *consumermgr.ConsumerManager) *RpcServer {
+func NewRpcServer(addr string, topicManager *topic.TopicManager, consumerManager *consumermgr.ConsumerManager) *RpcServer {
 	srv := &RpcServer{
 		Addr:            addr,
 		topicManager:    topicManager,
@@ -43,10 +43,7 @@ func (s *RpcServer) RegisterHandlers() {
 		r := req.(protocol.RecordLEORequest)
 		return s.RecordLEO(ctx, &r)
 	})
-	s.transport.RegisterHandler(protocol.MsgReplicateStream, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.ReplicateRequest)
-		return s.Replicate(ctx, &r)
-	})
+	s.transport.RegisterStreamHandler(protocol.MsgReplicateStream, s.handleReplicateStream)
 	// Producer
 	s.transport.RegisterHandler(protocol.MsgProduce, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.ProduceRequest)
@@ -80,7 +77,6 @@ func (s *RpcServer) RegisterHandlers() {
 	})
 }
 
-// Start binds to Addr (use "127.0.0.1:0" for dynamic port), sets Addr to the bound address, and serves in a goroutine.
 func (s *RpcServer) Start() error {
 	ln, err := s.transport.Listen(s.Addr)
 	if err != nil {

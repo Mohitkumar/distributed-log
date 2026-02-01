@@ -41,8 +41,8 @@ type ReplicateRequest struct {
 	BatchSize uint32
 }
 type ReplicateResponse struct {
-	LastOffset uint64
-	Entries    []*LogEntry
+	RawChunk    []byte // raw segment-format records: [Offset 8][Len 4][Value]...
+	EndOfStream bool   // when true, leader has sent all data for this round; replica can send RecordLEO and next ReplicateRequest
 }
 
 // Replication types (replace api/replication).

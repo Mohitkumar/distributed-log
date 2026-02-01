@@ -2,28 +2,60 @@ package client
 
 import (
 	"context"
-	"io"
 
-	"github.com/mohitkumar/mlog/broker"
 	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/transport"
 )
 
-// ReplicationClient performs replication and leader RPCs via a broker (used within the cluster).
-type ReplicationClient struct {
-	b *broker.Broker
+// ReplicationStreamClient is a dedicated client for the replication stream only.
+// It sends one ReplicateRequest and then reads ReplicateResponse frames until EndOfStream.
+// Use this for replication; use ReplicationClient for RecordLEO and other RPCs.
+type ReplicationStreamClient struct {
+	tc *transport.TransportClient
 }
 
-// NewReplicationClient returns a client that uses the broker's transport (shared connection).
-func NewReplicationClient(b *broker.Broker) *ReplicationClient {
-	return &ReplicationClient{b: b}
-}
-
-func (c *ReplicationClient) CreateReplica(ctx context.Context, req *protocol.CreateReplicaRequest) (*protocol.CreateReplicaResponse, error) {
-	tc, err := c.b.GetClient()
+// NewReplicationStreamClient dials addr and returns a client used only for ReplicateStream.
+func NewReplicationStreamClient(addr string) (*ReplicationStreamClient, error) {
+	tc, err := transport.Dial(addr)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := tc.Call(*req)
+	return &ReplicationStreamClient{tc: tc}, nil
+}
+
+// ReplicateStream sends one ReplicateRequest on the connection; the leader then streams raw bytes until EndOfStream.
+// Call Recv() in a loop to read each ReplicateResponse (RawChunk + EndOfStream).
+func (c *ReplicationStreamClient) ReplicateStream(ctx context.Context, req *protocol.ReplicateRequest) error {
+	return c.tc.Write(*req)
+}
+
+// Recv reads the next ReplicateResponse from the stream. Call after ReplicateStream; loop until resp.EndOfStream.
+func (c *ReplicationStreamClient) Recv() (*protocol.ReplicateResponse, error) {
+	resp, err := c.tc.Read()
+	if err != nil {
+		return nil, err
+	}
+	rep := resp.(protocol.ReplicateResponse)
+	return &rep, nil
+}
+
+// RemoteClient performs request-response RPCs to the leader (CreateReplica, DeleteReplica, RecordLEO, etc.).
+// Do not use for ReplicateStream; use ReplicationStreamClient for the replication stream.
+type RemoteClient struct {
+	tc *transport.TransportClient
+}
+
+// NewRemoteClient dials addr and returns a client for request-response RPCs.
+func NewRemoteClient(addr string) (*RemoteClient, error) {
+	tc, err := transport.Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+	return &RemoteClient{tc: tc}, nil
+}
+
+func (c *RemoteClient) CreateReplica(ctx context.Context, req *protocol.CreateReplicaRequest) (*protocol.CreateReplicaResponse, error) {
+	resp, err := c.tc.Call(*req)
 	if err != nil {
 		return nil, err
 	}
@@ -31,12 +63,8 @@ func (c *ReplicationClient) CreateReplica(ctx context.Context, req *protocol.Cre
 	return &r, nil
 }
 
-func (c *ReplicationClient) DeleteReplica(ctx context.Context, req *protocol.DeleteReplicaRequest) (*protocol.DeleteReplicaResponse, error) {
-	tc, err := c.b.GetClient()
-	if err != nil {
-		return nil, err
-	}
-	resp, err := tc.Call(*req)
+func (c *RemoteClient) DeleteReplica(ctx context.Context, req *protocol.DeleteReplicaRequest) (*protocol.DeleteReplicaResponse, error) {
+	resp, err := c.tc.Call(*req)
 	if err != nil {
 		return nil, err
 	}
@@ -44,47 +72,8 @@ func (c *ReplicationClient) DeleteReplica(ctx context.Context, req *protocol.Del
 	return &r, nil
 }
 
-// ReplicateStream returns a reader that fetches batches via repeated Replicate RPCs.
-func (c *ReplicationClient) ReplicateStream(ctx context.Context, req *protocol.ReplicateRequest) (ReplicateStreamReader, error) {
-	return &replicateStreamReader{b: c.b, req: *req}, nil
-}
-
-// ReplicateStreamReader reads ReplicateResponse messages.
-type ReplicateStreamReader interface {
-	Recv() (*protocol.ReplicateResponse, error)
-}
-
-type replicateStreamReader struct {
-	b   *broker.Broker
-	req protocol.ReplicateRequest
-}
-
-func (r *replicateStreamReader) Recv() (*protocol.ReplicateResponse, error) {
-	tc, err := r.b.GetClient()
-	if err != nil {
-		return nil, err
-	}
-	resp, err := tc.Call(r.req)
-	if err != nil {
-		if err == io.EOF {
-			return nil, err
-		}
-		return nil, err
-	}
-	rep := resp.(protocol.ReplicateResponse)
-	out := &rep
-	if len(rep.Entries) > 0 {
-		r.req.Offset = rep.LastOffset + 1
-	}
-	return out, nil
-}
-
-func (c *ReplicationClient) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
-	tc, err := c.b.GetClient()
-	if err != nil {
-		return nil, err
-	}
-	resp, err := tc.Call(*req)
+func (c *RemoteClient) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
+	resp, err := c.tc.Call(*req)
 	if err != nil {
 		return nil, err
 	}
@@ -92,12 +81,8 @@ func (c *ReplicationClient) CreateTopic(ctx context.Context, req *protocol.Creat
 	return &r, nil
 }
 
-func (c *ReplicationClient) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
-	tc, err := c.b.GetClient()
-	if err != nil {
-		return nil, err
-	}
-	resp, err := tc.Call(*req)
+func (c *RemoteClient) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
+	resp, err := c.tc.Call(*req)
 	if err != nil {
 		return nil, err
 	}
@@ -105,12 +90,8 @@ func (c *ReplicationClient) DeleteTopic(ctx context.Context, req *protocol.Delet
 	return &r, nil
 }
 
-func (c *ReplicationClient) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
-	tc, err := c.b.GetClient()
-	if err != nil {
-		return nil, err
-	}
-	resp, err := tc.Call(*req)
+func (c *RemoteClient) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
+	resp, err := c.tc.Call(*req)
 	if err != nil {
 		return nil, err
 	}

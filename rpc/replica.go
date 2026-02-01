@@ -41,38 +41,3 @@ func (s *RpcServer) DeleteReplica(ctx context.Context, req *protocol.DeleteRepli
 
 	return &protocol.DeleteReplicaResponse{}, nil
 }
-
-// Replicate returns one batch of log entries from the leader for the given topic/offset (handler-style; client may call in a loop for streaming).
-func (s *RpcServer) Replicate(ctx context.Context, req *protocol.ReplicateRequest) (*protocol.ReplicateResponse, error) {
-	leaderNode, err := s.topicManager.GetLeader(req.Topic)
-	if err != nil {
-		return nil, err
-	}
-	batchSize := req.BatchSize
-	if batchSize == 0 {
-		batchSize = 1000
-	}
-	currentOffset := req.Offset
-	endExclusive := leaderNode.Log.LEO()
-	entries := make([]*protocol.LogEntry, 0, batchSize)
-	for i := 0; i < int(batchSize); i++ {
-		endExclusive = leaderNode.Log.LEO()
-		if currentOffset >= endExclusive {
-			break
-		}
-		data, err := leaderNode.Log.ReadUncommitted(currentOffset)
-		if err != nil {
-			break
-		}
-		entries = append(entries, &protocol.LogEntry{Offset: currentOffset, Value: data})
-		currentOffset++
-	}
-	var lastOffset uint64
-	if len(entries) > 0 {
-		lastOffset = currentOffset - 1
-	}
-	return &protocol.ReplicateResponse{
-		LastOffset: lastOffset,
-		Entries:    entries,
-	}, nil
-}

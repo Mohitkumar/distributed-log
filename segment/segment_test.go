@@ -190,6 +190,92 @@ func TestLoadExistingSegmentLarge(t *testing.T) {
 	}
 }
 
+func TestSegmentNewStreamingReader(t *testing.T) {
+	segment, _, teardown := setupTestSegment(t)
+	defer teardown()
+
+	records := [][]byte{
+		[]byte("first record"),
+		[]byte("second record"),
+		[]byte("third record"),
+	}
+
+	for _, r := range records {
+		_, err := segment.Append(r)
+		if err != nil {
+			t.Fatalf("failed to append record: %v", err)
+		}
+	}
+
+	reader, err := segment.NewStreamingReader(0)
+	if err != nil {
+		t.Fatalf("failed to create streaming reader: %v", err)
+	}
+
+	for _, r := range records {
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
+		require.NoError(t, err)
+		require.Equal(t, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
+
+		payloadBuf := make([]byte, size)
+		n, err = reader.Read(payloadBuf)
+		require.NoError(t, err)
+		require.Equal(t, int(size), n)
+		require.Equal(t, string(r), string(payloadBuf))
+	}
+}
+
+func TestSegmentStreamingReaderFromMiddle(t *testing.T) {
+	segment, _, teardown := setupTestSegment(t)
+	defer teardown()
+
+	for i := 0; i < 10000; i++ {
+		_, err := segment.Append([]byte("test record " + strconv.Itoa(i)))
+		if err != nil {
+			t.Fatalf("failed to append record: %v", err)
+		}
+	}
+
+	reader, err := segment.NewStreamingReader(5000)
+	if err != nil {
+		t.Fatalf("failed to create streaming reader: %v", err)
+	}
+
+	for i := 5000; i < 10000; i++ {
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
+		require.NoError(t, err)
+		require.Equal(t, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
+
+		payloadBuf := make([]byte, size)
+		n, err = reader.Read(payloadBuf)
+		require.NoError(t, err)
+		require.Equal(t, int(size), n)
+		require.Equal(t, string("test record "+strconv.Itoa(i)), string(payloadBuf))
+	}
+
+	reader, err = segment.NewStreamingReader(0)
+	if err != nil {
+		t.Fatalf("failed to create streaming reader: %v", err)
+	}
+	for i := 0; i < 10000; i++ {
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
+		require.NoError(t, err)
+		require.Equal(t, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
+
+		payloadBuf := make([]byte, size)
+		n, err = reader.Read(payloadBuf)
+		require.NoError(t, err)
+		require.Equal(t, int(size), n)
+		require.Equal(t, string("test record "+strconv.Itoa(i)), string(payloadBuf))
+	}
+}
+
 func TestSegmentReader(t *testing.T) {
 	segment, _, teardown := setupTestSegment(t)
 	defer teardown()

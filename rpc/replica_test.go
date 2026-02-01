@@ -2,15 +2,34 @@ package rpc
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/broker"
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
 )
+
+// parseRawChunk parses segment-format [Offset 8][Len 4][Value]... into LogEntries (for tests).
+func parseRawChunk(chunk []byte) []*protocol.LogEntry {
+	const headerSize = 8 + 4
+	var entries []*protocol.LogEntry
+	for len(chunk) >= headerSize {
+		offset := binary.BigEndian.Uint64(chunk[0:8])
+		msgLen := binary.BigEndian.Uint32(chunk[8:12])
+		recordSize := headerSize + int(msgLen)
+		if len(chunk) < recordSize {
+			break
+		}
+		value := make([]byte, msgLen)
+		copy(value, chunk[headerSize:recordSize])
+		entries = append(entries, &protocol.LogEntry{Offset: offset, Value: value})
+		chunk = chunk[recordSize:]
+	}
+	return entries
+}
 
 func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader", "follower")
@@ -18,32 +37,58 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	defer followerSrv.Cleanup()
 
 	topicName := "test-topic"
+	ctx := context.Background()
 
-	// Create topic on leader with 1 replica (leader will CreateReplica on follower via RPC)
-	if err := leaderSrv.TopicManager.CreateTopic(topicName, 1); err != nil {
-		t.Fatalf("CreateTopic on leader: %v", err)
+	// Create topic via ReplicationClient (RPC to leader); leader will CreateReplica on follower via RPC
+	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewReplicationClient: %v", err)
+	}
+	resp, err := remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        topicName,
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic via client: %v", err)
+	}
+	if resp.Topic != topicName {
+		t.Fatalf("CreateTopic response topic = %q, want %q", resp.Topic, topicName)
 	}
 
-	// Verify topic exists on leader (leader has the topic with a leader node)
-	leaderNode, err := leaderSrv.TopicManager.GetLeader(topicName)
+	// Verify topic exists on leader (leader has the topic with leader log)
+	leaderView, err := leaderSrv.TopicManager.GetLeader(topicName)
 	if err != nil {
 		t.Fatalf("GetLeader on leader: %v", err)
 	}
-	if leaderNode == nil || !leaderNode.IsLeader {
-		t.Fatal("leader should have leader node for topic")
+	if leaderView == nil || leaderView.Log == nil {
+		t.Fatal("leader should have leader log for topic")
+	}
+
+	// Verify leader topic directory exists (BaseDir/topic)
+	leaderTopicDir := filepath.Join(leaderSrv.BaseDir, topicName)
+	if fi, err := os.Stat(leaderTopicDir); err != nil {
+		t.Fatalf("leader topic dir %q should exist: %v", leaderTopicDir, err)
+	} else if !fi.IsDir() {
+		t.Fatalf("leader topic path %q should be a directory", leaderTopicDir)
 	}
 
 	// Verify topic/replica exists on follower (follower has replica-0 for this topic)
-	replicaNode, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	replicaView, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
 	if err != nil {
 		t.Fatalf("GetReplica on follower: %v (creating topic on leader should create replica on follower)", err)
 	}
-	if replicaNode == nil || replicaNode.ReplicaID != "replica-0" {
-		t.Fatalf("follower should have replica-0 for topic, got %+v", replicaNode)
+	if replicaView == nil || replicaView.ReplicaID != "replica-0" {
+		t.Fatalf("follower should have replica-0 for topic, got %+v", replicaView)
 	}
 
-	// Verify topic directory exists on follower (BaseDir/topic/replicaID)
-	replicaDir := filepath.Join(followerSrv.BaseDir, topicName, "replica-0")
+	// Verify follower topic and replica directories exist (BaseDir/topic, BaseDir/topic/replicaID)
+	followerTopicDir := filepath.Join(followerSrv.BaseDir, topicName)
+	replicaDir := filepath.Join(followerTopicDir, "replica-0")
+	if fi, err := os.Stat(followerTopicDir); err != nil {
+		t.Fatalf("follower topic dir %q should exist: %v", followerTopicDir, err)
+	} else if !fi.IsDir() {
+		t.Fatalf("follower topic path %q should be a directory", followerTopicDir)
+	}
 	if fi, err := os.Stat(replicaDir); err != nil {
 		t.Fatalf("follower replica dir %q should exist: %v", replicaDir, err)
 	} else if !fi.IsDir() {
@@ -59,13 +104,22 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 	defer followerSrv.Cleanup()
 
 	topicName := "my-topic"
+	ctx := context.Background()
 
-	if err := leaderSrv.TopicManager.CreateTopic(topicName, 1); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
+	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        topicName,
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic via client: %v", err)
 	}
 
 	// Leader has topic
-	_, err := leaderSrv.TopicManager.GetTopic(topicName)
+	_, err = leaderSrv.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("leader should have topic: %v", err)
 	}
@@ -98,15 +152,24 @@ func TestDeleteReplica(t *testing.T) {
 	defer followerSrv.Cleanup()
 
 	topicName := "del-topic"
+	ctx := context.Background()
 
-	// Create topic on leader with 1 replica (follower gets replica-0)
-	if err := leaderSrv.TopicManager.CreateTopic(topicName, 1); err != nil {
-		t.Fatalf("CreateTopic on leader: %v", err)
+	// Create topic on leader with 1 replica via RPC (follower gets replica-0)
+	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        topicName,
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic via client: %v", err)
 	}
 
 	// Verify replica and directory exist on follower
 	replicaDir := filepath.Join(followerSrv.BaseDir, topicName, "replica-0")
-	_, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	_, err = followerSrv.TopicManager.GetReplica(topicName, "replica-0")
 	if err != nil {
 		t.Fatalf("GetReplica before delete: %v", err)
 	}
@@ -115,8 +178,10 @@ func TestDeleteReplica(t *testing.T) {
 	}
 
 	// Delete replica on follower via RPC
-	ctx := context.Background()
-	replClient := client.NewReplicationClient(followerSrv.Broker)
+	replClient, err := client.NewRemoteClient(followerSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewReplicationClient: %v", err)
+	}
 	_, err = replClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
 		Topic:     topicName,
 		ReplicaId: "replica-0",
@@ -147,15 +212,24 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 	defer followerSrv.Cleanup()
 
 	topicName := "del-topic2"
+	ctx := context.Background()
 
-	if err := leaderSrv.TopicManager.CreateTopic(topicName, 1); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
+	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        topicName,
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic via client: %v", err)
 	}
 
 	topicDir := filepath.Join(followerSrv.BaseDir, topicName)
 	replicaDir := filepath.Join(topicDir, "replica-0")
 
-	_, err := followerSrv.TopicManager.GetTopic(topicName)
+	_, err = followerSrv.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("follower should have topic before delete: %v", err)
 	}
@@ -163,8 +237,10 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 		t.Fatalf("topic dir %q should exist before delete: %v", topicDir, err)
 	}
 
-	ctx := context.Background()
-	replClient := client.NewReplicationClient(followerSrv.Broker)
+	replClient, err := client.NewRemoteClient(followerSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
 	_, err = replClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
 		Topic:     topicName,
 		ReplicaId: "replica-0",
@@ -192,90 +268,6 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 	}
 }
 
-// TestReplication_ReadMessagesViaReplicationClient verifies that after the leader produces messages,
-// we can read them back using the replication client (Replicate RPC) and verify content.
-func TestReplication_ReadMessagesViaReplicationClient(t *testing.T) {
-	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader-repl", "follower-repl")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
-
-	topicName := "repl-topic"
-	if err := leaderSrv.TopicManager.CreateTopic(topicName, 1); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-
-	ctx := context.Background()
-
-	// Produce messages on leader
-	producerClient, err := client.NewProducerClient(leaderSrv.Addr)
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-
-	messages := []string{"msg-0", "msg-1", "msg-2"}
-	for i, msg := range messages {
-		resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
-			Topic: topicName,
-			Value: []byte(msg),
-			Acks:  protocol.AckLeader,
-		})
-		if err != nil {
-			t.Fatalf("Produce %d: %v", i, err)
-		}
-		if resp.Offset != uint64(i) {
-			t.Fatalf("expected offset %d, got %d", i, resp.Offset)
-		}
-	}
-
-	// Read messages via replication client (use a dedicated broker so we don't share connection with follower's replica)
-	leaderBrokerForClient := broker.NewBroker("test-leader", leaderSrv.Addr)
-	replClient := client.NewReplicationClient(leaderBrokerForClient)
-	defer leaderBrokerForClient.Close()
-	stream, err := replClient.ReplicateStream(ctx, &protocol.ReplicateRequest{
-		Topic:     topicName,
-		Offset:    0,
-		BatchSize: 10,
-	})
-	if err != nil {
-		t.Fatalf("ReplicateStream: %v", err)
-	}
-
-	var allEntries []*protocol.LogEntry
-	for {
-		resp, err := stream.Recv()
-		if err != nil {
-			if len(allEntries) == 0 {
-				t.Fatalf("Recv failed before any entries: %v", err)
-			}
-			break
-		}
-		if len(resp.Entries) == 0 {
-			break
-		}
-		allEntries = append(allEntries, resp.Entries...)
-	}
-
-	if len(allEntries) != len(messages) {
-		t.Fatalf("expected %d entries, got %d", len(messages), len(allEntries))
-	}
-
-	// Segment format: [offset 8 bytes][value]; Replicate returns raw ReadUncommitted bytes
-	const offWidth = 8
-	for i, entry := range allEntries {
-		if entry.Offset != uint64(i) {
-			t.Fatalf("entry %d: expected offset %d, got %d", i, i, entry.Offset)
-		}
-		payload := entry.Value
-		if len(payload) >= offWidth {
-			payload = payload[offWidth:]
-		}
-		if string(payload) != messages[i] {
-			t.Fatalf("entry %d: expected value %q, got %q", i, messages[i], string(payload))
-		}
-	}
-}
-
 // TestReplication_FollowerHasMessagesAfterReplication verifies that after producing on the leader,
 // the follower replica eventually has the same messages (replication runs in background).
 func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
@@ -284,18 +276,25 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	defer followerSrv.Cleanup()
 
 	topicName := "repl-topic2"
-	if err := leaderSrv.TopicManager.CreateTopic(topicName, 1); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-
 	ctx := context.Background()
+	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        topicName,
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic via client: %v", err)
+	}
 	producerClient, err := client.NewProducerClient(leaderSrv.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
 	defer producerClient.Close()
 
-	messages := []string{"hello", "world"}
+	messages := []string{"hello", "world", "test", "word", "test", "word"}
 	for i, msg := range messages {
 		_, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: topicName,
@@ -332,20 +331,16 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 		t.Fatalf("replica LEO %d < %d (replication did not catch up)", lastLEO, len(messages))
 	}
 
-	// Replica appends entry.Value from leader; leader's Value is segment format [8-byte offset][payload].
-	// Replica's segment then stores that as record value, so Read returns [8-byte seg prefix][leader value].
+	// Replica stores payload only (from raw chunk); segment.Read returns [offset 8][payload].
 	const offWidth = 8
 	for i, want := range messages {
 		raw, err := replicaNode.Log.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted(%d): %v", i, err)
 		}
-		if len(raw) < offWidth {
-			t.Fatalf("entry %d: short read (len=%d)", i, len(raw))
-		}
-		payload := raw[offWidth:] // strip segment's 8-byte offset
-		if len(payload) >= offWidth {
-			payload = payload[offWidth:] // strip leader's 8-byte offset in value
+		payload := raw
+		if len(raw) >= offWidth {
+			payload = raw[offWidth:]
 		}
 		if string(payload) != want {
 			t.Fatalf("entry %d: got %q, want %q", i, string(payload), want)

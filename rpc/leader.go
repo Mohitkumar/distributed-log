@@ -3,6 +3,8 @@ package rpc
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
@@ -60,4 +62,39 @@ func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEOReques
 	}
 
 	return &protocol.RecordLEOResponse{}, nil
+}
+
+// handleReplicateStream runs on a persistent connection: reads from the leader log using ReaderFrom(offset)
+// and streams raw segment-format bytes to the replica until caught up, then sends EndOfStream.
+func (s *RpcServer) handleReplicateStream(ctx context.Context, msg any, conn net.Conn, codec *protocol.Codec) error {
+	req := msg.(protocol.ReplicateRequest)
+	leaderView, err := s.topicManager.GetLeader(req.Topic)
+	if err != nil {
+		return err
+	}
+	reader, err := leaderView.Log.ReaderFrom(req.Offset)
+	if err != nil {
+		return err
+	}
+	const chunkSize = 64 * 1024 // 64KB
+	buf := make([]byte, chunkSize)
+	for {
+		n, err := reader.Read(buf)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			if err := codec.Encode(conn, &protocol.ReplicateResponse{RawChunk: chunk, EndOfStream: false}); err != nil {
+				return err
+			}
+		}
+		if err == io.EOF || n == 0 {
+			if err := codec.Encode(conn, &protocol.ReplicateResponse{RawChunk: nil, EndOfStream: true}); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
 }

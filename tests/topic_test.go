@@ -16,7 +16,10 @@ func TestCreateTopic(t *testing.T) {
 	defer servers.cleanup()
 
 	ctx := context.Background()
-	replClient := client.NewReplicationClient(servers.getLeaderBroker())
+	replClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewReplicationClient: %v", err)
+	}
 
 	topicName := "test-topic-1"
 	resp, err := replClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
@@ -43,9 +46,11 @@ func TestDeleteTopic(t *testing.T) {
 	defer servers.cleanup()
 
 	ctx := context.Background()
-	leaderBroker := servers.getLeaderBroker()
-	leaderClient := client.NewReplicationClient(leaderBroker)
-	producerClient, err := client.NewProducerClient(leaderBroker.GetAddr())
+	leaderClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewReplicationClient: %v", err)
+	}
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
