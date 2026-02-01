@@ -1,0 +1,92 @@
+package topic
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// TestTopicManager_CreateTopicLeaderOnly verifies that creating a topic
+// with zero replicas sets up a leader and a backing log that can be written/read.
+func TestTopicManager_CreateTopicLeaderOnly(t *testing.T) {
+	dir := t.TempDir()
+
+	tm, err := NewTopicManager(dir, "node-1", "127.0.0.1:19092", nil)
+	if err != nil {
+		t.Fatalf("NewTopicManager error = %v", err)
+	}
+
+	const topicName = "test-topic"
+
+	if err := tm.CreateTopic(topicName, 0); err != nil {
+		t.Fatalf("CreateTopic error = %v", err)
+	}
+
+	leader, err := tm.GetLeader(topicName)
+	if err != nil {
+		t.Fatalf("GetLeader error = %v", err)
+	}
+	if leader == nil || leader.Log == nil {
+		t.Fatalf("expected non-nil leader and log")
+	}
+
+	// Append a record and read it back.
+	wantVal := []byte("hello-replication")
+	off, err := leader.Log.Append(wantVal)
+	if err != nil {
+		t.Fatalf("Append error = %v", err)
+	}
+	if off != 0 {
+		t.Fatalf("expected first offset 0, got %d", off)
+	}
+
+	got, err := leader.Log.Read(off)
+	if err != nil {
+		t.Fatalf("Read error = %v", err)
+	}
+	// Segment returns [offset 8 bytes][value]
+	const offWidth = 8
+	if len(got) < offWidth {
+		t.Fatalf("Read returned short data")
+	}
+	if string(got[offWidth:]) != string(wantVal) {
+		t.Fatalf("Read value = %q, want %q", got[offWidth:], wantVal)
+	}
+}
+
+// TestTopicManager_DeleteTopic verifies that DeleteTopic removes the topic,
+// closes and deletes the leader log directory.
+func TestTopicManager_DeleteTopic(t *testing.T) {
+	dir := t.TempDir()
+
+	tm, err := NewTopicManager(dir, "node-1", "127.0.0.1:19092", nil)
+	if err != nil {
+		t.Fatalf("NewTopicManager error = %v", err)
+	}
+
+	const topicName = "delete-topic"
+
+	if err := tm.CreateTopic(topicName, 0); err != nil {
+		t.Fatalf("CreateTopic error = %v", err)
+	}
+
+	// Ensure log directory exists.
+	logDir := filepath.Join(dir, topicName)
+	if _, err := os.Stat(logDir); err != nil {
+		t.Fatalf("expected log dir %s to exist, got error: %v", logDir, err)
+	}
+
+	if err := tm.DeleteTopic(topicName); err != nil {
+		t.Fatalf("DeleteTopic error = %v", err)
+	}
+
+	// Leader should no longer be found.
+	if _, err := tm.GetLeader(topicName); err == nil {
+		t.Fatalf("expected GetLeader to fail after DeleteTopic")
+	}
+
+	// Log directory should be removed.
+	if _, err := os.Stat(logDir); !os.IsNotExist(err) {
+		t.Fatalf("expected log dir %s to be removed, got err = %v", logDir, err)
+	}
+}

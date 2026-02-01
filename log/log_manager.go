@@ -2,9 +2,8 @@ package log
 
 import (
 	"fmt"
+	"io"
 	"sync"
-
-	"github.com/mohitkumar/mlog/api/common"
 )
 
 type LogManager struct {
@@ -60,11 +59,11 @@ func (l *LogManager) SetHighWatermark(highWatermark uint64) {
 }
 
 // Append appends a log entry and automatically advances LEO
-func (l *LogManager) Append(entry *common.LogEntry) (uint64, error) {
+func (l *LogManager) Append(value []byte) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	offset, err := l.Log.Append(entry)
+	offset, err := l.Log.Append(value)
 	if err != nil {
 		return 0, err
 	}
@@ -77,7 +76,7 @@ func (l *LogManager) Append(entry *common.LogEntry) (uint64, error) {
 
 // Read reads a log entry at the given offset, but only if it's within the high watermark
 // This ensures consumers can only read committed data (data replicated to all ISR followers)
-func (l *LogManager) Read(offset uint64) (*common.LogEntry, error) {
+func (l *LogManager) Read(offset uint64) ([]byte, error) {
 	l.mu.RLock()
 	hw := l.highWatermark
 	l.mu.RUnlock()
@@ -91,6 +90,12 @@ func (l *LogManager) Read(offset uint64) (*common.LogEntry, error) {
 
 // ReadUncommitted reads a log entry at the given offset without checking the high watermark
 // This is used for replication purposes where we need to read all data up to LEO, not just HW
-func (l *LogManager) ReadUncommitted(offset uint64) (*common.LogEntry, error) {
+func (l *LogManager) ReadUncommitted(offset uint64) ([]byte, error) {
 	return l.Log.Read(offset)
+}
+
+// ReaderFrom returns an io.Reader that streams raw segment records from startOffset to current end of log.
+// Stream format: for each record, [Offset 8 bytes][Len 4 bytes][Value]. Use for replication with raw bytes.
+func (lm *LogManager) ReaderFrom(startOffset uint64) (io.Reader, error) {
+	return lm.Log.ReaderFrom(startOffset)
 }

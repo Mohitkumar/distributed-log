@@ -1,13 +1,13 @@
 package log
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 	"sync"
 
-	"github.com/mohitkumar/mlog/api/common"
 	"github.com/mohitkumar/mlog/segment"
 )
 
@@ -68,24 +68,7 @@ func NewLog(dir string) (*Log, error) {
 	return log, nil
 }
 
-func (l *Log) Append(record *common.LogEntry) (uint64, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	off, err := l.activeSegment.Append(record.Value)
-	if err != nil {
-		return 0, err
-	}
-	if l.activeSegment.IsFull() {
-		l.activeSegment, err = segment.NewSegment(l.activeSegment.NextOffset, l.Dir)
-		if err != nil {
-			return 0, err
-		}
-		l.segments = append(l.segments, l.activeSegment)
-	}
-	return off, nil
-}
-
-func (l *Log) AppendRaw(value []byte) (uint64, error) {
+func (l *Log) Append(value []byte) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	off, err := l.activeSegment.Append(value)
@@ -102,7 +85,7 @@ func (l *Log) AppendRaw(value []byte) (uint64, error) {
 	return off, nil
 }
 
-func (l *Log) ReadRaw(offset uint64) ([]byte, error) {
+func (l *Log) Read(offset uint64) ([]byte, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	var targetSegment *segment.Segment
@@ -119,30 +102,7 @@ func (l *Log) ReadRaw(offset uint64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.Value, nil
-}
-
-func (l *Log) Read(offset uint64) (*common.LogEntry, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	var targetSegment *segment.Segment
-	for _, seg := range l.segments {
-		if offset >= seg.BaseOffset && offset < seg.NextOffset {
-			targetSegment = seg
-			break
-		}
-	}
-	if targetSegment == nil || offset < targetSegment.BaseOffset || offset >= targetSegment.NextOffset {
-		return nil, fmt.Errorf("offset %d out of range", offset)
-	}
-	r, err := targetSegment.Read(offset)
-	if err != nil {
-		return nil, err
-	}
-	return &common.LogEntry{
-		Offset: r.Offset,
-		Value:  r.Value,
-	}, nil
+	return r, nil
 }
 
 func (l *Log) LowestOffset() uint64 {
@@ -184,6 +144,49 @@ func (l *Log) Reader() io.Reader {
 		readers = append(readers, r)
 	}
 	return io.MultiReader(readers...)
+}
+
+func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
+	l.mu.RLock()
+	if l.activeSegment != nil {
+		_ = l.activeSegment.Flush()
+	}
+	endOffset := uint64(0)
+	if l.activeSegment != nil {
+		endOffset = l.activeSegment.NextOffset
+	}
+	if startOffset >= endOffset {
+		l.mu.RUnlock()
+		return bytes.NewReader(nil), nil
+	}
+	var targetIdx int = -1
+	for i, seg := range l.segments {
+		if startOffset >= seg.BaseOffset && startOffset < seg.NextOffset {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		l.mu.RUnlock()
+		return nil, fmt.Errorf("offset %d out of range", startOffset)
+	}
+	seg := l.segments[targetIdx]
+	r, err := seg.NewStreamingReader(startOffset)
+	if err != nil {
+		l.mu.RUnlock()
+		return nil, err
+	}
+	if targetIdx == len(l.segments)-1 {
+		l.mu.RUnlock()
+		return r, nil
+	}
+	readers := make([]io.Reader, 0, len(l.segments)-targetIdx)
+	readers = append(readers, r)
+	for i := targetIdx + 1; i < len(l.segments); i++ {
+		readers = append(readers, l.segments[i].Reader())
+	}
+	l.mu.RUnlock()
+	return io.MultiReader(readers...), nil
 }
 
 func (l *Log) Delete() error {

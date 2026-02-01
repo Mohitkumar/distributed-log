@@ -2,45 +2,42 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/mohitkumar/mlog/api/replication"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
-var _ replication.ReplicationServiceServer = (*grpcServer)(nil)
-
 // CreateReplica creates a new replica for a topic on this broker
-func (s *grpcServer) CreateReplica(ctx context.Context, req *replication.CreateReplicaRequest) (*replication.CreateReplicaResponse, error) {
+func (s *RpcServer) CreateReplica(ctx context.Context, req *protocol.CreateReplicaRequest) (*protocol.CreateReplicaResponse, error) {
 	if req.Topic == "" {
-		return nil, status.Error(codes.InvalidArgument, "topic is required")
+		return nil, fmt.Errorf("topic is required")
 	}
 	if req.ReplicaId == "" {
-		return nil, status.Error(codes.InvalidArgument, "replica_id is required")
+		return nil, fmt.Errorf("replica_id is required")
 	}
 	if req.LeaderAddr == "" {
-		return nil, status.Error(codes.InvalidArgument, "leader_addr is required")
+		return nil, fmt.Errorf("leader_addr is required")
 	}
 
 	err := s.topicManager.CreateReplicaRemote(req.Topic, req.ReplicaId, req.LeaderAddr)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to create replica: %v", err)
+		return nil, fmt.Errorf("failed to create replica: %w", err)
 	}
 
-	return &replication.CreateReplicaResponse{
+	return &protocol.CreateReplicaResponse{
 		ReplicaId: req.ReplicaId,
 	}, nil
 }
 
 // DeleteReplica deletes a replica for a topic
-func (s *grpcServer) DeleteReplica(ctx context.Context, req *replication.DeleteReplicaRequest) (*replication.DeleteReplicaResponse, error) {
+func (s *RpcServer) DeleteReplica(ctx context.Context, req *protocol.DeleteReplicaRequest) (*protocol.DeleteReplicaResponse, error) {
 	if req.ReplicaId == "" {
-		return nil, status.Error(codes.InvalidArgument, "replica_id is required")
+		return nil, fmt.Errorf("replica_id is required")
 	}
 	err := s.topicManager.DeleteReplicaRemote(req.Topic, req.ReplicaId)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to delete replica: %v", err)
+		return nil, fmt.Errorf("failed to delete replica: %w", err)
 	}
 
-	return &replication.DeleteReplicaResponse{}, nil
+	return &protocol.DeleteReplicaResponse{}, nil
 }

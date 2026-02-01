@@ -2,133 +2,118 @@ package rpc
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/common"
-	"github.com/mohitkumar/mlog/api/leader"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
-var _ leader.LeaderServiceServer = (*grpcServer)(nil)
-
 // CreateTopic creates a new topic with the specified replica count
-func (s *grpcServer) CreateTopic(ctx context.Context, req *leader.CreateTopicRequest) (*leader.CreateTopicResponse, error) {
+func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if req.Topic == "" {
-		return nil, status.Error(codes.InvalidArgument, "topic name is required")
+		return nil, fmt.Errorf("topic name is required")
 	}
 	if req.ReplicaCount < 1 {
-		return nil, status.Error(codes.InvalidArgument, "replica count must be at least 1")
+		return nil, fmt.Errorf("replica count must be at least 1")
 	}
 
 	err := s.topicManager.CreateTopic(req.Topic, int(req.ReplicaCount))
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to create topic: %v", err)
+		return nil, fmt.Errorf("failed to create topic: %w", err)
 	}
 
-	return &leader.CreateTopicResponse{
+	return &protocol.CreateTopicResponse{
 		Topic: req.Topic,
 	}, nil
 }
 
 // DeleteTopic deletes a topic
-func (s *grpcServer) DeleteTopic(ctx context.Context, req *leader.DeleteTopicRequest) (*leader.DeleteTopicResponse, error) {
+func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
 	if req.Topic == "" {
-		return nil, status.Error(codes.InvalidArgument, "topic name is required")
+		return nil, fmt.Errorf("topic name is required")
 	}
 
 	err := s.topicManager.DeleteTopic(req.Topic)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to delete topic: %v", err)
+		return nil, fmt.Errorf("failed to delete topic: %w", err)
 	}
 
-	return &leader.DeleteTopicResponse{
+	return &protocol.DeleteTopicResponse{
 		Topic: req.Topic,
 	}, nil
 }
 
 // RecordLEO records the Log End Offset (LEO) of a replica
-func (s *grpcServer) RecordLEO(ctx context.Context, req *leader.RecordLEORequest) (*leader.RecordLEOResponse, error) {
+func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
 	if req.ReplicaId == "" {
-		return nil, status.Error(codes.InvalidArgument, "replica_id is required")
+		return nil, fmt.Errorf("replica_id is required")
 	}
 
 	topicObj, err := s.topicManager.GetTopic(req.Topic)
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "topic %s not found: %v", req.Topic, err)
+		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
 	}
 
 	err = topicObj.RecordLEORemote(req.ReplicaId, uint64(req.Leo), time.Now())
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to record LEO for replica %s in topic %s: %v", req.ReplicaId, req.Topic, err)
+		return nil, fmt.Errorf("failed to record LEO for replica %s in topic %s: %w", req.ReplicaId, req.Topic, err)
 	}
 
-	return &leader.RecordLEOResponse{}, nil
+	return &protocol.RecordLEOResponse{}, nil
 }
 
-// ReplicateStream streams log entries to replicas for replication
-func (s *grpcServer) ReplicateStream(req *leader.ReplicateRequest, stream leader.LeaderService_ReplicateStreamServer) error {
-	if req.Topic == "" {
-		return status.Error(codes.InvalidArgument, "topic is required")
-	}
-
-	// Get the leader for this topic
-	leaderNode, err := s.topicManager.GetLeader(req.Topic)
+// handleReplicateStream runs on a persistent connection: reads records from the leader log
+// from req.Offset, batches them (Kafka-style batch: baseOffset, batchLength, leaderEpoch, crc,
+// attributes, lastOffsetDelta, then records [offset+size+value]), and sends each batch to the replica
+// until caught up, then sends EndOfStream.
+func (s *RpcServer) handleReplicateStream(ctx context.Context, msg any, conn net.Conn, codec *protocol.Codec) error {
+	req := msg.(protocol.ReplicateRequest)
+	leaderView, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
-		return status.Errorf(codes.NotFound, "topic not found: %v", err)
+		return err
 	}
-
+	reader, err := leaderView.Log.ReaderFrom(req.Offset)
+	if err != nil {
+		return err
+	}
 	batchSize := req.BatchSize
 	if batchSize == 0 {
 		batchSize = 1000
 	}
-
-	// Start reading from the requested offset
-	currentOffset := req.Offset
-	// Use a short idle tick; when there's backlog we stream batches back-to-back.
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	ctx := stream.Context()
-
+	var batch []protocol.ReplicationRecord
 	for {
-		// LEO is the next offset to write; readable offsets are [0, LEO).
-		endExclusive := leaderNode.Log.LEO()
-		if currentOffset < endExclusive {
-			entries := make([]*common.LogEntry, 0, batchSize)
-			for i := 0; i < int(batchSize); i++ {
-				// Refresh endExclusive so large backlogs drain efficiently.
-				endExclusive = leaderNode.Log.LEO()
-				if currentOffset >= endExclusive {
-					break
-				}
-				entry, err := leaderNode.Log.ReadUncommitted(currentOffset)
-				if err != nil {
-					// If we can't read this offset yet (might be partially written or not indexed),
-					// stop this batch and retry shortly.
-					break
-				}
-				entries = append(entries, entry)
-				currentOffset++
-			}
-			if len(entries) > 0 {
-				resp := &leader.ReplicateResponse{
-					LastOffset: currentOffset - 1,
-					Entries:    entries,
-				}
-				if err := stream.Send(resp); err != nil {
-					return status.Errorf(codes.Internal, "failed to send entries: %v", err)
-				}
-			}
-			// Continue immediately to drain backlog faster.
-			continue
+		offset, value, err := protocol.ReadRecordFromStream(reader)
+		if err == io.EOF {
+			break
 		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			continue
+		if err != nil {
+			return err
+		}
+		batch = append(batch, protocol.ReplicationRecord{Offset: int64(offset), Value: value})
+		if len(batch) >= int(batchSize) {
+			payload, err := protocol.EncodeReplicationBatch(batch)
+			if err != nil {
+				return err
+			}
+			if err := codec.Encode(conn, &protocol.ReplicateResponse{RawChunk: payload, EndOfStream: false}); err != nil {
+				return err
+			}
+			batch = batch[:0]
 		}
 	}
+	if len(batch) > 0 {
+		payload, err := protocol.EncodeReplicationBatch(batch)
+		if err != nil {
+			return err
+		}
+		if err := codec.Encode(conn, &protocol.ReplicateResponse{RawChunk: payload, EndOfStream: false}); err != nil {
+			return err
+		}
+	}
+	if err := codec.Encode(conn, &protocol.ReplicateResponse{RawChunk: nil, EndOfStream: true}); err != nil {
+		return err
+	}
+	return nil
 }
