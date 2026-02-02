@@ -15,3 +15,11 @@ func Decode(data []byte) (*LogEntry, error) {
 		Value:  data[8:],
 	}, nil
 }
+
+func Encode(entry *LogEntry) ([]byte, error) {
+	buf := make([]byte, 12+len(entry.Value))
+	endian.PutUint64(buf[0:8], entry.Offset)
+	endian.PutUint32(buf[8:12], uint32(len(entry.Value)))
+	copy(buf[12:], entry.Value)
+	return buf, nil
+}

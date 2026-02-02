@@ -9,15 +9,10 @@ import (
 	"time"
 
 	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/log"
 	"github.com/mohitkumar/mlog/protocol"
 )
-
-// NodeInfo describes another node in the cluster (for creating replicas).
-type NodeInfo struct {
-	NodeID string
-	Addr   string
-}
 
 // Topic represents a topic on this node: either we are the leader (with log and replica state)
 // or we host a replica (with log and client to leader for replication).
@@ -76,14 +71,11 @@ type TopicManager struct {
 	BaseDir         string
 	CurrentNodeID   string
 	CurrentNodeAddr string
-	GetOtherNodes   func() []NodeInfo
+	GetOtherNodes   func() []common.NodeInfo
 }
 
 // NewTopicManager creates a topic manager. GetOtherNodes returns other nodes in the cluster (used when creating topics with replicas).
-func NewTopicManager(baseDir string, currentNodeID string, currentNodeAddr string, getOtherNodes func() []NodeInfo) (*TopicManager, error) {
-	if getOtherNodes == nil {
-		getOtherNodes = func() []NodeInfo { return nil }
-	}
+func NewTopicManager(baseDir string, currentNodeID string, currentNodeAddr string, getOtherNodes func() []common.NodeInfo) (*TopicManager, error) {
 	return &TopicManager{
 		topics:          make(map[string]*Topic),
 		BaseDir:         baseDir,
@@ -127,11 +119,11 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 		node := otherNodes[i]
 		replicaID := fmt.Sprintf("replica-%d", i)
 
-		replClient, err := client.NewRemoteClient(node.Addr)
+		replClient, err := client.NewRemoteClient(node.RpcAddr)
 		if err != nil {
 			delete(tm.topics, topic)
 			logManager.Close()
-			return fmt.Errorf("failed to create replication client to %s: %w", node.Addr, err)
+			return fmt.Errorf("failed to create replication client to %s: %w", node.RpcAddr, err)
 		}
 
 		_, err = replClient.CreateReplica(context.Background(), &protocol.CreateReplicaRequest{
@@ -147,7 +139,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 
 		topicObj.replicas[replicaID] = &ReplicaInfo{
 			NodeID:    node.NodeID,
-			Addr:      node.Addr,
+			Addr:      node.RpcAddr,
 			ReplicaID: replicaID,
 			State: ReplicaState{
 				ReplicaID:     replicaID,

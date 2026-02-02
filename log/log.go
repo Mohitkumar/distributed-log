@@ -124,6 +124,23 @@ func (l *Log) SegmentCount() int {
 	return len(l.segments)
 }
 
+func (l *Log) Truncate(lowest uint64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var segments []*segment.Segment
+	for _, s := range l.segments {
+		if s.NextOffset <= lowest+1 {
+			if err := s.Remove(); err != nil {
+				return err
+			}
+			continue
+		}
+		segments = append(segments, s)
+	}
+	l.segments = segments
+	return nil
+}
+
 func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

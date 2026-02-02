@@ -130,6 +130,19 @@ func (s *Segment) Append(value []byte) (uint64, error) {
 	return offset, nil
 }
 
+func (s *Segment) Remove() error {
+	if err := s.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(s.index.file.Name()); err != nil {
+		return err
+	}
+	if err := os.Remove(s.logFile.Name()); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Segment) Read(offset uint64) ([]byte, error) {
 	s.mu.Lock()
 	if s.bufWriter != nil {

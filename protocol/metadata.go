@@ -1,48 +1,68 @@
 package protocol
 
-// MetadataEvent is applied to metadata store (replaces api/metadata.MetadataEvent).
-// Exactly one of the event fields should be set.
 type MetadataEvent struct {
-	CreatePartition *CreatePartitionEvent `json:"create_partition,omitempty"`
-	LeaderChange    *LeaderChangeEvent    `json:"leader_change,omitempty"`
-	IsrUpdate       *IsrUpdateEvent       `json:"isr_update,omitempty"`
-	HwUpdate        *HwUpdateEvent        `json:"hw_update,omitempty"`
+	CreateTopicEvent  *CreateTopicEvent
+	DeleteTopicEvent  *DeleteTopicEvent
+	LeaderChangeEvent *LeaderChangeEvent
+	IsrUpdateEvent    *IsrUpdateEvent
+	AddNodeEvent      *AddNodeEvent
+	RemoveNodeEvent   *RemoveNodeEvent
+	UpdateNodeEvent   *UpdateNodeEvent
+}
+type CreateTopicEvent struct {
+	Topic        string   `json:"topic"`
+	ReplicaCount uint32   `json:"replica_count"`
+	LeaderID     string   `json:"leader_id"`
+	LeaderEpoch  int64    `json:"leader_epoch"`
+	Replicas     []string `json:"replicas"`
 }
 
-type CreatePartitionEvent struct {
-	PartitionId string   `json:"partition_id"`
-	Replicas    []string `json:"replicas"`
+type DeleteTopicEvent struct {
+	Topic string `json:"topic"`
 }
 
 type LeaderChangeEvent struct {
-	PartitionId  string `json:"partition_id"`
-	LeaderId     string `json:"leader_id"`
-	LeaderEpoch  int64  `json:"leader_epoch"`
+	Topic       string `json:"topic"`
+	LeaderID    string `json:"leader_id"`
+	LeaderEpoch int64  `json:"leader_epoch"`
 }
 
 type IsrUpdateEvent struct {
-	PartitionId string   `json:"partition_id"`
-	Isr         []string `json:"isr"`
+	Topic     string   `json:"topic"`
+	ReplicaID string   `json:"replica_id"`
+	Isr       []string `json:"isr"`
 }
 
-type HwUpdateEvent struct {
-	PartitionId string `json:"partition_id"`
-	Offset      int64  `json:"offset"`
+type AddNodeEvent struct {
+	NodeID string `json:"node_id"`
+	Addr   string `json:"addr"`
 }
 
-// Which returns which event type is set (for Apply switch).
-func (e *MetadataEvent) Which() interface{} {
-	if e.CreatePartition != nil {
-		return e.CreatePartition
+type RemoveNodeEvent struct {
+	NodeID string `json:"node_id"`
+}
+
+type UpdateNodeEvent struct {
+	NodeID    string `json:"node_id"`
+	IsHealthy bool   `json:"is_healthy"`
+}
+
+func (e *MetadataEvent) WhichEvent() string {
+	switch {
+	case e.CreateTopicEvent != nil:
+		return "CreateTopicEvent"
+	case e.DeleteTopicEvent != nil:
+		return "DeleteTopicEvent"
+	case e.LeaderChangeEvent != nil:
+		return "LeaderChangeEvent"
+	case e.IsrUpdateEvent != nil:
+		return "IsrUpdateEvent"
+	case e.AddNodeEvent != nil:
+		return "AddNodeEvent"
+	case e.RemoveNodeEvent != nil:
+		return "RemoveNodeEvent"
+	case e.UpdateNodeEvent != nil:
+		return "UpdateNodeEvent"
 	}
-	if e.LeaderChange != nil {
-		return e.LeaderChange
-	}
-	if e.IsrUpdate != nil {
-		return e.IsrUpdate
-	}
-	if e.HwUpdate != nil {
-		return e.HwUpdate
-	}
-	return nil
+	return ""
 }
