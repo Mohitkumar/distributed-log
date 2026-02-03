@@ -11,6 +11,7 @@ import (
 	"github.com/mohitkumar/mlog/discovery"
 	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/raftmeta"
+	"go.uber.org/zap"
 )
 
 var _ discovery.Handler = (*Node)(nil)
@@ -20,12 +21,17 @@ var _ discovery.Handler = (*Node)(nil)
 type Node struct {
 	NodeID        string
 	NodeAddr      string
+	Logger        *zap.Logger
 	raft          *raft.Raft
 	cfg           config.Config
 	metadataStore *raftmeta.MetadataStore
 }
 
-func NewNodeFromConfig(config config.Config) (*Node, error) {
+// NewNodeFromConfig creates a Node. If logger is nil, zap.NewNop() is used.
+func NewNodeFromConfig(config config.Config, logger *zap.Logger) (*Node, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	fsm, err := coordinator.NewCoordinatorFSM(config.RaftConfig.Dir)
 	if err != nil {
 		return nil, err
@@ -41,10 +47,12 @@ func NewNodeFromConfig(config config.Config) (*Node, error) {
 	n := &Node{
 		NodeID:        config.NodeConfig.ID,
 		NodeAddr:      rpcAddr,
+		Logger:        logger,
 		raft:          raftNode,
 		cfg:           config,
 		metadataStore: fsm.MetadataStore,
 	}
+	n.Logger.Info("node started", zap.String("raft_addr", config.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
 	return n, nil
 }
 
@@ -104,12 +112,20 @@ func (n *Node) TopicExists(topic string) bool {
 
 // ApplyCreateTopicEvent replicates a CreateTopicEvent through Raft. Call only on the Raft leader.
 func (n *Node) ApplyCreateTopicEvent(ev *protocol.MetadataEvent) error {
+	if ev.CreateTopicEvent != nil {
+		n.Logger.Info("applying create topic event", zap.String("topic", ev.CreateTopicEvent.Topic), zap.String("leader_node_id", ev.CreateTopicEvent.LeaderNodeID))
+	}
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
+		topicName := ""
+		if ev.CreateTopicEvent != nil {
+			topicName = ev.CreateTopicEvent.Topic
+		}
+		n.Logger.Error("raft apply create topic failed", zap.Error(err), zap.String("topic", topicName))
 		return ErrRaftApply(err)
 	}
 	return nil
@@ -117,12 +133,20 @@ func (n *Node) ApplyCreateTopicEvent(ev *protocol.MetadataEvent) error {
 
 // ApplyDeleteTopicEvent replicates a DeleteTopicEvent through Raft. Call only on the Raft leader (typically by the topic leader after deleting the topic).
 func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
+	if ev.DeleteTopicEvent != nil {
+		n.Logger.Info("applying delete topic event", zap.String("topic", ev.DeleteTopicEvent.Topic))
+	}
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
+		topicName := ""
+		if ev.DeleteTopicEvent != nil {
+			topicName = ev.DeleteTopicEvent.Topic
+		}
+		n.Logger.Error("raft apply delete topic failed", zap.Error(err), zap.String("topic", topicName))
 		return ErrRaftApply(err)
 	}
 	return nil
@@ -175,6 +199,7 @@ func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 			RpcAddr: joinRpcAddr,
 		},
 	})
+	n.Logger.Info("node joined cluster", zap.String("node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", joinRpcAddr))
 	return nil
 }
 
@@ -185,6 +210,9 @@ func (n *Node) ApplyNodeAddEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
+		if ev.AddNodeEvent != nil {
+			n.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("node_id", ev.AddNodeEvent.NodeID))
+		}
 		return ErrRaftApply(err)
 	}
 	return nil
@@ -197,6 +225,9 @@ func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
+		if ev.RemoveNodeEvent != nil {
+			n.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("node_id", ev.RemoveNodeEvent.NodeID))
+		}
 		return ErrRaftApply(err)
 	}
 	return nil
@@ -209,6 +240,7 @@ func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
+		n.Logger.Error("raft apply ISR update failed", zap.Error(err))
 		return ErrRaftApply(err)
 	}
 	return nil
@@ -224,6 +256,7 @@ func (n *Node) Leave(id string) error {
 			NodeID: id,
 		},
 	})
+	n.Logger.Info("node left cluster", zap.String("node_id", id))
 	return nil
 }
 
@@ -269,6 +302,7 @@ func (n *Node) GetTopicLeaderNodeID(topic string) string {
 }
 
 func (n *Node) Shutdown() error {
+	n.Logger.Info("node shutting down", zap.String("node_id", n.NodeID))
 	f := n.raft.Shutdown()
 	return f.Error()
 }

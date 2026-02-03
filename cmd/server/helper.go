@@ -10,6 +10,7 @@ import (
 	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
+	"go.uber.org/zap"
 )
 
 type CommandHelper struct {
@@ -40,8 +41,14 @@ func NewCommandHelper(config config.Config) (*CommandHelper, error) {
 }
 
 func (cmdHelper *CommandHelper) setupNode() error {
-	n, err := node.NewNodeFromConfig(cmdHelper.Config)
+	logger, err := zap.NewProduction()
 	if err != nil {
+		return fmt.Errorf("create logger: %w", err)
+	}
+	logger = logger.With(zap.String("node_id", cmdHelper.NodeConfig.ID))
+	n, err := node.NewNodeFromConfig(cmdHelper.Config, logger)
+	if err != nil {
+		logger.Sync()
 		return err
 	}
 	cmdHelper.node = n
@@ -53,7 +60,7 @@ func (cmdHelper *CommandHelper) setupRpcServer() error {
 	if err != nil {
 		return err
 	}
-	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, cmdHelper.node)
+	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, cmdHelper.node, cmdHelper.node.Logger)
 	if err != nil {
 		return fmt.Errorf("create topic manager: %w", err)
 	}

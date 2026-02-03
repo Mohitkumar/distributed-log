@@ -94,11 +94,11 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	baseDir := path.Join(t.TempDir(), baseDirSuffix)
 	rpcAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(rpcPort))
 	cfg := buildTestConfigFromPorts(t, baseDir, "node-1", rpcPort, raftPort, serfPort, false)
-	n, err := node.NewNodeFromConfig(cfg)
+	n, err := node.NewNodeFromConfig(cfg, nil)
 	if err != nil {
 		t.Fatalf("NewNodeFromConfig: %v", err)
 	}
-	topicMgr, err := topic.NewTopicManager(baseDir, n)
+	topicMgr, err := topic.NewTopicManager(baseDir, n, nil)
 	if err != nil {
 		n.Shutdown()
 		t.Fatalf("NewTopicManager: %v", err)
@@ -154,17 +154,17 @@ func setupTwoTestServersImpl(t testing.TB, leaderBaseDirSuffix string, followerB
 	followerCfg := buildTestConfigFromPorts(t, followerBaseDir, "node-2", followerRPC, followerRaft, followerSerf, false)
 	followerRaftAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(followerRaft))
 
-	node1, err := node.NewNodeFromConfig(leaderCfg)
+	node1, err := node.NewNodeFromConfig(leaderCfg, nil)
 	if err != nil {
 		t.Fatalf("NewNodeFromConfig leader: %v", err)
 	}
-	node2, err := node.NewNodeFromConfig(followerCfg)
+	node2, err := node.NewNodeFromConfig(followerCfg, nil)
 	if err != nil {
 		node1.Shutdown()
 		t.Fatalf("NewNodeFromConfig follower: %v", err)
 	}
 
-	leaderTopicMgr, err := topic.NewTopicManager(leaderBaseDir, node1)
+	leaderTopicMgr, err := topic.NewTopicManager(leaderBaseDir, node1, nil)
 	if err != nil {
 		node1.Shutdown()
 		node2.Shutdown()
@@ -176,7 +176,7 @@ func setupTwoTestServersImpl(t testing.TB, leaderBaseDirSuffix string, followerB
 		node2.Shutdown()
 		t.Fatalf("NewConsumerManager leader: %v", err)
 	}
-	followerTopicMgr, err := topic.NewTopicManager(followerBaseDir, node2)
+	followerTopicMgr, err := topic.NewTopicManager(followerBaseDir, node2, nil)
 	if err != nil {
 		node1.Shutdown()
 		node2.Shutdown()

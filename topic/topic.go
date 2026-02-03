@@ -2,7 +2,6 @@ package topic
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"github.com/mohitkumar/mlog/log"
 	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/protocol"
+	"go.uber.org/zap"
 )
 
 // In memory representation of a topic
@@ -19,6 +19,7 @@ type Topic struct {
 	mu       sync.RWMutex
 	Name     string
 	Log      *log.LogManager
+	Logger   *zap.Logger
 	replicas map[string]*ReplicaInfo
 
 	// nodeID is set for replica topics so RecordLEO can identify this node to the leader.
@@ -49,13 +50,19 @@ type TopicManager struct {
 	mu      sync.RWMutex
 	topics  map[string]*Topic
 	BaseDir string
+	Logger  *zap.Logger
 	node    *node.Node
 }
 
-func NewTopicManager(baseDir string, n *node.Node) (*TopicManager, error) {
+// NewTopicManager creates a TopicManager. If logger is nil, zap.NewNop() is used.
+func NewTopicManager(baseDir string, n *node.Node, logger *zap.Logger) (*TopicManager, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	tm := &TopicManager{
 		topics:  make(map[string]*Topic),
 		BaseDir: baseDir,
+		Logger:  logger,
 		node:    n,
 	}
 	return tm, nil
@@ -90,6 +97,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 	topicObj := &Topic{
 		Name:     topic,
 		Log:      logManager,
+		Logger:   tm.Logger,
 		replicas: make(map[string]*ReplicaInfo),
 	}
 	tm.topics[topic] = topicObj
@@ -101,6 +109,8 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 		logManager.Close()
 		return ErrNotEnoughNodesf(replicaCount, len(otherNodes))
 	}
+
+	tm.Logger.Info("creating topic with replicas", zap.String("topic", topic), zap.Int("replica_count", replicaCount))
 
 	for i := 0; i < replicaCount; i++ {
 		node := otherNodes[i]
@@ -133,6 +143,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 		}
 	}
 
+	tm.Logger.Info("topic created", zap.String("topic", topic))
 	return nil
 }
 
@@ -150,6 +161,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 
 	// We are the designated topic leader: create locally and return (stops the forward loop).
 	if req.DesignatedLeaderNodeID != "" && req.DesignatedLeaderNodeID == n.NodeID {
+		tm.Logger.Info("creating topic as designated leader", zap.String("topic", req.Topic))
 		if err := tm.CreateTopic(req.Topic, int(req.ReplicaCount)); err != nil {
 			return nil, ErrCreateTopic(err)
 		}
@@ -158,6 +170,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 
 	// Not the designated leader: if we're not Raft leader, forward to Raft leader.
 	if !n.IsLeader() {
+		tm.Logger.Debug("forwarding create topic to Raft leader", zap.String("topic", req.Topic))
 		leaderAddr := n.GetLeaderRpcAddr()
 		if leaderAddr == "" {
 			return nil, ErrCannotReachLeader
@@ -183,6 +196,8 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	if topicLeaderAddr == "" {
 		return nil, ErrNoRPCForTopicLeaderf(topicLeaderID)
 	}
+
+	tm.Logger.Info("forwarding create topic to topic leader", zap.String("topic", req.Topic), zap.String("topic_leader_id", topicLeaderID))
 
 	// Forward to topic leader with DesignatedLeaderNodeID so it creates locally instead of forwarding back.
 	forwardReq := *req
@@ -219,6 +234,8 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 	if !ok {
 		return ErrTopicNotFoundf(topic)
 	}
+
+	tm.Logger.Info("deleting topic", zap.String("topic", topic))
 
 	if topicObj.Log != nil {
 		topicObj.Log.Close()
@@ -308,6 +325,7 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) err
 	if !ok {
 		topicObj = &Topic{
 			Name:     topic,
+			Logger:   tm.Logger,
 			replicas: nil,
 		}
 		tm.topics[topic] = topicObj
@@ -336,6 +354,8 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) err
 	topicObj.streamClient = streamClient
 	topicObj.rpcClient = rpcClient
 
+	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_addr", leaderAddr))
+
 	if err := topicObj.StartReplication(); err != nil {
 		return ErrStartReplication(err)
 	}
@@ -352,6 +372,8 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 	if !ok {
 		return ErrTopicNotFoundf(topic)
 	}
+
+	tm.Logger.Info("deleting replica for topic", zap.String("topic", topic))
 
 	topicObj.StopReplication()
 	if topicObj.Log != nil {
@@ -385,6 +407,9 @@ func (t *Topic) StartReplication() error {
 	t.replicationCancel = cancel
 	t.mu.Unlock()
 
+	if t.Logger != nil {
+		t.Logger.Info("replication started for topic", zap.String("topic", t.Name))
+	}
 	go t.runReplication(ctx)
 	return nil
 }
@@ -392,6 +417,9 @@ func (t *Topic) StartReplication() error {
 // StopReplication stops the replication loop.
 func (t *Topic) StopReplication() {
 	t.stopOnce.Do(func() {
+		if t.Logger != nil {
+			t.Logger.Info("stopping replication for topic", zap.String("topic", t.Name))
+		}
 		t.mu.Lock()
 		if t.replicationCancel != nil {
 			t.replicationCancel()
@@ -427,7 +455,9 @@ func (t *Topic) runReplication(ctx context.Context) {
 			BatchSize: 1000,
 		}
 		if err := t.streamClient.ReplicateStream(ctx, req); err != nil {
-			fmt.Println("Error in replicate stream, reconnecting", err)
+			if t.Logger != nil {
+				t.Logger.Warn("replicate stream error, reconnecting", zap.String("topic", t.Name), zap.Error(err))
+			}
 			time.Sleep(backoff)
 			if backoff < maxBackoff {
 				backoff *= 2
@@ -588,6 +618,9 @@ func (t *Topic) waitForAllFollowersToCatchUp(ctx context.Context, offset uint64)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timeout:
+			if t.Logger != nil {
+				t.Logger.Warn("timeout waiting for followers to catch up", zap.String("topic", t.Name), zap.Uint64("required_offset", offset))
+			}
 			return ErrTimeoutCatchUp
 		}
 	}
