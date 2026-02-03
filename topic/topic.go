@@ -79,12 +79,12 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 	defer tm.mu.Unlock()
 
 	if _, exists := tm.topics[topic]; exists {
-		return fmt.Errorf("topic %s already exists", topic)
+		return ErrTopicExistsf(topic)
 	}
 
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
-		return fmt.Errorf("failed to create log manager: %w", err)
+		return ErrCreateLog(err)
 	}
 
 	topicObj := &Topic{
@@ -99,7 +99,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 	if len(otherNodes) < replicaCount {
 		delete(tm.topics, topic)
 		logManager.Close()
-		return fmt.Errorf("not enough nodes: need %d, have %d", replicaCount, len(otherNodes))
+		return ErrNotEnoughNodesf(replicaCount, len(otherNodes))
 	}
 
 	for i := 0; i < replicaCount; i++ {
@@ -109,7 +109,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 		if err != nil {
 			delete(tm.topics, topic)
 			logManager.Close()
-			return fmt.Errorf("failed to create replication client to %s: %w", node.RpcAddr, err)
+			return ErrCreateReplicationClient(node.RpcAddr, err)
 		}
 
 		_, err = replClient.CreateReplica(context.Background(), &protocol.CreateReplicaRequest{
@@ -119,7 +119,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 		if err != nil {
 			delete(tm.topics, topic)
 			logManager.Close()
-			return fmt.Errorf("failed to create replica on node %s: %w", node.NodeID, err)
+			return ErrCreateReplicaOnNode(node.NodeID, err)
 		}
 
 		topicObj.replicas[node.NodeID] = &ReplicaInfo{
@@ -142,7 +142,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if tm.node == nil {
 		if err := tm.CreateTopic(req.Topic, int(req.ReplicaCount)); err != nil {
-			return nil, fmt.Errorf("failed to create topic: %w", err)
+			return nil, ErrCreateTopic(err)
 		}
 		return &protocol.CreateTopicResponse{Topic: req.Topic}, nil
 	}
@@ -151,7 +151,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	// We are the designated topic leader: create locally and return (stops the forward loop).
 	if req.DesignatedLeaderNodeID != "" && req.DesignatedLeaderNodeID == n.NodeID {
 		if err := tm.CreateTopic(req.Topic, int(req.ReplicaCount)); err != nil {
-			return nil, fmt.Errorf("failed to create topic: %w", err)
+			return nil, ErrCreateTopic(err)
 		}
 		return &protocol.CreateTopicResponse{Topic: req.Topic}, nil
 	}
@@ -160,11 +160,11 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	if !n.IsLeader() {
 		leaderAddr := n.GetLeaderRpcAddr()
 		if leaderAddr == "" {
-			return nil, fmt.Errorf("cannot reach Raft leader")
+			return nil, ErrCannotReachLeader
 		}
 		remote, err := client.NewRemoteClient(leaderAddr)
 		if err != nil {
-			return nil, fmt.Errorf("forward to leader: %w", err)
+			return nil, ErrForwardToLeader(err)
 		}
 		defer remote.Close()
 		return remote.CreateTopic(ctx, req)
@@ -172,16 +172,16 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 
 	// We are the Raft leader: decide topic leader from metadata, set designated leader, forward to that node.
 	if n.TopicExists(req.Topic) {
-		return nil, fmt.Errorf("topic %s already exists", req.Topic)
+		return nil, ErrTopicExistsf(req.Topic)
 	}
 	ids := n.GetClusterNodeIDs()
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("no nodes in cluster")
+		return nil, ErrNoNodesInCluster
 	}
 	topicLeaderID := ids[0] // TODO: select random node as topic leader
 	topicLeaderAddr := n.GetRpcAddrForNodeID(topicLeaderID)
 	if topicLeaderAddr == "" {
-		return nil, fmt.Errorf("no RPC address for topic leader node %s", topicLeaderID)
+		return nil, ErrNoRPCForTopicLeaderf(topicLeaderID)
 	}
 
 	// Forward to topic leader with DesignatedLeaderNodeID so it creates locally instead of forwarding back.
@@ -189,12 +189,12 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	forwardReq.DesignatedLeaderNodeID = topicLeaderID
 	remote, err := client.NewRemoteClient(topicLeaderAddr)
 	if err != nil {
-		return nil, fmt.Errorf("forward to topic leader: %w", err)
+		return nil, ErrForwardToTopicLeader(err)
 	}
 	defer remote.Close()
 	resp, err := remote.CreateTopic(ctx, &forwardReq)
 	if err != nil {
-		return nil, fmt.Errorf("forward to topic leader: %w", err)
+		return nil, ErrForwardToTopicLeader(err)
 	}
 	ev := &protocol.MetadataEvent{
 		CreateTopicEvent: &protocol.CreateTopicEvent{
@@ -205,7 +205,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		},
 	}
 	if err := n.ApplyCreateTopicEvent(ev); err != nil {
-		return nil, fmt.Errorf("apply create topic event: %w", err)
+		return nil, ErrApplyCreateTopic(err)
 	}
 	return resp, nil
 }
@@ -217,7 +217,7 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 
 	topicObj, ok := tm.topics[topic]
 	if !ok {
-		return fmt.Errorf("topic %s not found", topic)
+		return ErrTopicNotFoundf(topic)
 	}
 
 	if topicObj.Log != nil {
@@ -243,7 +243,7 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
 	if tm.node == nil {
 		if err := tm.DeleteTopic(req.Topic); err != nil {
-			return nil, fmt.Errorf("failed to delete topic: %w", err)
+			return nil, ErrDeleteTopic(err)
 		}
 		return &protocol.DeleteTopicResponse{Topic: req.Topic}, nil
 	}
@@ -252,13 +252,13 @@ func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *prot
 	if err == nil && topicObj != nil {
 		if tm.IsLeader(req.Topic) {
 			if err := tm.DeleteTopic(req.Topic); err != nil {
-				return nil, fmt.Errorf("failed to delete topic: %w", err)
+				return nil, ErrDeleteTopic(err)
 			}
 			ev := &protocol.MetadataEvent{
 				DeleteTopicEvent: &protocol.DeleteTopicEvent{Topic: req.Topic},
 			}
 			if err := tm.node.ApplyDeleteTopicEvent(ev); err != nil {
-				return nil, fmt.Errorf("apply delete topic event: %w", err)
+				return nil, ErrApplyDeleteTopic(err)
 			}
 			return &protocol.DeleteTopicResponse{Topic: req.Topic}, nil
 		}
@@ -266,11 +266,11 @@ func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *prot
 	// Forward to topic leader.
 	leaderAddr := tm.node.GetTopicLeaderRpcAddr(req.Topic)
 	if leaderAddr == "" {
-		return nil, fmt.Errorf("topic %s not found", req.Topic)
+		return nil, ErrTopicNotFoundf(req.Topic)
 	}
 	remote, err := client.NewRemoteClient(leaderAddr)
 	if err != nil {
-		return nil, fmt.Errorf("forward to topic leader: %w", err)
+		return nil, ErrForwardToTopicLeader(err)
 	}
 	defer remote.Close()
 	return remote.DeleteTopic(ctx, req)
@@ -282,7 +282,7 @@ func (tm *TopicManager) GetLeader(topic string) (*log.LogManager, error) {
 	defer tm.mu.RUnlock()
 
 	if !tm.IsLeader(topic) {
-		return nil, fmt.Errorf("topic %s: this node is not leader", topic)
+		return nil, ErrThisNodeNotLeaderf(topic)
 	}
 	return tm.topics[topic].Log, nil
 }
@@ -294,7 +294,7 @@ func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
 
 	topicObj, ok := tm.topics[topic]
 	if !ok {
-		return nil, fmt.Errorf("topic %s not found", topic)
+		return nil, ErrTopicNotFoundf(topic)
 	}
 	return topicObj, nil
 }
@@ -314,22 +314,22 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) err
 	}
 
 	if topicObj.Log != nil {
-		return fmt.Errorf("topic %s already has replica", topic)
+		return ErrTopicAlreadyReplicaf(topic)
 	}
 
 	topicObj.nodeID = tm.node.GetNodeID()
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
-		return fmt.Errorf("failed to create log manager for replica: %w", err)
+		return ErrCreateLogReplica(err)
 	}
 
 	streamClient, err := client.NewReplicationStreamClient(leaderAddr)
 	if err != nil {
-		return fmt.Errorf("failed to create replication stream client to leader: %w", err)
+		return ErrCreateStreamClient(err)
 	}
 	rpcClient, err := client.NewRemoteClient(leaderAddr)
 	if err != nil {
-		return fmt.Errorf("failed to create replication RPC client to leader: %w", err)
+		return ErrCreateRPCClient(err)
 	}
 
 	topicObj.Log = logManager
@@ -337,7 +337,7 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) err
 	topicObj.rpcClient = rpcClient
 
 	if err := topicObj.StartReplication(); err != nil {
-		return fmt.Errorf("failed to start replication: %w", err)
+		return ErrStartReplication(err)
 	}
 
 	return nil
@@ -350,7 +350,7 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 
 	topicObj, ok := tm.topics[topic]
 	if !ok {
-		return fmt.Errorf("topic %s not found", topic)
+		return ErrTopicNotFoundf(topic)
 	}
 
 	topicObj.StopReplication()
@@ -363,7 +363,7 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 
 	topicDir := filepath.Join(tm.BaseDir, topic)
 	if err := os.RemoveAll(topicDir); err != nil {
-		return fmt.Errorf("failed to remove topic directory: %w", err)
+		return ErrRemoveTopicDir(err)
 	}
 	return nil
 }
@@ -372,13 +372,13 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 func (t *Topic) StartReplication() error {
 
 	if t.streamClient == nil {
-		return fmt.Errorf("stream client not set for topic %s", t.Name)
+		return ErrStreamClientNotSetf(t.Name)
 	}
 
 	t.mu.Lock()
 	if t.stopChan != nil {
 		t.mu.Unlock()
-		return fmt.Errorf("replication already started for topic %s", t.Name)
+		return ErrReplicationStartedf(t.Name)
 	}
 	t.stopChan = make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -505,18 +505,18 @@ func (t *Topic) HandleProduce(ctx context.Context, logEntry *protocol.LogEntry, 
 		return offset, nil
 	case protocol.AckAll:
 		if err := t.waitForAllFollowersToCatchUp(ctx, offset); err != nil {
-			return 0, fmt.Errorf("failed to wait for all followers to catch up: %w", err)
+			return 0, ErrWaitFollowersCatchUp(err)
 		}
 		return offset, nil
 	default:
-		return 0, fmt.Errorf("invalid ack mode: %d", int32(acks))
+		return 0, ErrInvalidAckModef(int32(acks))
 	}
 }
 
 // HandleProduceBatch appends multiple records (leader only).
 func (t *Topic) HandleProduceBatch(ctx context.Context, values [][]byte, acks protocol.AckMode) (uint64, uint64, error) {
 	if len(values) == 0 {
-		return 0, 0, fmt.Errorf("values cannot be empty")
+		return 0, 0, ErrValuesEmpty
 	}
 
 	var base, last uint64
@@ -536,11 +536,11 @@ func (t *Topic) HandleProduceBatch(ctx context.Context, values [][]byte, acks pr
 		return base, last, nil
 	case protocol.AckAll:
 		if err := t.waitForAllFollowersToCatchUp(ctx, last); err != nil {
-			return 0, 0, fmt.Errorf("failed to wait for all followers to catch up: %w", err)
+			return 0, 0, ErrWaitFollowersCatchUp(err)
 		}
 		return base, last, nil
 	default:
-		return 0, 0, fmt.Errorf("invalid ack mode: %d", int32(acks))
+		return 0, 0, ErrInvalidAckModef(int32(acks))
 	}
 }
 
@@ -588,7 +588,7 @@ func (t *Topic) waitForAllFollowersToCatchUp(ctx context.Context, offset uint64)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timeout:
-			return fmt.Errorf("timeout before all followers caught up")
+			return ErrTimeoutCatchUp
 		}
 	}
 }
@@ -612,20 +612,20 @@ func (t *Topic) maybeAdvanceHW() {
 // RecordLEORemote records the LEO of a replica (leader only). Called by RPC when a replica reports its LEO.
 func (t *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64, leoTime time.Time) error {
 	if nodeId == "" {
-		return fmt.Errorf("node id is required")
+		return ErrNodeIDRequired
 	}
 	t.mu.RLock()
 	topicObj, ok := t.topics[topic]
 	if !ok {
 		t.mu.RUnlock()
-		return fmt.Errorf("topic %s not found", topic)
+		return ErrTopicNotFoundf(topic)
 	}
 	t.mu.RUnlock()
 	topicObj.mu.Lock()
 	repl, ok := topicObj.replicas[nodeId]
 	if !ok || repl == nil {
 		topicObj.mu.Unlock()
-		return fmt.Errorf("replica %s not found for topic %s", nodeId, topic)
+		return ErrReplicaNotFoundf(nodeId, topic)
 	}
 	repl.State.LEO = leo
 	repl.State.LastFetchTime = leoTime

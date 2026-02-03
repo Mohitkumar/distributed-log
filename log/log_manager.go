@@ -1,7 +1,6 @@
 package log
 
 import (
-	"fmt"
 	"io"
 	"sync"
 )
@@ -82,7 +81,7 @@ func (l *LogManager) Read(offset uint64) ([]byte, error) {
 	l.mu.RUnlock()
 	// Consumers should only be able to read up to (and including) the high watermark
 	if offset > hw {
-		return nil, fmt.Errorf("offset %d is beyond high watermark %d (uncommitted data)", offset, hw)
+		return nil, ErrOffsetBeyondHW(offset, hw)
 	}
 
 	return l.Log.Read(offset)

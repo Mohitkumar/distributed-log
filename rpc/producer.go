@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
@@ -10,7 +9,7 @@ import (
 func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest) (*protocol.ProduceResponse, error) {
 	topicObj, err := srv.topicManager.GetTopic(req.Topic)
 	if err != nil {
-		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
+		return nil, ErrTopicNotFound(req.Topic, err)
 	}
 
 	offset, err := topicObj.HandleProduce(ctx, &protocol.LogEntry{
@@ -24,15 +23,15 @@ func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest)
 
 func (srv *RpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBatchRequest) (*protocol.ProduceBatchResponse, error) {
 	if req.Topic == "" {
-		return nil, fmt.Errorf("topic is required")
+		return nil, ErrTopicRequired
 	}
 	if len(req.Values) == 0 {
-		return nil, fmt.Errorf("values are required")
+		return nil, ErrValuesRequired
 	}
 
 	topicObj, err := srv.topicManager.GetTopic(req.Topic)
 	if err != nil {
-		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
+		return nil, ErrTopicNotFound(req.Topic, err)
 	}
 
 	base, last, err := topicObj.HandleProduceBatch(ctx, req.Values, req.Acks)

@@ -2,7 +2,6 @@ package coordinator
 
 import (
 	"encoding/json"
-	"fmt"
 
 	"github.com/hashicorp/raft"
 	"github.com/mohitkumar/mlog/log"
@@ -44,7 +43,7 @@ func (l *logStore) LastIndex() (uint64, error) {
 
 func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	if index < 1 {
-		return fmt.Errorf("raft log index must be >= 1, got %d", index)
+		return ErrRaftLogIndex(index)
 	}
 	offset := index - 1
 	in, err := l.Read(offset)
@@ -55,7 +54,7 @@ func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	// where payload is what we Appended. StoreLog appends segment.Encode(entry) = [8][4][json],
 	// so payload is [8][4][json]. Skip 8 (segment header) + 12 (Encode header) = 20 to get the JSON.
 	if len(in) < 20 {
-		return fmt.Errorf("log record too short at offset %d", offset)
+		return ErrLogRecordTooShort(offset)
 	}
 	value := in[20:]
 	if err := json.Unmarshal(value, out); err != nil {

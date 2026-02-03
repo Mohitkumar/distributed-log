@@ -2,12 +2,9 @@ package protocol
 
 import (
 	"encoding/binary"
-	"errors"
 	"hash/crc32"
 	"io"
 )
-
-var ErrReplicationBatchCRC = errors.New("protocol: replication batch CRC mismatch")
 
 // Replication batch format (Kafka-style). Leader sends batches of records to replicas.
 // Batch header: baseOffset, batchLength, leaderEpoch, crc, attributes, lastOffsetDelta.

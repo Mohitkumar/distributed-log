@@ -2,14 +2,10 @@ package protocol
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 )
 
 type Codec struct{}
-
-var ErrFrameTooLarge = errors.New("protocol: frame exceeds max size")
 
 func (c *Codec) Encode(w io.Writer, msg any) error {
 	var mType MessageType
@@ -83,7 +79,7 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 		mType = MsgDeleteTopicResp
 		payload, err = json.Marshal(v)
 	default:
-		return fmt.Errorf("protocol: unknown message type: %d", mType)
+		return ErrUnknownMessageType(mType)
 	}
 	if err != nil {
 		return err
@@ -186,7 +182,7 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	default:
-		return 0, nil, fmt.Errorf("protocol: unknown message type: %d", mType)
+		return 0, nil, ErrUnknownMessageType(mType)
 	}
 }
 

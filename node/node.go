@@ -2,7 +2,6 @@ package node
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -111,7 +110,7 @@ func (n *Node) ApplyCreateTopicEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		return fmt.Errorf("raft apply: %w", err)
+		return ErrRaftApply(err)
 	}
 	return nil
 }
@@ -124,7 +123,7 @@ func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		return fmt.Errorf("raft apply: %w", err)
+		return ErrRaftApply(err)
 	}
 	return nil
 }
@@ -186,7 +185,7 @@ func (n *Node) ApplyNodeAddEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		return fmt.Errorf("raft apply: %w", err)
+		return ErrRaftApply(err)
 	}
 	return nil
 }
@@ -198,7 +197,7 @@ func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		return fmt.Errorf("raft apply: %w", err)
+		return ErrRaftApply(err)
 	}
 	return nil
 }
@@ -210,7 +209,7 @@ func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		return fmt.Errorf("raft apply: %w", err)
+		return ErrRaftApply(err)
 	}
 	return nil
 }

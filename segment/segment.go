@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -152,7 +151,7 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 	s.mu.Unlock()
 
 	if offset < s.BaseOffset || offset >= s.NextOffset {
-		return nil, fmt.Errorf("offset %d out of range [%d, %d)", offset, s.BaseOffset, s.NextOffset)
+		return nil, ErrOffsetOutOfRange(offset, s.BaseOffset, s.NextOffset)
 	}
 
 	// Start position: use index if we have an entry (sparse index gives position of record <= offset),
@@ -189,7 +188,7 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 			return value, err
 		}
 		if foundOffset > offset {
-			return nil, fmt.Errorf("offset not found")
+			return nil, ErrOffsetNotFound
 		}
 		currPos += int64(totalHeaderWidth) + int64(msgLen)
 	}
@@ -224,14 +223,14 @@ func (s *Segment) NewStreamingReader(startOffset uint64) (io.Reader, error) {
 
 	//Range check
 	if startOffset < s.BaseOffset || startOffset >= s.NextOffset {
-		return nil, fmt.Errorf("offset %d out of range", startOffset)
+		return nil, ErrOffsetOutOfRangeSimple(startOffset)
 	}
 
 	// Use the index to find the starting physical position
 	relOffset := uint32(startOffset - s.BaseOffset)
 	indexEntry, ok := s.index.Find(relOffset)
 	if !ok {
-		return nil, errors.New("index not found")
+		return nil, ErrIndexNotFound
 	}
 
 	//Calculate how many bytes are available to read from that position
@@ -278,14 +277,14 @@ func (s *Segment) Recover() error {
 	// 1. Start from the last healthy index entry
 	lastEntry, ok := s.index.Last()
 	if !ok {
-		return errors.New("index not found")
+		return ErrIndexNotFound
 	}
 	startPos = int64(lastEntry.Position)
 	nextOffset = s.BaseOffset + uint64(lastEntry.RelativeOffset)
 
 	// 2. Seek to the checkpoint
 	if _, err := s.logFile.Seek(startPos, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek: %w", err)
+		return ErrSeekFailed(err)
 	}
 
 	// Use a buffered reader for recovery to avoid thousands of small syscalls
@@ -327,7 +326,7 @@ func (s *Segment) Recover() error {
 
 	// 3. Truncate the log to the last confirmed valid byte
 	if err := s.logFile.Truncate(currPos); err != nil {
-		return fmt.Errorf("truncate failed: %w", err)
+		return ErrTruncateFailed(err)
 	}
 
 	// 4. SYNC FILE POINTER: Crucial for bufio.Writer
@@ -348,7 +347,7 @@ func (s *Segment) Recover() error {
 	// 6. Clean Index
 	// Remove any index entries that point to the truncated/corrupt area
 	if err := s.index.TruncateAfter(uint64(currPos)); err != nil {
-		return fmt.Errorf("index sync failed: %w", err)
+		return ErrIndexSyncFailed(err)
 	}
 
 	return nil

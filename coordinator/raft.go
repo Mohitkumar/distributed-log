@@ -1,7 +1,6 @@
 package coordinator
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -60,7 +59,7 @@ func SetupRaft(fsm raft.FSM, id, raftAddress, raftDir string, boostrap bool) (*r
 	// Instantiate the Raft systems.
 	ra, err := raft.NewRaft(config, fsm, logStore, stableStore, snapshots, transport)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create new raft: %s", err)
+		return nil, ErrNewRaft(err)
 	}
 	if boostrap {
 		configuration := raft.Configuration{
@@ -72,7 +71,7 @@ func SetupRaft(fsm raft.FSM, id, raftAddress, raftDir string, boostrap bool) (*r
 			},
 		}
 		if err := ra.BootstrapCluster(configuration).Error(); err != nil {
-			return nil, fmt.Errorf("failed to bootstrap cluster: %s", err)
+			return nil, ErrBootstrapCluster(err)
 		}
 	}
 

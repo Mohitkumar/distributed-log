@@ -96,7 +96,7 @@ func (l *Log) Read(offset uint64) ([]byte, error) {
 		}
 	}
 	if targetSegment == nil || offset < targetSegment.BaseOffset || offset >= targetSegment.NextOffset {
-		return nil, fmt.Errorf("offset %d out of range", offset)
+		return nil, ErrOffsetOutOfRange(offset)
 	}
 	r, err := targetSegment.Read(offset)
 	if err != nil {
@@ -205,7 +205,7 @@ func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	}
 	if targetIdx < 0 {
 		l.mu.RUnlock()
-		return nil, fmt.Errorf("offset %d out of range", startOffset)
+		return nil, ErrOffsetOutOfRange(startOffset)
 	}
 	seg := l.segments[targetIdx]
 	r, err := seg.NewStreamingReader(startOffset)

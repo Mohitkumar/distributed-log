@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
@@ -10,7 +9,7 @@ import (
 
 func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*protocol.FetchResponse, error) {
 	if req.Topic == "" {
-		return nil, fmt.Errorf("topic is required")
+		return nil, ErrTopicRequired
 	}
 	id := req.Id
 	if id == "" {
@@ -28,12 +27,12 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 
 	leaderNode, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
-		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
+		return nil, ErrTopicNotFound(req.Topic, err)
 	}
 
 	raw, err := leaderNode.Log.Read(off)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read offset %d: %w", off, err)
+		return nil, ErrReadOffset(off, err)
 	}
 	// Segment returns [offset 8 bytes][value]; strip header for response
 	const offWidth = 8
@@ -49,7 +48,7 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 // FetchStream streams log entries to the client (used over transport with polling).
 func (s *RpcServer) FetchStream(req *protocol.FetchRequest, send func(*protocol.FetchResponse) error) error {
 	if req.Topic == "" {
-		return fmt.Errorf("topic is required")
+		return ErrTopicRequired
 	}
 	id := req.Id
 	if id == "" {
@@ -58,7 +57,7 @@ func (s *RpcServer) FetchStream(req *protocol.FetchRequest, send func(*protocol.
 
 	leaderNode, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
-		return fmt.Errorf("topic %s not found: %w", req.Topic, err)
+		return ErrTopicNotFound(req.Topic, err)
 	}
 
 	off := req.Offset
@@ -94,7 +93,7 @@ func (s *RpcServer) FetchStream(req *protocol.FetchRequest, send func(*protocol.
 
 func (s *RpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffsetRequest) (*protocol.CommitOffsetResponse, error) {
 	if req.Topic == "" {
-		return nil, fmt.Errorf("topic is required")
+		return nil, ErrTopicRequired
 	}
 
 	id := req.Id
@@ -103,14 +102,14 @@ func (s *RpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffset
 	}
 
 	if err := s.consumerManager.CommitOffset(id, req.Topic, req.Offset); err != nil {
-		return nil, fmt.Errorf("commit offset failed: %w", err)
+		return nil, ErrCommitOffset(err)
 	}
 	return &protocol.CommitOffsetResponse{Success: true}, nil
 }
 
 func (s *RpcServer) FetchOffset(ctx context.Context, req *protocol.FetchOffsetRequest) (*protocol.FetchOffsetResponse, error) {
 	if req.Topic == "" {
-		return nil, fmt.Errorf("topic is required")
+		return nil, ErrTopicRequired
 	}
 
 	id := req.Id
@@ -119,7 +118,7 @@ func (s *RpcServer) FetchOffset(ctx context.Context, req *protocol.FetchOffsetRe
 	}
 
 	if err := s.consumerManager.Recover(); err != nil {
-		return nil, fmt.Errorf("recover offsets failed: %w", err)
+		return nil, ErrRecoverOffsets(err)
 	}
 
 	off, err := s.consumerManager.GetOffset(id, req.Topic)

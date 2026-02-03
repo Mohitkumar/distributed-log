@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"time"
@@ -13,10 +12,10 @@ import (
 // CreateTopic creates a new topic. Forwarding to Raft leader and topic leader is handled by TopicManager.
 func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if req.Topic == "" {
-		return nil, fmt.Errorf("topic name is required")
+		return nil, ErrTopicNameRequired
 	}
 	if req.ReplicaCount < 1 {
-		return nil, fmt.Errorf("replica count must be at least 1")
+		return nil, ErrReplicaCountInvalid
 	}
 	return s.topicManager.CreateTopicWithForwarding(ctx, req)
 }
@@ -24,7 +23,7 @@ func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRe
 // DeleteTopic deletes a topic. Forwarding to the topic leader is handled by TopicManager.
 func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
 	if req.Topic == "" {
-		return nil, fmt.Errorf("topic name is required")
+		return nil, ErrTopicNameRequired
 	}
 	return s.topicManager.DeleteTopicWithForwarding(ctx, req)
 }
@@ -33,7 +32,7 @@ func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRe
 func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
 	err := s.topicManager.RecordLEORemote(req.NodeID, req.Topic, uint64(req.Leo), time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
+		return nil, ErrTopicNotFound(req.Topic, err)
 	}
 	return &protocol.RecordLEOResponse{}, nil
 }

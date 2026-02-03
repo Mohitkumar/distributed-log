@@ -46,7 +46,7 @@ func (c *ConsumerManager) GetOffset(id string, topic string) (uint64, error) {
 	defer c.mu.RUnlock()
 	topicMap, ok := c.offsetCache[id]
 	if !ok {
-		return 0, fmt.Errorf("offset not found for id: %s and topic: %s", id, topic)
+		return 0, ErrOffsetNotFoundForID(id, topic)
 	}
 	return topicMap[topic], nil
 }
