@@ -1,4 +1,4 @@
-package rpc
+package tests
 
 import (
 	"net"
@@ -10,7 +10,9 @@ import (
 	"github.com/mohitkumar/mlog/config"
 	consumermgr "github.com/mohitkumar/mlog/consumer"
 	"github.com/mohitkumar/mlog/node"
+	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
+	"github.com/travisjeffery/go-dynaport"
 )
 
 // TestServerComponents contains the components needed for a test server.
@@ -25,7 +27,7 @@ type TestServerComponents struct {
 type TestServer struct {
 	*TestServerComponents
 	Addr string // bound address after Start (use for client dial)
-	srv  *RpcServer
+	srv  *rpc.RpcServer
 	node *node.Node
 }
 
@@ -37,106 +39,108 @@ func (ts *TestServer) Cleanup() {
 	}
 }
 
-// buildTestConfig creates a config for a test node. bindAddr is the address we will listen on (e.g. from ln.Addr().String()).
-func buildTestConfig(t testing.TB, baseDir, nodeID, bindAddr, raftAddr, raftDir string, bootstrap bool) config.Config {
+// buildTestConfigFromPorts builds a Config using dynaport-allocated ports for RPC, Raft, and Serf (same shape as helper).
+// rpcPort, raftPort, serfPort are used for NodeConfig.RPCPort, RaftConfig.Address, and BindAddr (Serf) respectively.
+func buildTestConfigFromPorts(t testing.TB, baseDir, nodeID string, rpcPort, raftPort, serfPort int, bootstrap bool) config.Config {
 	t.Helper()
-	_, portStr, err := net.SplitHostPort(bindAddr)
-	if err != nil {
-		t.Fatalf("SplitHostPort(%q): %v", bindAddr, err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("port %q: %v", portStr, err)
-	}
 	return config.Config{
-		BindAddr: bindAddr,
+		BindAddr: net.JoinHostPort("127.0.0.1", strconv.Itoa(serfPort)),
 		NodeConfig: config.NodeConfig{
 			ID:      nodeID,
-			RPCPort: port,
+			RPCPort: rpcPort,
 			DataDir: baseDir,
 		},
 		RaftConfig: config.RaftConfig{
 			ID:         nodeID,
-			Address:    raftAddr,
-			Dir:        raftDir,
+			Address:    net.JoinHostPort("127.0.0.1", strconv.Itoa(raftPort)),
+			Dir:        path.Join(baseDir, "raft"),
 			Boostatrap: bootstrap,
 		},
 	}
 }
 
-// StartTestServer creates and starts a single test server with a real node (Raft), TopicManager, and ConsumerManager.
-func StartTestServer(t testing.TB, baseDirSuffix string) *TestServer {
+// StartSingleNode creates and starts a single test server with a real node (Raft), TopicManager, and ConsumerManager, and RPC server.
+// Uses dynaport for RPC, Raft, and Serf ports. Same pattern as cmd/server/helper: node from config, then TopicManager, ConsumerManager, RpcServer.
+// Caller should defer ts.Cleanup().
+func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	t.Helper()
+	ports := dynaport.Get(3)
+	rpcPort, raftPort, serfPort := ports[0], ports[1], ports[2]
 	baseDir := path.Join(t.TempDir(), baseDirSuffix)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	cfg := buildTestConfig(t, baseDir, "node-1", addr, "127.0.0.1:0", path.Join(baseDir, "raft"), false)
+	rpcAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(rpcPort))
+	cfg := buildTestConfigFromPorts(t, baseDir, "node-1", rpcPort, raftPort, serfPort, false)
 	n, err := node.NewNodeFromConfig(cfg)
 	if err != nil {
-		ln.Close()
 		t.Fatalf("NewNodeFromConfig: %v", err)
 	}
 	topicMgr, err := topic.NewTopicManager(baseDir, n)
 	if err != nil {
-		ln.Close()
 		n.Shutdown()
 		t.Fatalf("NewTopicManager: %v", err)
 	}
 	consumerMgr, err := consumermgr.NewConsumerManager(baseDir)
 	if err != nil {
-		ln.Close()
 		n.Shutdown()
 		t.Fatalf("NewConsumerManager: %v", err)
 	}
-	srv := NewRpcServer(addr, topicMgr, consumerMgr)
+	ln, err := net.Listen("tcp", rpcAddr)
+	if err != nil {
+		n.Shutdown()
+		t.Fatalf("Listen: %v", err)
+	}
+	srv := rpc.NewRpcServer(rpcAddr, topicMgr, consumerMgr)
 	srv.ServeOnListener(ln)
 	return &TestServer{
 		TestServerComponents: &TestServerComponents{
 			TopicManager:    topicMgr,
 			ConsumerManager: consumerMgr,
 			BaseDir:         baseDir,
-			Addr:            addr,
+			Addr:            rpcAddr,
 		},
-		Addr: addr,
+		Addr: rpcAddr,
 		srv:  srv,
 		node: n,
 	}
 }
 
-// SetupTwoTestServers creates two test servers with real nodes. Node1 is Raft bootstrap; node2 joins node1's cluster
-// so GetOtherNodes() returns the other node (for CreateTopic with replicas).
+// StartTestServer creates and starts a single test server (alias for StartSingleNode for backward compatibility).
+func StartTestServer(t testing.TB, baseDirSuffix string) *TestServer {
+	return StartSingleNode(t, baseDirSuffix)
+}
+
+// StartTwoNodes creates two test servers with real nodes (same pattern as helper: node, TopicManager, ConsumerManager, RpcServer per node).
+// Node1 is Raft bootstrap; node2 joins node1's cluster so GetOtherNodes() returns the other node (for CreateTopic with replicas).
+// Callers should defer leader.Cleanup() and follower.Cleanup().
 // Note: Two-node Raft formation in tests can hit "offset 1 out of range" in the follower; replica tests that need
 // two nodes may be skipped until Raft test setup is refined.
-func SetupTwoTestServers(t testing.TB, leaderBaseDirSuffix string, followerBaseDirSuffix string) (*TestServer, *TestServer) {
+func StartTwoNodes(t testing.TB, leaderBaseDirSuffix string, followerBaseDirSuffix string) (*TestServer, *TestServer) {
+	return setupTwoTestServersImpl(t, leaderBaseDirSuffix, followerBaseDirSuffix)
+}
+
+// setupTwoTestServersImpl is the implementation shared by StartTwoNodes and SetupTwoTestServers.
+func setupTwoTestServersImpl(t testing.TB, leaderBaseDirSuffix string, followerBaseDirSuffix string) (*TestServer, *TestServer) {
 	t.Helper()
+	ports := dynaport.Get(6)
+	leaderRPC, leaderRaft, leaderSerf := ports[0], ports[1], ports[2]
+	followerRPC, followerRaft, followerSerf := ports[3], ports[4], ports[5]
 	leaderBaseDir := path.Join(t.TempDir(), leaderBaseDirSuffix)
 	followerBaseDir := path.Join(t.TempDir(), followerBaseDirSuffix)
+	leaderAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(leaderRPC))
+	followerAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(followerRPC))
 
-	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	leaderCfg := buildTestConfigFromPorts(t, leaderBaseDir, "node-1", leaderRPC, leaderRaft, leaderSerf, true)
+	followerCfg := buildTestConfigFromPorts(t, followerBaseDir, "node-2", followerRPC, followerRaft, followerSerf, false)
+	followerRaftAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(followerRaft))
+
+	ln1, err := net.Listen("tcp", leaderAddr)
 	if err != nil {
 		t.Fatalf("Listen leader: %v", err)
 	}
-	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	ln2, err := net.Listen("tcp", followerAddr)
 	if err != nil {
 		ln1.Close()
 		t.Fatalf("Listen follower: %v", err)
 	}
-	leaderAddr := ln1.Addr().String()
-	followerAddr := ln2.Addr().String()
-
-	// Raft ports must be distinct; use a fixed offset from RPC port or separate ports
-	_, leaderPortStr, _ := net.SplitHostPort(leaderAddr)
-	leaderPort, _ := strconv.Atoi(leaderPortStr)
-	_, followerPortStr, _ := net.SplitHostPort(followerAddr)
-	followerPort, _ := strconv.Atoi(followerPortStr)
-	leaderRaftAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(leaderPort+1000))
-	followerRaftAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(followerPort+1000))
-
-	leaderCfg := buildTestConfig(t, leaderBaseDir, "node-1", leaderAddr, leaderRaftAddr, path.Join(leaderBaseDir, "raft"), true)
-	followerCfg := buildTestConfig(t, followerBaseDir, "node-2", followerAddr, followerRaftAddr, path.Join(followerBaseDir, "raft"), false)
 
 	node1, err := node.NewNodeFromConfig(leaderCfg)
 	if err != nil {
@@ -185,8 +189,8 @@ func SetupTwoTestServers(t testing.TB, leaderBaseDirSuffix string, followerBaseD
 		t.Fatalf("NewConsumerManager follower: %v", err)
 	}
 
-	leaderSrv := NewRpcServer(leaderAddr, leaderTopicMgr, leaderConsumerMgr)
-	followerSrv := NewRpcServer(followerAddr, followerTopicMgr, followerConsumerMgr)
+	leaderSrv := rpc.NewRpcServer(leaderAddr, leaderTopicMgr, leaderConsumerMgr)
+	followerSrv := rpc.NewRpcServer(followerAddr, followerTopicMgr, followerConsumerMgr)
 	leaderSrv.ServeOnListener(ln1)
 	followerSrv.ServeOnListener(ln2)
 
@@ -197,7 +201,7 @@ func SetupTwoTestServers(t testing.TB, leaderBaseDirSuffix string, followerBaseD
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	// Add node2 to node1's Raft cluster so node1.GetOtherNodes() returns node2
+	// Add node2 to node1's Raft cluster so node1.GetOtherNodes() returns node2.
 	if err := node1.Join("node-2", followerRaftAddr); err != nil {
 		t.Logf("node1.Join (may be ok if already joined): %v", err)
 	}
@@ -225,4 +229,9 @@ func SetupTwoTestServers(t testing.TB, leaderBaseDirSuffix string, followerBaseD
 		node: node2,
 	}
 	return leader, follower
+}
+
+// SetupTwoTestServers creates two test servers (alias for StartTwoNodes for backward compatibility).
+func SetupTwoTestServers(t testing.TB, leaderBaseDirSuffix string, followerBaseDirSuffix string) (*TestServer, *TestServer) {
+	return StartTwoNodes(t, leaderBaseDirSuffix, followerBaseDirSuffix)
 }

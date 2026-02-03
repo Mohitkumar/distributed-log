@@ -90,15 +90,13 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 
 	t.Logf("produced %d ACK_LEADER messages in %v (using ProduceBatch)", n, time.Since(start))
 
-	// Verify leader has messages - use existing LogManager from leader node
-	// instead of creating a new one from disk (which won't have buffered writes flushed)
+	// Verify leader has messages - GetLeader returns *log.LogManager
 	leaderNode, err := servers.leaderTopicMgr.GetLeader(topicName)
 	if err != nil {
 		t.Fatalf("failed to get leader node: %v", err)
 	}
-	leaderLogMgr := leaderNode.Log // Use the existing LogManager instance
 
-	actualLEO := leaderLogMgr.LEO()
+	actualLEO := leaderNode.LEO()
 	expectedLEO := baseOffset + uint64(n) // Should be 1 + 10000 = 10001
 
 	if actualLEO != expectedLEO {
@@ -118,16 +116,18 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	// With ACK_LEADER, we need to wait longer for replication to catch up
 	time.Sleep(10 * time.Second)
 
-	// Verify replica has messages - use existing LogManager from replica node
-	replicaNode, err := servers.followerTopicMgr.GetReplica(topicName, "replica-0")
+	// Verify replica has messages - GetTopic returns topic with Log (replica log)
+	replicaTopic, err := servers.followerTopicMgr.GetTopic(topicName)
 	if err != nil {
-		t.Fatalf("failed to get replica node: %v", err)
+		t.Fatalf("failed to get replica topic: %v", err)
 	}
-	replicaLogMgr := replicaNode.Log // Use the existing LogManager instance
+	if replicaTopic.Log == nil {
+		t.Fatalf("replica topic has no log")
+	}
 
 	// Verify replication by checking replica LEO instead of reading messages
 	// (reading requires index entries which may not be available immediately)
-	replicaLEO := replicaLogMgr.LEO()
+	replicaLEO := replicaTopic.Log.LEO()
 	expectedReplicaLEO := baseOffset + uint64(n) // Should match leader LEO
 
 	if replicaLEO < expectedReplicaLEO {
@@ -223,14 +223,13 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 		t.Logf("warning: ACK_ALL completed very quickly (%v), replication may have been instant", produceDuration)
 	}
 
-	// Verify leader has messages - use existing LogManager from leader node
+	// Verify leader has messages - GetLeader returns *log.LogManager
 	leaderNode, err := servers.leaderTopicMgr.GetLeader(topicName)
 	if err != nil {
 		t.Fatalf("failed to get leader node: %v", err)
 	}
-	leaderLogMgr := leaderNode.Log // Use the existing LogManager instance
 
-	actualLEO := leaderLogMgr.LEO()
+	actualLEO := leaderNode.LEO()
 	expectedLEO := baseOffset + uint64(n) // Should be 1 + 10000 = 10001
 
 	if actualLEO != expectedLEO {
@@ -241,16 +240,17 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 
 	// With ACK_ALL, messages should be immediately available on replica
 	// (ACK_ALL waits for replication before returning)
-	// Use existing LogManager from replica node
-	replicaNode, err := servers.followerTopicMgr.GetReplica(topicName, "replica-0")
+	replicaTopic, err := servers.followerTopicMgr.GetTopic(topicName)
 	if err != nil {
-		t.Fatalf("failed to get replica node: %v", err)
+		t.Fatalf("failed to get replica topic: %v", err)
 	}
-	replicaLogMgr := replicaNode.Log // Use the existing LogManager instance
+	if replicaTopic.Log == nil {
+		t.Fatalf("replica topic has no log")
+	}
 
 	// With ACK_ALL, replica should have caught up (ACK_ALL waits for replication)
 	// Verify by checking replica LEO matches leader LEO
-	replicaLEO := replicaLogMgr.LEO()
+	replicaLEO := replicaTopic.Log.LEO()
 	expectedReplicaLEO := baseOffset + uint64(n) // Should match leader LEO
 
 	if replicaLEO < expectedReplicaLEO {
@@ -274,12 +274,12 @@ func (ts *testServers) waitReplicaCatchUp(topicName string, targetLEO uint64) (t
 	deadline := time.Now().Add(benchmarkReplicationTimeout)
 	start := time.Now()
 	for time.Now().Before(deadline) {
-		replicaNode, err := ts.followerTopicMgr.GetReplica(topicName)
-		if err != nil || replicaNode.Log == nil {
+		replicaTopic, err := ts.followerTopicMgr.GetTopic(topicName)
+		if err != nil || replicaTopic == nil || replicaTopic.Log == nil {
 			time.Sleep(benchmarkReplicationPollMs * time.Millisecond)
 			continue
 		}
-		if replicaNode.Log.LEO() >= targetLEO {
+		if replicaTopic.Log.LEO() >= targetLEO {
 			return time.Since(start), true
 		}
 		time.Sleep(benchmarkReplicationPollMs * time.Millisecond)
@@ -354,7 +354,7 @@ func BenchmarkReplicationCatchUp(b *testing.B) {
 		if err != nil {
 			b.Fatalf("GetLeader: %v", err)
 		}
-		targetLEO := leaderNode.Log.LEO()
+		targetLEO := leaderNode.LEO()
 		catchUp, ok := servers.waitReplicaCatchUp(topicName, targetLEO)
 		totalCatchUp += catchUp
 		if !ok {

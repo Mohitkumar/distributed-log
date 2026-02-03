@@ -1,4 +1,4 @@
-package rpc
+package tests
 
 import (
 	"context"
@@ -74,27 +74,21 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 		t.Fatalf("leader topic path %q should be a directory", leaderTopicDir)
 	}
 
-	// Verify topic/replica exists on follower (follower has replica-0 for this topic)
-	replicaView, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	// Verify topic/replica exists on follower (follower has replica for this topic)
+	replicaTopic, err := followerSrv.TopicManager.GetTopic(topicName)
 	if err != nil {
-		t.Fatalf("GetReplica on follower: %v (creating topic on leader should create replica on follower)", err)
+		t.Fatalf("GetTopic on follower: %v (creating topic on leader should create replica on follower)", err)
 	}
-	if replicaView == nil || replicaView.ReplicaID != "replica-0" {
-		t.Fatalf("follower should have replica-0 for topic, got %+v", replicaView)
+	if replicaTopic == nil || replicaTopic.Log == nil {
+		t.Fatalf("follower should have topic with replica log, got %+v", replicaTopic)
 	}
 
-	// Verify follower topic and replica directories exist (BaseDir/topic, BaseDir/topic/replicaID)
+	// Verify follower topic directory exists (BaseDir/topic)
 	followerTopicDir := filepath.Join(followerSrv.BaseDir, topicName)
-	replicaDir := filepath.Join(followerTopicDir, "replica-0")
 	if fi, err := os.Stat(followerTopicDir); err != nil {
 		t.Fatalf("follower topic dir %q should exist: %v", followerTopicDir, err)
 	} else if !fi.IsDir() {
 		t.Fatalf("follower topic path %q should be a directory", followerTopicDir)
-	}
-	if fi, err := os.Stat(replicaDir); err != nil {
-		t.Fatalf("follower replica dir %q should exist: %v", replicaDir, err)
-	} else if !fi.IsDir() {
-		t.Fatalf("follower replica path %q should be a directory", replicaDir)
 	}
 }
 
@@ -133,9 +127,9 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 		t.Fatalf("follower should have topic after leader created it with replica: %v", err)
 	}
 
-	_, err = followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	_, err = followerSrv.TopicManager.GetTopic(topicName)
 	if err != nil {
-		t.Fatalf("follower should have replica-0: %v", err)
+		t.Fatalf("follower should have topic (replica): %v", err)
 	}
 
 	// Verify topic directory exists on follower (BaseDir/topic/replicaID)
@@ -172,10 +166,10 @@ func TestDeleteReplica(t *testing.T) {
 	}
 
 	// Verify replica and directory exist on follower
-	replicaDir := filepath.Join(followerSrv.BaseDir, topicName, "replica-0")
-	_, err = followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	replicaDir := filepath.Join(followerSrv.BaseDir, topicName)
+	_, err = followerSrv.TopicManager.GetTopic(topicName)
 	if err != nil {
-		t.Fatalf("GetReplica before delete: %v", err)
+		t.Fatalf("GetTopic before delete: %v", err)
 	}
 	if _, err := os.Stat(replicaDir); err != nil {
 		t.Fatalf("replica dir %q should exist before delete: %v", replicaDir, err)
@@ -187,17 +181,16 @@ func TestDeleteReplica(t *testing.T) {
 		t.Fatalf("NewReplicationClient: %v", err)
 	}
 	_, err = replClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
-		Topic:     topicName,
-		ReplicaId: "replica-0",
+		Topic: topicName,
 	})
 	if err != nil {
 		t.Fatalf("DeleteReplica: %v", err)
 	}
 
 	// Verify replica is gone from TopicManager
-	_, err = followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	_, err = followerSrv.TopicManager.GetTopic(topicName)
 	if err == nil {
-		t.Fatal("GetReplica after delete should fail (replica should be gone)")
+		t.Fatal("GetTopic after delete should fail (replica should be gone)")
 	}
 
 	// Verify replica directory is gone on follower
@@ -247,8 +240,7 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
 	_, err = replClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
-		Topic:     topicName,
-		ReplicaId: "replica-0",
+		Topic: topicName,
 	})
 	if err != nil {
 		t.Fatalf("DeleteReplica: %v", err)
@@ -314,18 +306,18 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 
 	// Wait for replication to catch up (follower replica fetches from leader)
 	// Then verify follower's replica log has the same messages
-	replicaNode, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	replicaTopic, err := followerSrv.TopicManager.GetTopic(topicName)
 	if err != nil {
-		t.Fatalf("GetReplica: %v", err)
+		t.Fatalf("GetTopic (replica): %v", err)
 	}
-	if replicaNode.Log == nil {
+	if replicaTopic.Log == nil {
 		t.Fatal("replica should have Log")
 	}
 
 	// Poll until we have at least len(messages) entries (replication may be async)
 	var lastLEO uint64
 	for try := 0; try < 50; try++ {
-		lastLEO = replicaNode.Log.LEO()
+		lastLEO = replicaTopic.Log.LEO()
 		if lastLEO >= uint64(len(messages)) {
 			break
 		}
@@ -340,7 +332,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	// Replica stores payload only (from raw chunk); segment.Read returns [offset 8][payload].
 	const offWidth = 8
 	for i, want := range messages {
-		raw, err := replicaNode.Log.ReadUncommitted(uint64(i))
+		raw, err := replicaTopic.Log.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted(%d): %v", i, err)
 		}
@@ -394,18 +386,18 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 
 	// Wait for replication to catch up (follower replica fetches from leader)
 	// Then verify follower's replica log has the same messages
-	replicaNode, err := followerSrv.TopicManager.GetReplica(topicName, "replica-0")
+	replicaTopic, err := followerSrv.TopicManager.GetTopic(topicName)
 	if err != nil {
-		t.Fatalf("GetReplica: %v", err)
+		t.Fatalf("GetTopic (replica): %v", err)
 	}
-	if replicaNode.Log == nil {
+	if replicaTopic.Log == nil {
 		t.Fatal("replica should have Log")
 	}
 
-	// Poll until we have at least len(messages) entries (replication may be async)
+	// Poll until we have at least len(values) entries (replication may be async)
 	var lastLEO uint64
 	for try := 0; try < 50; try++ {
-		lastLEO = replicaNode.Log.LEO()
+		lastLEO = replicaTopic.Log.LEO()
 		if lastLEO >= uint64(len(values)) {
 			break
 		}
@@ -420,7 +412,7 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 	// Replica stores payload only (from raw chunk); segment.Read returns [offset 8][payload].
 	const offWidth = 8
 	for i, want := range values {
-		raw, err := replicaNode.Log.ReadUncommitted(uint64(i))
+		raw, err := replicaTopic.Log.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted(%d): %v", i, err)
 		}

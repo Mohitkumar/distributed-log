@@ -4,18 +4,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
 )
 
 type testServers struct {
-	leader            *rpc.TestServer
-	follower          *rpc.TestServer
-	leaderTopicMgr    *topic.TopicManager
-	followerTopicMgr  *topic.TopicManager
-	leaderBaseDir     string
-	followerBaseDir   string
-	cleanup           func()
+	leader           *TestServer
+	follower         *TestServer
+	leaderTopicMgr   *topic.TopicManager
+	followerTopicMgr *topic.TopicManager
+	leaderBaseDir    string
+	followerBaseDir  string
+	cleanup          func()
 }
 
 func (ts *testServers) getLeaderAddr() string {
@@ -29,7 +28,7 @@ func (ts *testServers) getFollowerAddr() string {
 func setupTestServers(tb testing.TB) *testServers {
 	tb.Helper()
 
-	leader, follower := rpc.SetupTwoTestServers(tb, "leader", "follower")
+	leader, follower := SetupTwoTestServers(tb, "leader", "follower")
 	time.Sleep(300 * time.Millisecond)
 
 	return &testServers{

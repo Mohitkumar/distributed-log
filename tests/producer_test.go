@@ -1,4 +1,4 @@
-package rpc
+package tests
 
 import (
 	"context"
@@ -10,14 +10,24 @@ import (
 )
 
 func TestProduce(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	defer ts.Cleanup()
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
+	servers := setupTestServers(t)
+	defer servers.cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	remoteClient.Close()
+
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -46,14 +56,14 @@ func TestProduce(t *testing.T) {
 		t.Fatalf("expected offset 1, got %d", resp2.Offset)
 	}
 
-	// Verify messages on leader
-	leaderNode, err := ts.TopicManager.GetLeader("test-topic")
+	// Verify messages on leader (GetLeader returns *log.LogManager)
+	leaderNode, err := servers.leaderTopicMgr.GetLeader("test-topic")
 	if err != nil {
 		t.Fatalf("GetLeader: %v", err)
 	}
 	const offWidth = 8
 	for i, want := range []string{"hello", "world"} {
-		entry, err := leaderNode.Log.ReadUncommitted(uint64(i))
+		entry, err := leaderNode.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted(%d): %v", i, err)
 		}
@@ -67,11 +77,11 @@ func TestProduce(t *testing.T) {
 }
 
 func TestProduce_TopicNotFound(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	defer ts.Cleanup()
+	servers := setupTestServers(t)
+	defer servers.cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -87,14 +97,24 @@ func TestProduce_TopicNotFound(t *testing.T) {
 }
 
 func TestProduce_WithAckLeader(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	defer ts.Cleanup()
+	servers := setupTestServers(t)
+	defer servers.cleanup()
 
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	ctx := context.Background()
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	remoteClient.Close()
+
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -113,14 +133,24 @@ func TestProduce_WithAckLeader(t *testing.T) {
 }
 
 func TestProduce_Verify(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	defer ts.Cleanup()
+	servers := setupTestServers(t)
+	defer servers.cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	remoteClient.Close()
+
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -138,18 +168,27 @@ func TestProduce_Verify(t *testing.T) {
 			t.Fatalf("expected offset %d, got %d", i, resp.Offset)
 		}
 	}
-
 }
 
 func TestProduceBatch_Verify(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	defer ts.Cleanup()
+	servers := setupTestServers(t)
+	defer servers.cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	remoteClient.Close()
+
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -176,15 +215,25 @@ func TestProduceBatch_Verify(t *testing.T) {
 }
 
 func TestProduce_WithAckAll_NoReplicas(t *testing.T) {
-	// With 0 replicas, ACK_ALL behaves like ACK_LEADER (returns immediately).
-	ts := StartTestServer(t, "leader")
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	defer ts.Cleanup()
+	// With one replica (follower), ACK_ALL waits for replication.
+	servers := setupTestServers(t)
+	defer servers.cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	remoteClient.Close()
+
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -203,18 +252,28 @@ func TestProduce_WithAckAll_NoReplicas(t *testing.T) {
 }
 
 func BenchmarkProduce(b *testing.B) {
-	ts := StartTestServer(b, "leader")
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	servers := setupTestServers(b)
+	defer servers.cleanup()
+
+	ctx := context.Background()
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		b.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
 		b.Fatalf("CreateTopic: %v", err)
 	}
-	defer ts.Cleanup()
+	remoteClient.Close()
 
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
 	defer producerClient.Close()
-	ctx := context.Background()
 	req := &protocol.ProduceRequest{
 		Topic: "test-topic",
 		Value: []byte("bench-value"),
@@ -234,18 +293,28 @@ func BenchmarkProduce(b *testing.B) {
 }
 
 func TestProduceBatch(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	servers := setupTestServers(t)
+	defer servers.cleanup()
+
+	ctx := context.Background()
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	defer ts.Cleanup()
+	remoteClient.Close()
 
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
 	defer producerClient.Close()
-	ctx := context.Background()
 	resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: [][]byte{[]byte("a"), []byte("b"), []byte("c")},
@@ -263,10 +332,10 @@ func TestProduceBatch(t *testing.T) {
 }
 
 func TestProduceBatch_TopicNotFound(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	defer ts.Cleanup()
+	servers := setupTestServers(t)
+	defer servers.cleanup()
 
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -282,13 +351,24 @@ func TestProduceBatch_TopicNotFound(t *testing.T) {
 }
 
 func TestProduceBatch_InvalidArgs(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	servers := setupTestServers(t)
+	defer servers.cleanup()
+
+	ctx := context.Background()
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	defer ts.Cleanup()
+	remoteClient.Close()
 
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -314,18 +394,28 @@ func TestProduceBatch_InvalidArgs(t *testing.T) {
 }
 
 func BenchmarkProduceBatch(b *testing.B) {
-	ts := StartTestServer(b, "leader")
-	if err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	servers := setupTestServers(b)
+	defer servers.cleanup()
+
+	ctx := context.Background()
+	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	if err != nil {
+		b.Fatalf("NewRemoteClient: %v", err)
+	}
+	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        "test-topic",
+		ReplicaCount: 1,
+	})
+	if err != nil {
 		b.Fatalf("CreateTopic: %v", err)
 	}
-	defer ts.Cleanup()
+	remoteClient.Close()
 
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
 	defer producerClient.Close()
-	ctx := context.Background()
 	req := &protocol.ProduceBatchRequest{
 		Topic:  "test-topic",
 		Values: [][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("d"), []byte("e"), []byte("f"), []byte("g"), []byte("h"), []byte("i"), []byte("j")},
