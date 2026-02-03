@@ -30,8 +30,9 @@ type DeleteTopicResponse struct {
 	Topic string
 }
 type RecordLEORequest struct {
-	Topic string
-	Leo   int64
+	NodeID string
+	Topic  string
+	Leo    int64
 }
 type RecordLEOResponse struct{}
 type ReplicateRequest struct {

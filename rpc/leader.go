@@ -31,7 +31,7 @@ func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRe
 
 // RecordLEO records the Log End Offset (LEO) of a replica
 func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
-	err := s.topicManager.RecordLEORemote(req.Topic, uint64(req.Leo), time.Now())
+	err := s.topicManager.RecordLEORemote(req.NodeID, req.Topic, uint64(req.Leo), time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
 	}
