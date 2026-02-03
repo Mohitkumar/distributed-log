@@ -1,19 +1,15 @@
 package main
 
 import (
-	"fmt"
-	"net"
 	"sync"
 
 	"github.com/mohitkumar/mlog/config"
 	"github.com/mohitkumar/mlog/discovery"
 	"github.com/mohitkumar/mlog/node"
-	"github.com/soheilhy/cmux"
 )
 
 type CommandHelper struct {
 	config.Config
-	mux          cmux.CMux
 	membership   *discovery.Membership
 	node         *node.Node
 	shutdown     bool
@@ -21,17 +17,18 @@ type CommandHelper struct {
 	shutdownLock sync.Mutex
 }
 
-func (cmdHelper *CommandHelper) setupMux() error {
-	rpcAddr := fmt.Sprintf(
-		":%d",
-		cmdHelper.Config.NodeConfig.RPCPort,
-	)
-	ln, err := net.Listen("tcp", rpcAddr)
-	if err != nil {
-		return err
+func NewCommandHelper(config config.Config) (*CommandHelper, error) {
+	cmdHelper := &CommandHelper{
+		Config:    config,
+		shutdowns: make(chan struct{}),
 	}
-	cmdHelper.mux = cmux.New(ln)
-	return nil
+	if err := cmdHelper.setupNode(); err != nil {
+		return nil, err
+	}
+	if err := cmdHelper.setupMembership(); err != nil {
+		return nil, err
+	}
+	return cmdHelper, nil
 }
 
 func (cmdHelper *CommandHelper) setupNode() error {
@@ -50,4 +47,22 @@ func (cmdHelper *CommandHelper) setupMembership() error {
 	}
 	cmdHelper.membership = membership
 	return nil
+}
+
+func (cmdHelper *CommandHelper) Start() error {
+	return cmdHelper.node.Start()
+}
+
+func (cmdHelper *CommandHelper) Shutdown() error {
+	cmdHelper.shutdownLock.Lock()
+	defer cmdHelper.shutdownLock.Unlock()
+	if cmdHelper.shutdown {
+		return nil
+	}
+	cmdHelper.shutdown = true
+	close(cmdHelper.shutdowns)
+	if cmdHelper.membership != nil {
+		cmdHelper.membership.Leave()
+	}
+	return cmdHelper.node.Shutdown()
 }

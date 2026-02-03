@@ -2,62 +2,50 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 
-	"github.com/mohitkumar/mlog/consumer"
-	"github.com/mohitkumar/mlog/rpc"
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/config"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 func main() {
 	var (
-		addr    string
-		dataDir string
-		nodeID  string
-		peers   []string
+		addr      string
+		dataDir   string
+		nodeID    string
+		peers     []string
+		raftAddr  string
+		bootstrap bool
 	)
 
 	rootCmd := &cobra.Command{
 		Use:   "server",
 		Short: "Run the mlog TCP transport server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			getOtherNodes := func() []topic.NodeInfo {
-				var nodes []topic.NodeInfo
-				for _, p := range peers {
-					var peerNode, peerAddr string
-					n, _ := fmt.Sscanf(p, "%[^=]=%s", &peerNode, &peerAddr)
-					if n != 2 {
-						continue
-					}
-					nodes = append(nodes, topic.NodeInfo{NodeID: peerNode, Addr: peerAddr})
-				}
-				return nodes
-			}
-
-			topicMgr, err := topic.NewTopicManager(dataDir, nodeID, addr, getOtherNodes)
+			cfg, err := buildConfig(addr, dataDir, nodeID, peers, raftAddr, bootstrap)
 			if err != nil {
-				return fmt.Errorf("create topic manager: %w", err)
+				return err
 			}
-
-			consumerMgr, err := consumer.NewConsumerManager(dataDir)
+			cmdHelper, err := NewCommandHelper(cfg)
 			if err != nil {
-				return fmt.Errorf("create consumer manager: %w", err)
+				return fmt.Errorf("create command helper: %w", err)
 			}
-
-			srv := rpc.NewRpcServer(addr, topicMgr, consumerMgr)
-			if err := srv.Start(); err != nil {
+			if err := cmdHelper.Start(); err != nil {
 				return fmt.Errorf("start server: %w", err)
 			}
-			select {} // block forever
+			return nil
 		},
 	}
 
 	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP listen address")
 	rootCmd.Flags().StringVar(&dataDir, "data-dir", "/tmp/mlog", "data directory")
 	rootCmd.Flags().StringVar(&nodeID, "node-id", "node-1", "node ID")
-	rootCmd.Flags().StringSliceVar(&peers, "peer", nil, "peer nodes (nodeID=addr), repeatable")
+	rootCmd.Flags().StringSliceVar(&peers, "peer", nil, "peer nodes (nodeID=addr) for discovery join, repeatable")
+	rootCmd.Flags().StringVar(&raftAddr, "raft-addr", "127.0.0.1:9093", "Raft transport address")
+	rootCmd.Flags().BoolVar(&bootstrap, "bootstrap", false, "Bootstrap the Raft cluster")
 
 	viper.SetEnvPrefix("mlog")
 	viper.AutomaticEnv()
@@ -65,6 +53,8 @@ func main() {
 	viper.BindPFlag("data_dir", rootCmd.Flags().Lookup("data-dir"))
 	viper.BindPFlag("node_id", rootCmd.Flags().Lookup("node-id"))
 	viper.BindPFlag("peers", rootCmd.Flags().Lookup("peer"))
+	viper.BindPFlag("raft_addr", rootCmd.Flags().Lookup("raft-addr"))
+	viper.BindPFlag("bootstrap", rootCmd.Flags().Lookup("bootstrap"))
 
 	if viper.IsSet("addr") {
 		addr = viper.GetString("addr")
@@ -78,9 +68,48 @@ func main() {
 	if viper.IsSet("peers") {
 		peers = viper.GetStringSlice("peers")
 	}
+	if viper.IsSet("raft_addr") {
+		raftAddr = viper.GetString("raft_addr")
+	}
+	if viper.IsSet("bootstrap") {
+		bootstrap = viper.GetBool("bootstrap")
+	}
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func buildConfig(addr, dataDir, nodeID string, peers []string, raftAddr string, bootstrap bool) (config.Config, error) {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return config.Config{}, fmt.Errorf("invalid addr %q: %w", addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return config.Config{}, fmt.Errorf("invalid port in addr %q: %w", addr, err)
+	}
+	startJoinAddrs := make([]string, 0, len(peers))
+	for _, p := range peers {
+		var peerNode, peerAddr string
+		if n, _ := fmt.Sscanf(p, "%[^=]=%s", &peerNode, &peerAddr); n == 2 {
+			startJoinAddrs = append(startJoinAddrs, peerAddr)
+		}
+	}
+	return config.Config{
+		BindAddr:       addr,
+		StartJoinAddrs: startJoinAddrs,
+		NodeConfig: config.NodeConfig{
+			ID:      nodeID,
+			RPCPort: port,
+			DataDir: dataDir,
+		},
+		RaftConfig: config.RaftConfig{
+			ID:         nodeID,
+			Address:    raftAddr,
+			Dir:        dataDir,
+			Boostatrap: bootstrap,
+		},
+	}, nil
 }

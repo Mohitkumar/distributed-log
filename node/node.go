@@ -18,13 +18,12 @@ var _ discovery.Handler = (*Node)(nil)
 
 // Node represents a physical server running an RPC server.
 type Node struct {
-	NodeID             string
-	NodeAddr           string
-	rpcServer          *rpc.RpcServer
-	raft               *raft.Raft
-	logger             *zap.Logger
-	IsLeaderController bool
-	cfg                config.Config
+	NodeID    string
+	NodeAddr  string
+	rpcServer *rpc.RpcServer
+	raft      *raft.Raft
+	logger    *zap.Logger
+	cfg       config.Config
 }
 
 func NewNodeFromConfig(config config.Config) (*Node, error) {
@@ -36,13 +35,17 @@ func NewNodeFromConfig(config config.Config) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	rpcAddr, err := config.RPCAddr()
+	if err != nil {
+		return nil, err
+	}
 	n := &Node{
 		NodeID:   config.NodeConfig.ID,
-		NodeAddr: config.NodeConfig.Address,
+		NodeAddr: rpcAddr,
 		raft:     raft,
 		cfg:      config,
 	}
-	topicMgr, err := topic.NewTopicManager(config.NodeConfig.DataDir, config.NodeConfig.ID, config.NodeConfig.Address, n.GetOtherNodes)
+	topicMgr, err := topic.NewTopicManager(config.NodeConfig.DataDir, config.NodeConfig.ID, rpcAddr, n.GetOtherNodes)
 	if err != nil {
 		return nil, fmt.Errorf("create topic manager: %w", err)
 	}
@@ -51,10 +54,7 @@ func NewNodeFromConfig(config config.Config) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create consumer manager: %w", err)
 	}
-	rpcServer := rpc.NewRpcServer(config.NodeConfig.Address, topicMgr, consumerMgr)
-	if err != nil {
-		return nil, err
-	}
+	rpcServer := rpc.NewRpcServer(rpcAddr, topicMgr, consumerMgr)
 
 	n.rpcServer = rpcServer
 	return n, nil
@@ -109,6 +109,10 @@ func (n *Node) GetOtherNodes() []common.NodeInfo {
 		nodes = append(nodes, common.NodeInfo{NodeID: string(srv.ID), RpcAddr: string(srv.Address)})
 	}
 	return nodes
+}
+
+func (n *Node) IsLeader() bool {
+	return n.raft.State() == raft.Leader
 }
 
 func (n *Node) Shutdown() error {
