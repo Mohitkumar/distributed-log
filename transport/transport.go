@@ -79,6 +79,13 @@ func (t *Transport) Serve(ln net.Listener) {
 	}
 }
 
+// ServeWithListener sets ln as the transport's listener (so Close works) and serves on it in a goroutine.
+// Use this when the listener was created outside the transport (e.g. tests that need the bound address before creating the node).
+func (t *Transport) ServeWithListener(ln net.Listener) {
+	t.ln = ln
+	go t.Serve(ln)
+}
+
 func (t *Transport) ListenAndServe(addr string) error {
 	ln, err := t.Listen(addr)
 	if err != nil {

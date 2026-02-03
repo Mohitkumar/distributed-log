@@ -34,8 +34,9 @@ type IsrUpdateEvent struct {
 }
 
 type AddNodeEvent struct {
-	NodeID string `json:"node_id"`
-	Addr   string `json:"addr"`
+	NodeID  string `json:"node_id"`
+	Addr    string `json:"addr"`
+	RpcAddr string `json:"rpc_addr"`
 }
 
 type RemoveNodeEvent struct {

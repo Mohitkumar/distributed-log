@@ -51,20 +51,49 @@ func main() {
 		},
 	}
 
-	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP server address")
+	rootCmd.PersistentFlags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP server address")
 	rootCmd.Flags().StringVar(&topic, "topic", "", "topic name (required)")
 	rootCmd.Flags().StringVar(&value, "value", "", "message value (required)")
 	rootCmd.Flags().Int32Var(&acks, "acks", int32(protocol.AckLeader), "acks: 0=none,1=leader,2=all")
 
 	viper.SetEnvPrefix("mlog")
 	viper.AutomaticEnv()
-	viper.BindPFlag("addr", rootCmd.Flags().Lookup("addr"))
+	viper.BindPFlag("addr", rootCmd.PersistentFlags().Lookup("addr"))
 	if viper.IsSet("addr") {
 		addr = viper.GetString("addr")
 	}
 
 	rootCmd.MarkFlagRequired("topic")
 	rootCmd.MarkFlagRequired("value")
+
+	var createTopicName string
+	var replicas uint32
+	createTopicCmd := &cobra.Command{
+		Use:   "create-topic",
+		Short: "Create a topic on the cluster (request goes to addr; node forwards to leader → topic leader)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			producerClient, err := client.NewProducerClient(addr)
+			if err != nil {
+				return err
+			}
+			defer producerClient.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			resp, err := producerClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+				Topic:        createTopicName,
+				ReplicaCount: replicas,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("topic=%s\n", resp.Topic)
+			return nil
+		},
+	}
+	createTopicCmd.Flags().StringVar(&createTopicName, "topic", "", "topic name (required)")
+	createTopicCmd.Flags().Uint32Var(&replicas, "replicas", 1, "replica count")
+	createTopicCmd.MarkFlagRequired("topic")
+	rootCmd.AddCommand(createTopicCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

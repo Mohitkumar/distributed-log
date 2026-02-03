@@ -4,14 +4,43 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mohitkumar/mlog/config"
+	"github.com/mohitkumar/mlog/node"
 )
+
+// testNode creates a Node for use in topic tests. Caller must call n.Shutdown() when done.
+func testNode(t *testing.T, dir string) *node.Node {
+	t.Helper()
+	cfg := config.Config{
+		BindAddr: "127.0.0.1:19092",
+		NodeConfig: config.NodeConfig{
+			ID:      "node-1",
+			RPCPort: 19092,
+			DataDir: dir,
+		},
+		RaftConfig: config.RaftConfig{
+			ID:         "node-1",
+			Address:    "127.0.0.1:19093",
+			Dir:        filepath.Join(dir, "raft"),
+			Boostatrap: false,
+		},
+	}
+	n, err := node.NewNodeFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("NewNodeFromConfig: %v", err)
+	}
+	return n
+}
 
 // TestTopicManager_CreateTopicLeaderOnly verifies that creating a topic
 // with zero replicas sets up a leader and a backing log that can be written/read.
 func TestTopicManager_CreateTopicLeaderOnly(t *testing.T) {
 	dir := t.TempDir()
+	n := testNode(t, dir)
+	defer n.Shutdown()
 
-	tm, err := NewTopicManager(dir, "node-1", "127.0.0.1:19092", nil)
+	tm, err := NewTopicManager(dir, n)
 	if err != nil {
 		t.Fatalf("NewTopicManager error = %v", err)
 	}
@@ -58,8 +87,10 @@ func TestTopicManager_CreateTopicLeaderOnly(t *testing.T) {
 // closes and deletes the leader log directory.
 func TestTopicManager_DeleteTopic(t *testing.T) {
 	dir := t.TempDir()
+	n := testNode(t, dir)
+	defer n.Shutdown()
 
-	tm, err := NewTopicManager(dir, "node-1", "127.0.0.1:19092", nil)
+	tm, err := NewTopicManager(dir, n)
 	if err != nil {
 		t.Fatalf("NewTopicManager error = %v", err)
 	}

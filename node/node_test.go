@@ -1,32 +1,35 @@
 package node
 
 import (
+	"path/filepath"
 	"testing"
 
-	"github.com/mohitkumar/mlog/consumer"
-	"github.com/mohitkumar/mlog/rpc"
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/config"
 )
 
-// TestNewNode verifies that a Node can be created with an RPC server.
-func TestNewNode(t *testing.T) {
-	addr := "127.0.0.1:0"
+// TestNewNodeFromConfig verifies that a Node can be created from config (Raft only; no RPC server).
+func TestNewNodeFromConfig(t *testing.T) {
 	baseDir := t.TempDir()
-	topicMgr, err := topic.NewTopicManager(baseDir, "node-1", addr, nil)
-	if err != nil {
-		t.Fatalf("NewTopicManager: %v", err)
+	cfg := config.Config{
+		BindAddr: "127.0.0.1:9092",
+		NodeConfig: config.NodeConfig{
+			ID:      "node-1",
+			RPCPort: 9092,
+			DataDir: baseDir,
+		},
+		RaftConfig: config.RaftConfig{
+			ID:         "node-1",
+			Address:    "127.0.0.1:9093",
+			Dir:        filepath.Join(baseDir, "raft"),
+			Boostatrap: false, // bootstrap requires proper setup; skip for unit test
+		},
 	}
-	consumerMgr, err := consumer.NewConsumerManager(baseDir)
+	n, err := NewNodeFromConfig(cfg)
 	if err != nil {
-		t.Fatalf("NewConsumerManager: %v", err)
+		t.Fatalf("NewNodeFromConfig: %v", err)
 	}
-	srv := rpc.NewRpcServer(addr, topicMgr, consumerMgr)
-
-	n, err := NewNode("node-1", addr, srv)
-	if err != nil {
-		t.Fatalf("NewNode: %v", err)
-	}
-	if n.NodeID != "node-1" || n.NodeAddr != addr {
+	defer n.Shutdown()
+	if n.NodeID != "node-1" || n.NodeAddr == "" {
 		t.Fatalf("Node fields: got NodeID=%q NodeAddr=%q", n.NodeID, n.NodeAddr)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/log"
+	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/protocol"
 )
 
@@ -66,23 +67,27 @@ type ReplicaView struct {
 
 // TopicManager manages topics on this node.
 type TopicManager struct {
-	mu              sync.RWMutex
-	topics          map[string]*Topic
-	BaseDir         string
-	CurrentNodeID   string
-	CurrentNodeAddr string
-	GetOtherNodes   func() []common.NodeInfo
+	mu      sync.RWMutex
+	topics  map[string]*Topic
+	BaseDir string
+	node    *node.Node
 }
 
-// NewTopicManager creates a topic manager. GetOtherNodes returns other nodes in the cluster (used when creating topics with replicas).
-func NewTopicManager(baseDir string, currentNodeID string, currentNodeAddr string, getOtherNodes func() []common.NodeInfo) (*TopicManager, error) {
-	return &TopicManager{
-		topics:          make(map[string]*Topic),
-		BaseDir:         baseDir,
-		CurrentNodeID:   currentNodeID,
-		CurrentNodeAddr: currentNodeAddr,
-		GetOtherNodes:   getOtherNodes,
-	}, nil
+func NewTopicManager(baseDir string, n *node.Node) (*TopicManager, error) {
+	tm := &TopicManager{
+		topics:  make(map[string]*Topic),
+		BaseDir: baseDir,
+		node:    n,
+	}
+	return tm, nil
+}
+
+func (tm *TopicManager) currentNodeID() string {
+	return tm.node.GetNodeID()
+}
+
+func (tm *TopicManager) currentNodeAddr() string {
+	return tm.node.GetNodeAddr()
 }
 
 // CreateTopic creates a new topic with this node as leader and optional replicas on other nodes.
@@ -103,12 +108,15 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 		Name:         topic,
 		Log:          logManager,
 		isLeader:     true,
-		leaderNodeID: tm.CurrentNodeID,
+		leaderNodeID: tm.currentNodeID(),
 		replicas:     make(map[string]*ReplicaInfo),
 	}
 	tm.topics[topic] = topicObj
 
-	otherNodes := tm.GetOtherNodes()
+	var otherNodes []common.NodeInfo
+	if tm.node != nil {
+		otherNodes = tm.node.GetOtherNodes()
+	}
 	if len(otherNodes) < replicaCount {
 		delete(tm.topics, topic)
 		logManager.Close()
@@ -129,7 +137,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 		_, err = replClient.CreateReplica(context.Background(), &protocol.CreateReplicaRequest{
 			Topic:      topic,
 			ReplicaId:  replicaID,
-			LeaderAddr: tm.CurrentNodeAddr,
+			LeaderAddr: tm.currentNodeAddr(),
 		})
 		if err != nil {
 			delete(tm.topics, topic)
@@ -152,6 +160,61 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 	}
 
 	return nil
+}
+
+// CreateTopicWithForwarding creates a topic, forwarding to the Raft leader and then to the topic leader when node is set.
+// When node is nil (e.g. single-node/test), creates the topic locally only.
+func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
+	if tm.node == nil {
+		if err := tm.CreateTopic(req.Topic, int(req.ReplicaCount)); err != nil {
+			return nil, fmt.Errorf("failed to create topic: %w", err)
+		}
+		return &protocol.CreateTopicResponse{Topic: req.Topic}, nil
+	}
+	n := tm.node
+	if !n.IsLeader() {
+		leaderAddr := n.GetLeaderRpcAddr()
+		if leaderAddr == "" {
+			return nil, fmt.Errorf("cannot reach Raft leader")
+		}
+		remote, err := client.NewRemoteClient(leaderAddr)
+		if err != nil {
+			return nil, fmt.Errorf("forward to leader: %w", err)
+		}
+		defer remote.Close()
+		return remote.CreateTopic(ctx, req)
+	}
+	// We are the Raft leader: decide topic leader from metadata, apply event, forward to that node.
+	if n.TopicExists(req.Topic) {
+		return nil, fmt.Errorf("topic %s already exists", req.Topic)
+	}
+	ids := n.GetClusterNodeIDs()
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no nodes in cluster")
+	}
+	topicLeaderID := ids[0]
+	topicLeaderAddr := n.GetRpcAddrForNodeID(topicLeaderID)
+	if topicLeaderAddr == "" {
+		return nil, fmt.Errorf("no RPC address for topic leader node %s (ensure membership is set)", topicLeaderID)
+	}
+	ev := &protocol.MetadataEvent{
+		CreateTopicEvent: &protocol.CreateTopicEvent{
+			Topic:        req.Topic,
+			ReplicaCount: req.ReplicaCount,
+			LeaderID:     topicLeaderID,
+			LeaderEpoch:  1,
+			Replicas:     []string{topicLeaderID},
+		},
+	}
+	if err := n.ApplyCreateTopicEvent(ev); err != nil {
+		return nil, fmt.Errorf("apply create topic event: %w", err)
+	}
+	remote, err := client.NewRemoteClient(topicLeaderAddr)
+	if err != nil {
+		return nil, fmt.Errorf("forward to topic leader: %w", err)
+	}
+	defer remote.Close()
+	return remote.CreateTopic(ctx, req)
 }
 
 // DeleteTopic deletes a topic (caller must be leader). Closes and deletes leader log; deletes replicas on remote nodes.
@@ -185,6 +248,47 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 
 	delete(tm.topics, topic)
 	return nil
+}
+
+// DeleteTopicWithForwarding deletes a topic. If this node is the topic leader, deletes locally and applies DeleteTopicEvent.
+// Otherwise, when node is set, forwards the request to the topic leader. When node is nil, deletes locally only (fails if not leader).
+func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
+	if tm.node == nil {
+		if err := tm.DeleteTopic(req.Topic); err != nil {
+			return nil, fmt.Errorf("failed to delete topic: %w", err)
+		}
+		return &protocol.DeleteTopicResponse{Topic: req.Topic}, nil
+	}
+	// If we have the topic and we're the leader, delete locally and apply metadata event.
+	topicObj, err := tm.GetTopic(req.Topic)
+	if err == nil && topicObj != nil {
+		topicObj.mu.RLock()
+		isLeader := topicObj.isLeader
+		topicObj.mu.RUnlock()
+		if isLeader {
+			if err := tm.DeleteTopic(req.Topic); err != nil {
+				return nil, fmt.Errorf("failed to delete topic: %w", err)
+			}
+			ev := &protocol.MetadataEvent{
+				DeleteTopicEvent: &protocol.DeleteTopicEvent{Topic: req.Topic},
+			}
+			if err := tm.node.ApplyDeleteTopicEvent(ev); err != nil {
+				return nil, fmt.Errorf("apply delete topic event: %w", err)
+			}
+			return &protocol.DeleteTopicResponse{Topic: req.Topic}, nil
+		}
+	}
+	// Forward to topic leader.
+	leaderAddr := tm.node.GetTopicLeaderRpcAddr(req.Topic)
+	if leaderAddr == "" {
+		return nil, fmt.Errorf("topic %s not found", req.Topic)
+	}
+	remote, err := client.NewRemoteClient(leaderAddr)
+	if err != nil {
+		return nil, fmt.Errorf("forward to topic leader: %w", err)
+	}
+	defer remote.Close()
+	return remote.DeleteTopic(ctx, req)
 }
 
 // GetLeader returns the leader log view for a topic (this node must be the leader).

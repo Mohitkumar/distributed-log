@@ -54,6 +54,11 @@ func NewRemoteClient(addr string) (*RemoteClient, error) {
 	return &RemoteClient{tc: tc}, nil
 }
 
+// Close closes the transport connection.
+func (c *RemoteClient) Close() error {
+	return c.tc.Close()
+}
+
 func (c *RemoteClient) CreateReplica(ctx context.Context, req *protocol.CreateReplicaRequest) (*protocol.CreateReplicaResponse, error) {
 	resp, err := c.tc.Call(*req)
 	if err != nil {

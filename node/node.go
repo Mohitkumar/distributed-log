@@ -1,29 +1,29 @@
 package node
 
 import (
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/hashicorp/raft"
 	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/config"
-	"github.com/mohitkumar/mlog/consumer"
 	"github.com/mohitkumar/mlog/coordinator"
 	"github.com/mohitkumar/mlog/discovery"
-	"github.com/mohitkumar/mlog/rpc"
-	"github.com/mohitkumar/mlog/topic"
-	"go.uber.org/zap"
+	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/raftmeta"
 )
 
 var _ discovery.Handler = (*Node)(nil)
 
-// Node represents a physical server running an RPC server.
+// Node represents a cluster node (Raft + membership). RPC server, topic manager,
+// and consumer manager are built in the helper to avoid cyclic dependencies.
 type Node struct {
-	NodeID    string
-	NodeAddr  string
-	rpcServer *rpc.RpcServer
-	raft      *raft.Raft
-	logger    *zap.Logger
-	cfg       config.Config
+	NodeID        string
+	NodeAddr      string
+	raft          *raft.Raft
+	cfg           config.Config
+	metadataStore *raftmeta.MetadataStore
 }
 
 func NewNodeFromConfig(config config.Config) (*Node, error) {
@@ -31,7 +31,7 @@ func NewNodeFromConfig(config config.Config) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	raft, err := coordinator.SetupRaft(fsm, config.RaftConfig.ID, config.RaftConfig.Address, config.RaftConfig.Dir, config.RaftConfig.Boostatrap)
+	raftNode, err := coordinator.SetupRaft(fsm, config.RaftConfig.ID, config.RaftConfig.Address, config.RaftConfig.Dir, config.RaftConfig.Boostatrap)
 	if err != nil {
 		return nil, err
 	}
@@ -40,28 +40,93 @@ func NewNodeFromConfig(config config.Config) (*Node, error) {
 		return nil, err
 	}
 	n := &Node{
-		NodeID:   config.NodeConfig.ID,
-		NodeAddr: rpcAddr,
-		raft:     raft,
-		cfg:      config,
+		NodeID:        config.NodeConfig.ID,
+		NodeAddr:      rpcAddr,
+		raft:          raftNode,
+		cfg:           config,
+		metadataStore: fsm.MetadataStore,
 	}
-	topicMgr, err := topic.NewTopicManager(config.NodeConfig.DataDir, config.NodeConfig.ID, rpcAddr, n.GetOtherNodes)
-	if err != nil {
-		return nil, fmt.Errorf("create topic manager: %w", err)
-	}
-
-	consumerMgr, err := consumer.NewConsumerManager(config.NodeConfig.DataDir)
-	if err != nil {
-		return nil, fmt.Errorf("create consumer manager: %w", err)
-	}
-	rpcServer := rpc.NewRpcServer(rpcAddr, topicMgr, consumerMgr)
-
-	n.rpcServer = rpcServer
 	return n, nil
 }
 
-func (n *Node) Start() error {
-	return n.rpcServer.Start()
+// GetLeaderRpcAddr returns the Raft leader's RPC address. If this node is the leader, returns n.NodeAddr.
+func (n *Node) GetLeaderRpcAddr() string {
+	if n.raft.State() == raft.Leader {
+		return n.NodeAddr
+	}
+	leaderAddr := n.raft.Leader()
+	if leaderAddr == "" {
+		return ""
+	}
+	configFuture := n.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		return ""
+	}
+	for _, srv := range configFuture.Configuration().Servers {
+		if srv.Address == leaderAddr {
+			return n.GetRpcAddrForNodeID(string(srv.ID))
+		}
+	}
+	return ""
+}
+
+// GetRpcAddrForNodeID returns the RPC address for a node ID from metadata store. Returns "" if node not found.
+func (n *Node) GetRpcAddrForNodeID(nodeID string) string {
+	meta := n.metadataStore.GetNodeMetadata(nodeID)
+	if meta == nil {
+		return ""
+	}
+	return meta.RpcAddr
+}
+
+// GetTopicLeaderRpcAddr returns the RPC address of the topic leader from metadata. Returns "" if topic not found or leader has no RPC addr.
+func (n *Node) GetTopicLeaderRpcAddr(topic string) string {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil {
+		return ""
+	}
+	return n.GetRpcAddrForNodeID(tm.LeaderID)
+}
+
+// GetClusterNodeIDs returns all node IDs in the Raft configuration.
+func (n *Node) GetClusterNodeIDs() []string {
+	nodes := n.metadataStore.Nodes
+	ids := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		ids = append(ids, node.NodeID)
+	}
+	return ids
+}
+
+// TopicExists returns true if the topic is in the metadata store (created via Raft).
+func (n *Node) TopicExists(topic string) bool {
+	return n.metadataStore.GetTopic(topic) != nil
+}
+
+// ApplyCreateTopicEvent replicates a CreateTopicEvent through Raft. Call only on the Raft leader.
+func (n *Node) ApplyCreateTopicEvent(ev *protocol.MetadataEvent) error {
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	f := n.raft.Apply(data, 5*time.Second)
+	if err := f.Error(); err != nil {
+		return fmt.Errorf("raft apply: %w", err)
+	}
+	return nil
+}
+
+// ApplyDeleteTopicEvent replicates a DeleteTopicEvent through Raft. Call only on the Raft leader (typically by the topic leader after deleting the topic).
+func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	f := n.raft.Apply(data, 5*time.Second)
+	if err := f.Error(); err != nil {
+		return fmt.Errorf("raft apply: %w", err)
+	}
+	return nil
 }
 
 func (n *Node) Join(id, addr string) error {
@@ -88,6 +153,37 @@ func (n *Node) Join(id, addr string) error {
 	if err := addFuture.Error(); err != nil {
 		return err
 	}
+	n.ApplyNodeAddEvent(&protocol.MetadataEvent{
+		AddNodeEvent: &protocol.AddNodeEvent{
+			NodeID:  id,
+			Addr:    addr,
+			RpcAddr: n.NodeAddr,
+		},
+	})
+	return nil
+}
+
+func (n *Node) ApplyNodeAddEvent(ev *protocol.MetadataEvent) error {
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	f := n.raft.Apply(data, 5*time.Second)
+	if err := f.Error(); err != nil {
+		return fmt.Errorf("raft apply: %w", err)
+	}
+	return nil
+}
+
+func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	f := n.raft.Apply(data, 5*time.Second)
+	if err := f.Error(); err != nil {
+		return fmt.Errorf("raft apply: %w", err)
+	}
 	return nil
 }
 
@@ -96,12 +192,27 @@ func (n *Node) Leave(id string) error {
 	if err := removeFuture.Error(); err != nil {
 		return err
 	}
+	n.ApplyNodeRemoveEvent(&protocol.MetadataEvent{
+		RemoveNodeEvent: &protocol.RemoveNodeEvent{
+			NodeID: id,
+		},
+	})
 	return nil
+}
+
+// GetNodeID returns this node's ID.
+func (n *Node) GetNodeID() string {
+	return n.NodeID
+}
+
+// GetNodeAddr returns this node's RPC address.
+func (n *Node) GetNodeAddr() string {
+	return n.NodeAddr
 }
 
 func (n *Node) GetOtherNodes() []common.NodeInfo {
 	servers := n.raft.GetConfiguration().Configuration().Servers
-	nodes := make([]common.NodeInfo, 0, len(servers)-1)
+	nodes := make([]common.NodeInfo, 0)
 	for _, srv := range servers {
 		if srv.ID == raft.ServerID(n.NodeID) {
 			continue
@@ -117,8 +228,5 @@ func (n *Node) IsLeader() bool {
 
 func (n *Node) Shutdown() error {
 	f := n.raft.Shutdown()
-	if err := f.Error(); err != nil {
-		return err
-	}
-	return n.rpcServer.Stop()
+	return f.Error()
 }

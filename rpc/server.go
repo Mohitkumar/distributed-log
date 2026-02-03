@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"net"
 
 	consumermgr "github.com/mohitkumar/mlog/consumer"
 	"github.com/mohitkumar/mlog/protocol"
@@ -85,6 +86,13 @@ func (s *RpcServer) Start() error {
 	s.Addr = s.transport.Addr()
 	go s.transport.Serve(ln)
 	return nil
+}
+
+// ServeOnListener serves on the given listener and sets Addr to the listener's address.
+// Use in tests when the listener was created first so the bound address can be used in config/node.
+func (s *RpcServer) ServeOnListener(ln net.Listener) {
+	s.Addr = ln.Addr().String()
+	s.transport.ServeWithListener(ln)
 }
 
 func (s *RpcServer) Stop() error {

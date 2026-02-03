@@ -10,7 +10,7 @@ import (
 	"github.com/mohitkumar/mlog/protocol"
 )
 
-// CreateTopic creates a new topic with the specified replica count
+// CreateTopic creates a new topic. Forwarding to Raft leader and topic leader is handled by TopicManager.
 func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic name is required")
@@ -18,31 +18,15 @@ func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRe
 	if req.ReplicaCount < 1 {
 		return nil, fmt.Errorf("replica count must be at least 1")
 	}
-
-	err := s.topicManager.CreateTopic(req.Topic, int(req.ReplicaCount))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create topic: %w", err)
-	}
-
-	return &protocol.CreateTopicResponse{
-		Topic: req.Topic,
-	}, nil
+	return s.topicManager.CreateTopicWithForwarding(ctx, req)
 }
 
-// DeleteTopic deletes a topic
+// DeleteTopic deletes a topic. Forwarding to the topic leader is handled by TopicManager.
 func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic name is required")
 	}
-
-	err := s.topicManager.DeleteTopic(req.Topic)
-	if err != nil {
-		return nil, fmt.Errorf("failed to delete topic: %w", err)
-	}
-
-	return &protocol.DeleteTopicResponse{
-		Topic: req.Topic,
-	}, nil
+	return s.topicManager.DeleteTopicWithForwarding(ctx, req)
 }
 
 // RecordLEO records the Log End Offset (LEO) of a replica
