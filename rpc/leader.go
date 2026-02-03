@@ -35,16 +35,10 @@ func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEOReques
 		return nil, fmt.Errorf("replica_id is required")
 	}
 
-	topicObj, err := s.topicManager.GetTopic(req.Topic)
+	err := s.topicManager.RecordLEORemote(req.Topic, req.ReplicaId, uint64(req.Leo), time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("topic %s not found: %w", req.Topic, err)
 	}
-
-	err = topicObj.RecordLEORemote(req.ReplicaId, uint64(req.Leo), time.Now())
-	if err != nil {
-		return nil, fmt.Errorf("failed to record LEO for replica %s in topic %s: %w", req.ReplicaId, req.Topic, err)
-	}
-
 	return &protocol.RecordLEOResponse{}, nil
 }
 

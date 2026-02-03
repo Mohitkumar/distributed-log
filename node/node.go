@@ -187,6 +187,18 @@ func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
 	return nil
 }
 
+func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	f := n.raft.Apply(data, 5*time.Second)
+	if err := f.Error(); err != nil {
+		return fmt.Errorf("raft apply: %w", err)
+	}
+	return nil
+}
+
 func (n *Node) Leave(id string) error {
 	removeFuture := n.raft.RemoveServer(raft.ServerID(id), 0, 0)
 	if err := removeFuture.Error(); err != nil {

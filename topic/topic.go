@@ -665,29 +665,34 @@ func (t *Topic) maybeAdvanceHW() {
 }
 
 // RecordLEORemote records the LEO of a replica (leader only). Called by RPC when a replica reports its LEO.
-func (t *Topic) RecordLEORemote(replicaID string, leo uint64, leoTime time.Time) error {
+func (t *TopicManager) RecordLEORemote(topic string, replicaID string, leo uint64, leoTime time.Time) error {
 	t.mu.RLock()
-	if !t.isLeader {
-		t.mu.RUnlock()
-		return fmt.Errorf("topic %s has no leader on this node", t.Name)
-	}
-	replica, ok := t.replicas[replicaID]
-	t.mu.RUnlock()
+	topicObj, ok := t.topics[topic]
 	if !ok {
-		return fmt.Errorf("replica %s not found", replicaID)
+		return fmt.Errorf("topic %s not found", topic)
 	}
-
-	t.mu.Lock()
-	replica.State.LEO = leo
-	replica.State.LastFetchTime = leoTime
-	if t.Log.LEO() >= 100 && leo >= t.Log.LEO()-100 {
-		replica.State.IsISR = true
-	} else if t.Log.LEO() < 100 {
-		if leo >= t.Log.LEO() {
-			replica.State.IsISR = true
+	if !topicObj.isLeader {
+		return fmt.Errorf("topic %s has no leader on this node", topic)
+	}
+	t.mu.RUnlock()
+	topicObj.mu.Lock()
+	topicObj.replicas[replicaID].State.LEO = leo
+	topicObj.replicas[replicaID].State.LastFetchTime = leoTime
+	if topicObj.Log.LEO() >= 100 && leo >= topicObj.Log.LEO()-100 {
+		topicObj.replicas[replicaID].State.IsISR = true
+	} else if topicObj.Log.LEO() < 100 {
+		if leo >= topicObj.Log.LEO() {
+			topicObj.replicas[replicaID].State.IsISR = true
 		}
+	} else {
+		topicObj.replicas[replicaID].State.IsISR = false
 	}
-	t.mu.Unlock()
-	t.maybeAdvanceHW()
+	topicObj.mu.Unlock()
+	topicObj.maybeAdvanceHW()
+	t.node.ApplyIsrUpdateEvent(&protocol.MetadataEvent{IsrUpdateEvent: &protocol.IsrUpdateEvent{
+		Topic:     topic,
+		ReplicaID: replicaID,
+		Isr:       []string{replicaID},
+	}})
 	return nil
 }
