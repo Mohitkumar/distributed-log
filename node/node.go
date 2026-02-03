@@ -85,7 +85,7 @@ func (n *Node) GetTopicLeaderRpcAddr(topic string) string {
 	if tm == nil {
 		return ""
 	}
-	return n.GetRpcAddrForNodeID(tm.LeaderID)
+	return n.GetRpcAddrForNodeID(tm.LeaderNodeID)
 }
 
 // GetClusterNodeIDs returns all node IDs in the Raft configuration.
@@ -236,6 +236,14 @@ func (n *Node) GetOtherNodes() []common.NodeInfo {
 
 func (n *Node) IsLeader() bool {
 	return n.raft.State() == raft.Leader
+}
+
+func (n *Node) GetTopicLeaderNodeID(topic string) string {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil {
+		return ""
+	}
+	return tm.LeaderNodeID
 }
 
 func (n *Node) Shutdown() error {

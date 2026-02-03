@@ -30,9 +30,8 @@ type DeleteTopicResponse struct {
 	Topic string
 }
 type RecordLEORequest struct {
-	Topic     string
-	ReplicaId string
-	Leo       int64
+	Topic string
+	Leo   int64
 }
 type RecordLEOResponse struct{}
 type ReplicateRequest struct {
@@ -48,15 +47,13 @@ type ReplicateResponse struct {
 // Replication types (replace api/replication).
 type CreateReplicaRequest struct {
 	Topic      string
-	ReplicaId  string
 	LeaderAddr string
 }
 type CreateReplicaResponse struct {
-	ReplicaId string
+	Topic string
 }
 type DeleteReplicaRequest struct {
-	Topic     string
-	ReplicaId string
+	Topic string
 }
 type DeleteReplicaResponse struct{}
 

@@ -7,21 +7,20 @@ import (
 )
 
 type NodeMetadata struct {
-	NodeID    string `json:"node_id"`
-	Addr      string `json:"addr"`
-	RpcAddr   string `json:"rpc_addr"`
-	IsHealthy bool   `json:"is_healthy"`
+	NodeID  string `json:"node_id"`
+	Addr    string `json:"addr"`
+	RpcAddr string `json:"rpc_addr"`
 }
 type TopicMetadata struct {
-	LeaderID    string                   `json:"leader_id"`
-	LeaderEpoch int64                    `json:"leader_epoch"`
-	Replicas    map[string]*ReplicaState `json:"replicas"`
+	LeaderNodeID string                   `json:"leader_id"`
+	LeaderEpoch  int64                    `json:"leader_epoch"`
+	Replicas     map[string]*ReplicaState `json:"replicas"`
 }
 
 type ReplicaState struct {
-	ReplicaID string `json:"replica_id"`
-	LEO       int64  `json:"leo"`
-	IsISR     bool   `json:"is_isr"`
+	ReplicaNodeID string `json:"replica_id"`
+	LEO           int64  `json:"leo"`
+	IsISR         bool   `json:"is_isr"`
 }
 
 type MetadataStore struct {
@@ -51,44 +50,39 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) {
 	case "CreateTopicEvent":
 		e := ev.CreateTopicEvent
 		ms.Topics[e.Topic] = &TopicMetadata{
-			LeaderID:    e.LeaderID,
-			LeaderEpoch: e.LeaderEpoch,
-			Replicas:    make(map[string]*ReplicaState),
+			LeaderNodeID: e.LeaderNodeID,
+			LeaderEpoch:  e.LeaderEpoch,
+			Replicas:     make(map[string]*ReplicaState),
 		}
-		for _, replica := range e.Replicas {
+		for _, replica := range e.ReplicaNodeIds {
 			ms.Topics[e.Topic].Replicas[replica] = &ReplicaState{
-				ReplicaID: replica,
-				LEO:       0,
-				IsISR:     true,
+				ReplicaNodeID: replica,
+				LEO:           0,
+				IsISR:         true,
 			}
 		}
 	case "LeaderChangeEvent":
 		e := ev.LeaderChangeEvent
-		ms.Topics[e.Topic].LeaderID = e.LeaderID
+		ms.Topics[e.Topic].LeaderNodeID = e.LeaderNodeID
 		ms.Topics[e.Topic].LeaderEpoch = e.LeaderEpoch
 	case "IsrUpdateEvent":
 		e := ev.IsrUpdateEvent
-		ms.Topics[e.Topic].Replicas[e.ReplicaID].IsISR = true
-		for _, replica := range e.Isr {
-			ms.Topics[e.Topic].Replicas[replica].IsISR = true
-		}
+		ms.Topics[e.Topic].Replicas[e.ReplicaNodeID].IsISR = true
 	case "DeleteTopicEvent":
 		e := ev.DeleteTopicEvent
 		delete(ms.Topics, e.Topic)
 	case "AddNodeEvent":
 		e := ev.AddNodeEvent
 		ms.Nodes[e.NodeID] = &NodeMetadata{
-			NodeID:    e.NodeID,
-			Addr:      e.Addr,
-			RpcAddr:   e.RpcAddr,
-			IsHealthy: true,
+			NodeID:  e.NodeID,
+			Addr:    e.Addr,
+			RpcAddr: e.RpcAddr,
 		}
 	case "RemoveNodeEvent":
 		e := ev.RemoveNodeEvent
 		delete(ms.Nodes, e.NodeID)
 	case "UpdateNodeEvent":
-		e := ev.UpdateNodeEvent
-		ms.Nodes[e.NodeID].IsHealthy = e.IsHealthy
+		//TODO: update node status
 	}
 }
 

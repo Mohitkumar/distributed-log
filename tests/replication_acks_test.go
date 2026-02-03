@@ -262,12 +262,11 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 		n, produceDuration, replicaLEO, actualLEO)
 }
 
-
 const (
-	benchmarkReplicationNumMsgs   = 1000
-	benchmarkReplicationBatch    = 100
-	benchmarkReplicationPollMs   = 10
-	benchmarkReplicationTimeout  = 30 * time.Second
+	benchmarkReplicationNumMsgs = 1000
+	benchmarkReplicationBatch   = 100
+	benchmarkReplicationPollMs  = 10
+	benchmarkReplicationTimeout = 30 * time.Second
 )
 
 // waitReplicaCatchUp polls until replica LEO >= targetLEO or timeout. Returns catch-up duration.
@@ -275,7 +274,7 @@ func (ts *testServers) waitReplicaCatchUp(topicName string, targetLEO uint64) (t
 	deadline := time.Now().Add(benchmarkReplicationTimeout)
 	start := time.Now()
 	for time.Now().Before(deadline) {
-		replicaNode, err := ts.followerTopicMgr.GetReplica(topicName, "replica-0")
+		replicaNode, err := ts.followerTopicMgr.GetReplica(topicName)
 		if err != nil || replicaNode.Log == nil {
 			time.Sleep(benchmarkReplicationPollMs * time.Millisecond)
 			continue

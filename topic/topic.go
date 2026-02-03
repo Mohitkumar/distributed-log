@@ -9,27 +9,18 @@ import (
 	"time"
 
 	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/log"
 	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/protocol"
 )
 
-// Topic represents a topic on this node: either we are the leader (with log and replica state)
-// or we host a replica (with log and client to leader for replication).
+// In memory representation of a topic
 type Topic struct {
-	mu   sync.RWMutex
-	Name string
-	Log  *log.LogManager
+	mu       sync.RWMutex
+	Name     string
+	Log      *log.LogManager
+	replicas map[string]*ReplicaInfo
 
-	// Leader: this node is the leader for this topic
-	isLeader     bool
-	leaderNodeID string // when leader, equals current node; when replica, leader's node ID
-	replicas     map[string]*ReplicaInfo
-
-	// Replica: this node hosts a replica for this topic
-	replicaID         string
-	leaderAddr        string
 	streamClient      *client.ReplicationStreamClient // replication stream only (send request, Recv until EndOfStream)
 	rpcClient         *client.RemoteClient            // RecordLEO and other request-response RPCs to leader
 	stopChan          chan struct{}
@@ -39,33 +30,18 @@ type Topic struct {
 
 // ReplicaInfo holds metadata and client for a remote replica (leader's view).
 type ReplicaInfo struct {
-	NodeID    string
-	Addr      string
-	ReplicaID string
-	State     ReplicaState
-	client    *client.RemoteClient
+	NodeID string
+	State  ReplicaState
+	client *client.RemoteClient
 }
 
 // ReplicaState tracks a replica's progress (LEO, ISR, etc.).
 type ReplicaState struct {
-	ReplicaID     string
 	LastFetchTime time.Time
 	LEO           uint64
 	IsISR         bool
 }
 
-// LeaderView is returned by GetLeader for read/replicate access to the leader log.
-type LeaderView struct {
-	Log *log.LogManager
-}
-
-// ReplicaView is returned by GetReplica for access to a replica's log.
-type ReplicaView struct {
-	Log       *log.LogManager
-	ReplicaID string
-}
-
-// TopicManager manages topics on this node.
 type TopicManager struct {
 	mu      sync.RWMutex
 	topics  map[string]*Topic
@@ -90,6 +66,10 @@ func (tm *TopicManager) currentNodeAddr() string {
 	return tm.node.GetNodeAddr()
 }
 
+func (m *TopicManager) IsLeader(topic string) bool {
+	return m.node.GetTopicLeaderNodeID(topic) == m.currentNodeID()
+}
+
 // CreateTopic creates a new topic with this node as leader and optional replicas on other nodes.
 func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 	tm.mu.Lock()
@@ -105,18 +85,14 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 	}
 
 	topicObj := &Topic{
-		Name:         topic,
-		Log:          logManager,
-		isLeader:     true,
-		leaderNodeID: tm.currentNodeID(),
-		replicas:     make(map[string]*ReplicaInfo),
+		Name:     topic,
+		Log:      logManager,
+		replicas: make(map[string]*ReplicaInfo),
 	}
 	tm.topics[topic] = topicObj
 
-	var otherNodes []common.NodeInfo
-	if tm.node != nil {
-		otherNodes = tm.node.GetOtherNodes()
-	}
+	otherNodes := tm.node.GetOtherNodes()
+
 	if len(otherNodes) < replicaCount {
 		delete(tm.topics, topic)
 		logManager.Close()
@@ -125,7 +101,6 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 
 	for i := 0; i < replicaCount; i++ {
 		node := otherNodes[i]
-		replicaID := fmt.Sprintf("replica-%d", i)
 
 		replClient, err := client.NewRemoteClient(node.RpcAddr)
 		if err != nil {
@@ -136,21 +111,17 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 
 		_, err = replClient.CreateReplica(context.Background(), &protocol.CreateReplicaRequest{
 			Topic:      topic,
-			ReplicaId:  replicaID,
 			LeaderAddr: tm.currentNodeAddr(),
 		})
 		if err != nil {
 			delete(tm.topics, topic)
 			logManager.Close()
-			return fmt.Errorf("failed to create replica %s on %s: %w", replicaID, node.NodeID, err)
+			return fmt.Errorf("failed to create replica on node %s: %w", node.NodeID, err)
 		}
 
-		topicObj.replicas[replicaID] = &ReplicaInfo{
-			NodeID:    node.NodeID,
-			Addr:      node.RpcAddr,
-			ReplicaID: replicaID,
+		topicObj.replicas[node.NodeID] = &ReplicaInfo{
+			NodeID: node.NodeID,
 			State: ReplicaState{
-				ReplicaID:     replicaID,
 				LastFetchTime: time.Now(),
 				LEO:           0,
 				IsISR:         false,
@@ -192,29 +163,33 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("no nodes in cluster")
 	}
-	topicLeaderID := ids[0]
+	topicLeaderID := ids[0] //TODO select random node as topic leader
 	topicLeaderAddr := n.GetRpcAddrForNodeID(topicLeaderID)
 	if topicLeaderAddr == "" {
 		return nil, fmt.Errorf("no RPC address for topic leader node %s (ensure membership is set)", topicLeaderID)
 	}
-	ev := &protocol.MetadataEvent{
-		CreateTopicEvent: &protocol.CreateTopicEvent{
-			Topic:        req.Topic,
-			ReplicaCount: req.ReplicaCount,
-			LeaderID:     topicLeaderID,
-			LeaderEpoch:  1,
-			Replicas:     []string{topicLeaderID},
-		},
-	}
-	if err := n.ApplyCreateTopicEvent(ev); err != nil {
-		return nil, fmt.Errorf("apply create topic event: %w", err)
-	}
+
 	remote, err := client.NewRemoteClient(topicLeaderAddr)
 	if err != nil {
 		return nil, fmt.Errorf("forward to topic leader: %w", err)
 	}
 	defer remote.Close()
-	return remote.CreateTopic(ctx, req)
+	resp, err := remote.CreateTopic(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("forward to topic leader: %w", err)
+	}
+	ev := &protocol.MetadataEvent{
+		CreateTopicEvent: &protocol.CreateTopicEvent{
+			Topic:        req.Topic,
+			ReplicaCount: req.ReplicaCount,
+			LeaderNodeID: topicLeaderID,
+			LeaderEpoch:  1,
+		},
+	}
+	if err := n.ApplyCreateTopicEvent(ev); err != nil {
+		return nil, fmt.Errorf("apply create topic event: %w", err)
+	}
+	return resp, nil
 }
 
 // DeleteTopic deletes a topic (caller must be leader). Closes and deletes leader log; deletes replicas on remote nodes.
@@ -227,10 +202,6 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 		return fmt.Errorf("topic %s not found", topic)
 	}
 
-	if !topicObj.isLeader {
-		return fmt.Errorf("topic %s: only leader can delete topic", topic)
-	}
-
 	if topicObj.Log != nil {
 		topicObj.Log.Close()
 		topicObj.Log.Delete()
@@ -240,8 +211,7 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 	for _, replica := range topicObj.replicas {
 		if replica.client != nil {
 			_, _ = replica.client.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
-				Topic:     topic,
-				ReplicaId: replica.ReplicaID,
+				Topic: topic,
 			})
 		}
 	}
@@ -262,10 +232,7 @@ func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *prot
 	// If we have the topic and we're the leader, delete locally and apply metadata event.
 	topicObj, err := tm.GetTopic(req.Topic)
 	if err == nil && topicObj != nil {
-		topicObj.mu.RLock()
-		isLeader := topicObj.isLeader
-		topicObj.mu.RUnlock()
-		if isLeader {
+		if tm.IsLeader(req.Topic) {
 			if err := tm.DeleteTopic(req.Topic); err != nil {
 				return nil, fmt.Errorf("failed to delete topic: %w", err)
 			}
@@ -292,36 +259,14 @@ func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *prot
 }
 
 // GetLeader returns the leader log view for a topic (this node must be the leader).
-func (tm *TopicManager) GetLeader(topic string) (*LeaderView, error) {
+func (tm *TopicManager) GetLeader(topic string) (*log.LogManager, error) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 
-	topicObj, ok := tm.topics[topic]
-	if !ok {
-		return nil, fmt.Errorf("topic %s not found", topic)
+	if !tm.IsLeader(topic) {
+		return nil, fmt.Errorf("topic %s: this node is not leader", topic)
 	}
-	if !topicObj.isLeader {
-		return nil, fmt.Errorf("topic %s has no leader on this node", topic)
-	}
-	return &LeaderView{Log: topicObj.Log}, nil
-}
-
-// GetReplica returns a replica's log view (this node must host that replica).
-func (tm *TopicManager) GetReplica(topic string, replicaID string) (*ReplicaView, error) {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-
-	topicObj, ok := tm.topics[topic]
-	if !ok {
-		return nil, fmt.Errorf("topic %s not found", topic)
-	}
-	if topicObj.isLeader {
-		return nil, fmt.Errorf("topic %s: this node is leader, replica %s is remote", topic, replicaID)
-	}
-	if topicObj.replicaID != replicaID {
-		return nil, fmt.Errorf("replica %s not found for topic %s", replicaID, topic)
-	}
-	return &ReplicaView{Log: topicObj.Log, ReplicaID: topicObj.replicaID}, nil
+	return tm.topics[topic].Log, nil
 }
 
 // GetTopic returns the topic object.
@@ -337,7 +282,7 @@ func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
 }
 
 // CreateReplicaRemote creates a replica for the topic on this node (called by leader via RPC).
-func (tm *TopicManager) CreateReplicaRemote(topic string, replicaID string, leaderAddr string) error {
+func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -345,17 +290,16 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, replicaID string, lead
 	if !ok {
 		topicObj = &Topic{
 			Name:     topic,
-			isLeader: false,
 			replicas: nil,
 		}
 		tm.topics[topic] = topicObj
 	}
 
 	if topicObj.Log != nil {
-		return fmt.Errorf("topic %s already has replica %s", topic, replicaID)
+		return fmt.Errorf("topic %s already has replica", topic)
 	}
 
-	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic, replicaID))
+	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
 		return fmt.Errorf("failed to create log manager for replica: %w", err)
 	}
@@ -370,29 +314,24 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, replicaID string, lead
 	}
 
 	topicObj.Log = logManager
-	topicObj.replicaID = replicaID
-	topicObj.leaderAddr = leaderAddr
 	topicObj.streamClient = streamClient
 	topicObj.rpcClient = rpcClient
 
 	if err := topicObj.StartReplication(); err != nil {
-		return fmt.Errorf("failed to start replication for replica %s: %w", replicaID, err)
+		return fmt.Errorf("failed to start replication: %w", err)
 	}
 
 	return nil
 }
 
 // DeleteReplicaRemote deletes a replica for the topic on this node.
-func (tm *TopicManager) DeleteReplicaRemote(topic string, replicaID string) error {
+func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
 	topicObj, ok := tm.topics[topic]
 	if !ok {
 		return fmt.Errorf("topic %s not found", topic)
-	}
-	if topicObj.replicaID != replicaID {
-		return fmt.Errorf("replica %s not found", replicaID)
 	}
 
 	topicObj.StopReplication()
@@ -412,17 +351,15 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string, replicaID string) erro
 
 // StartReplication starts the replication loop (topic must be a replica). Fetches from leader and appends to log; reports LEO.
 func (t *Topic) StartReplication() error {
-	if t.isLeader {
-		return fmt.Errorf("cannot start replication on leader topic")
-	}
-	if t.leaderAddr == "" || t.streamClient == nil {
-		return fmt.Errorf("leader address or stream client not set for replica %s", t.replicaID)
+
+	if t.streamClient == nil {
+		return fmt.Errorf("stream client not set for topic %s", t.Name)
 	}
 
 	t.mu.Lock()
 	if t.stopChan != nil {
 		t.mu.Unlock()
-		return fmt.Errorf("replication already started for replica %s", t.replicaID)
+		return fmt.Errorf("replication already started for topic %s", t.Name)
 	}
 	t.stopChan = make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -527,9 +464,8 @@ func (t *Topic) replicateStream(ctx context.Context) {
 
 func (t *Topic) reportLEO(ctx context.Context, leo uint64) error {
 	req := &protocol.RecordLEORequest{
-		Topic:     t.Name,
-		ReplicaId: t.replicaID,
-		Leo:       int64(leo),
+		Topic: t.Name,
+		Leo:   int64(leo),
 	}
 	_, err := t.rpcClient.RecordLEO(ctx, req)
 	return err
@@ -537,13 +473,6 @@ func (t *Topic) reportLEO(ctx context.Context, leo uint64) error {
 
 // HandleProduce appends to the topic log (leader only). For ACK_ALL, waits for replicas to catch up.
 func (t *Topic) HandleProduce(ctx context.Context, logEntry *protocol.LogEntry, acks protocol.AckMode) (uint64, error) {
-	t.mu.RLock()
-	if !t.isLeader {
-		t.mu.RUnlock()
-		return 0, fmt.Errorf("topic %s has no leader on this node", t.Name)
-	}
-	t.mu.RUnlock()
-
 	offset, err := t.Log.Append(logEntry.Value)
 	if err != nil {
 		return 0, err
@@ -563,13 +492,6 @@ func (t *Topic) HandleProduce(ctx context.Context, logEntry *protocol.LogEntry, 
 
 // HandleProduceBatch appends multiple records (leader only).
 func (t *Topic) HandleProduceBatch(ctx context.Context, values [][]byte, acks protocol.AckMode) (uint64, uint64, error) {
-	t.mu.RLock()
-	if !t.isLeader {
-		t.mu.RUnlock()
-		return 0, 0, fmt.Errorf("topic %s has no leader on this node", t.Name)
-	}
-	t.mu.RUnlock()
-
 	if len(values) == 0 {
 		return 0, 0, fmt.Errorf("values cannot be empty")
 	}
@@ -650,7 +572,7 @@ func (t *Topic) waitForAllFollowersToCatchUp(ctx context.Context, offset uint64)
 
 func (t *Topic) maybeAdvanceHW() {
 	t.mu.RLock()
-	if !t.isLeader || t.Log == nil {
+	if t.Log == nil {
 		t.mu.RUnlock()
 		return
 	}
@@ -665,34 +587,31 @@ func (t *Topic) maybeAdvanceHW() {
 }
 
 // RecordLEORemote records the LEO of a replica (leader only). Called by RPC when a replica reports its LEO.
-func (t *TopicManager) RecordLEORemote(topic string, replicaID string, leo uint64, leoTime time.Time) error {
+func (t *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64, leoTime time.Time) error {
 	t.mu.RLock()
 	topicObj, ok := t.topics[topic]
 	if !ok {
 		return fmt.Errorf("topic %s not found", topic)
 	}
-	if !topicObj.isLeader {
-		return fmt.Errorf("topic %s has no leader on this node", topic)
-	}
 	t.mu.RUnlock()
 	topicObj.mu.Lock()
-	topicObj.replicas[replicaID].State.LEO = leo
-	topicObj.replicas[replicaID].State.LastFetchTime = leoTime
+	topicObj.replicas[nodeId].State.LEO = leo
+	topicObj.replicas[nodeId].State.LastFetchTime = leoTime
 	if topicObj.Log.LEO() >= 100 && leo >= topicObj.Log.LEO()-100 {
-		topicObj.replicas[replicaID].State.IsISR = true
+		topicObj.replicas[nodeId].State.IsISR = true
 	} else if topicObj.Log.LEO() < 100 {
 		if leo >= topicObj.Log.LEO() {
-			topicObj.replicas[replicaID].State.IsISR = true
+			topicObj.replicas[nodeId].State.IsISR = true
 		}
 	} else {
-		topicObj.replicas[replicaID].State.IsISR = false
+		topicObj.replicas[nodeId].State.IsISR = false
 	}
 	topicObj.mu.Unlock()
 	topicObj.maybeAdvanceHW()
 	t.node.ApplyIsrUpdateEvent(&protocol.MetadataEvent{IsrUpdateEvent: &protocol.IsrUpdateEvent{
-		Topic:     topic,
-		ReplicaID: replicaID,
-		Isr:       []string{replicaID},
+		Topic:         topic,
+		ReplicaNodeID: nodeId,
+		Isr:           topicObj.replicas[nodeId].State.IsISR,
 	}})
 	return nil
 }

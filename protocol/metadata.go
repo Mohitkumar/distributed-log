@@ -10,11 +10,11 @@ type MetadataEvent struct {
 	UpdateNodeEvent   *UpdateNodeEvent
 }
 type CreateTopicEvent struct {
-	Topic        string   `json:"topic"`
-	ReplicaCount uint32   `json:"replica_count"`
-	LeaderID     string   `json:"leader_id"`
-	LeaderEpoch  int64    `json:"leader_epoch"`
-	Replicas     []string `json:"replicas"`
+	Topic          string   `json:"topic"`
+	ReplicaCount   uint32   `json:"replica_count"`
+	LeaderNodeID   string   `json:"leader_id"`
+	LeaderEpoch    int64    `json:"leader_epoch"`
+	ReplicaNodeIds []string `json:"replicas"`
 }
 
 type DeleteTopicEvent struct {
@@ -22,15 +22,15 @@ type DeleteTopicEvent struct {
 }
 
 type LeaderChangeEvent struct {
-	Topic       string `json:"topic"`
-	LeaderID    string `json:"leader_id"`
-	LeaderEpoch int64  `json:"leader_epoch"`
+	Topic        string `json:"topic"`
+	LeaderNodeID string `json:"leader_id"`
+	LeaderEpoch  int64  `json:"leader_epoch"`
 }
 
 type IsrUpdateEvent struct {
-	Topic     string   `json:"topic"`
-	ReplicaID string   `json:"replica_id"`
-	Isr       []string `json:"isr"`
+	Topic         string `json:"topic"`
+	ReplicaNodeID string `json:"replica_id"`
+	Isr           bool   `json:"isr"`
 }
 
 type AddNodeEvent struct {

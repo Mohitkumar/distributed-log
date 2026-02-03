@@ -12,29 +12,27 @@ func (s *RpcServer) CreateReplica(ctx context.Context, req *protocol.CreateRepli
 	if req.Topic == "" {
 		return nil, fmt.Errorf("topic is required")
 	}
-	if req.ReplicaId == "" {
-		return nil, fmt.Errorf("replica_id is required")
-	}
+
 	if req.LeaderAddr == "" {
 		return nil, fmt.Errorf("leader_addr is required")
 	}
 
-	err := s.topicManager.CreateReplicaRemote(req.Topic, req.ReplicaId, req.LeaderAddr)
+	err := s.topicManager.CreateReplicaRemote(req.Topic, req.LeaderAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create replica: %w", err)
 	}
 
 	return &protocol.CreateReplicaResponse{
-		ReplicaId: req.ReplicaId,
+		Topic: req.Topic,
 	}, nil
 }
 
 // DeleteReplica deletes a replica for a topic
 func (s *RpcServer) DeleteReplica(ctx context.Context, req *protocol.DeleteReplicaRequest) (*protocol.DeleteReplicaResponse, error) {
-	if req.ReplicaId == "" {
-		return nil, fmt.Errorf("replica_id is required")
+	if req.Topic == "" {
+		return nil, fmt.Errorf("topic is required")
 	}
-	err := s.topicManager.DeleteReplicaRemote(req.Topic, req.ReplicaId)
+	err := s.topicManager.DeleteReplicaRemote(req.Topic)
 	if err != nil {
 		return nil, fmt.Errorf("failed to delete replica: %w", err)
 	}
