@@ -16,15 +16,6 @@ type producerTestServers struct {
 	followerSrv *TestServer
 }
 
-func (s *producerTestServers) cleanup() {
-	if s.leaderSrv != nil {
-		s.leaderSrv.Cleanup()
-	}
-	if s.followerSrv != nil {
-		s.followerSrv.Cleanup()
-	}
-}
-
 func (s *producerTestServers) getLeaderAddr() string {
 	raftLeader := getLeaderNode(s.leaderSrv, s.followerSrv)
 	if raftLeader == nil {
@@ -36,12 +27,14 @@ func (s *producerTestServers) getLeaderAddr() string {
 	return s.followerSrv.Addr
 }
 
-func (s *producerTestServers) getLeaderTopicMgr() *topic.TopicManager {
-	raftLeader := getLeaderNode(s.leaderSrv, s.followerSrv)
-	if raftLeader == nil {
+// getTopicLeaderTopicMgr returns the TopicManager of the node that is the topic leader for topicName (from metadata).
+// Use this for verification when the topic leader may be different from the Raft leader.
+func (s *producerTestServers) getTopicLeaderTopicMgr(topicName string) *topic.TopicManager {
+	nodeID := s.leaderSrv.Node().GetTopicLeaderNodeID(topicName)
+	if nodeID == "" {
 		return s.leaderSrv.TopicManager
 	}
-	if s.leaderSrv.Node() == raftLeader {
+	if s.leaderSrv.Node().GetNodeID() == nodeID {
 		return s.leaderSrv.TopicManager
 	}
 	return s.followerSrv.TopicManager
@@ -100,7 +93,7 @@ func TestProducer(t *testing.T) {
 			t.Fatalf("expected offset 1, got %d", resp2.Offset)
 		}
 
-		leaderNode, err := servers.getLeaderTopicMgr().GetLeader("test-topic")
+		leaderNode, err := servers.getTopicLeaderTopicMgr("test-topic").GetLeader("test-topic")
 		if err != nil {
 			t.Fatalf("GetLeader: %v", err)
 		}

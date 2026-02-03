@@ -63,11 +63,17 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) {
 		}
 	case "LeaderChangeEvent":
 		e := ev.LeaderChangeEvent
-		ms.Topics[e.Topic].LeaderNodeID = e.LeaderNodeID
-		ms.Topics[e.Topic].LeaderEpoch = e.LeaderEpoch
+		if tm := ms.Topics[e.Topic]; tm != nil {
+			tm.LeaderNodeID = e.LeaderNodeID
+			tm.LeaderEpoch = e.LeaderEpoch
+		}
 	case "IsrUpdateEvent":
 		e := ev.IsrUpdateEvent
-		ms.Topics[e.Topic].Replicas[e.ReplicaNodeID].IsISR = true
+		if tm := ms.Topics[e.Topic]; tm != nil {
+			if rs := tm.Replicas[e.ReplicaNodeID]; rs != nil {
+				rs.IsISR = e.Isr
+			}
+		}
 	case "DeleteTopicEvent":
 		e := ev.DeleteTopicEvent
 		delete(ms.Topics, e.Topic)

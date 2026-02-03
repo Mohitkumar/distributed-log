@@ -21,6 +21,9 @@ type Topic struct {
 	Log      *log.LogManager
 	replicas map[string]*ReplicaInfo
 
+	// nodeID is set for replica topics so RecordLEO can identify this node to the leader.
+	nodeID string
+
 	streamClient      *client.ReplicationStreamClient // replication stream only (send request, Recv until EndOfStream)
 	rpcClient         *client.RemoteClient            // RecordLEO and other request-response RPCs to leader
 	stopChan          chan struct{}
@@ -314,6 +317,7 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) err
 		return fmt.Errorf("topic %s already has replica", topic)
 	}
 
+	topicObj.nodeID = tm.node.GetNodeID()
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
 		return fmt.Errorf("failed to create log manager for replica: %w", err)
@@ -478,9 +482,13 @@ func (t *Topic) replicateStream(ctx context.Context) {
 }
 
 func (t *Topic) reportLEO(ctx context.Context, leo uint64) error {
+	if t.nodeID == "" {
+		return nil // not a replica or node ID not set, skip reporting
+	}
 	req := &protocol.RecordLEORequest{
-		Topic: t.Name,
-		Leo:   int64(leo),
+		NodeID: t.nodeID,
+		Topic:  t.Name,
+		Leo:    int64(leo),
 	}
 	_, err := t.rpcClient.RecordLEO(ctx, req)
 	return err
@@ -603,30 +611,39 @@ func (t *Topic) maybeAdvanceHW() {
 
 // RecordLEORemote records the LEO of a replica (leader only). Called by RPC when a replica reports its LEO.
 func (t *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64, leoTime time.Time) error {
+	if nodeId == "" {
+		return fmt.Errorf("node id is required")
+	}
 	t.mu.RLock()
 	topicObj, ok := t.topics[topic]
 	if !ok {
+		t.mu.RUnlock()
 		return fmt.Errorf("topic %s not found", topic)
 	}
 	t.mu.RUnlock()
 	topicObj.mu.Lock()
-	topicObj.replicas[nodeId].State.LEO = leo
-	topicObj.replicas[nodeId].State.LastFetchTime = leoTime
+	repl, ok := topicObj.replicas[nodeId]
+	if !ok || repl == nil {
+		topicObj.mu.Unlock()
+		return fmt.Errorf("replica %s not found for topic %s", nodeId, topic)
+	}
+	repl.State.LEO = leo
+	repl.State.LastFetchTime = leoTime
 	if topicObj.Log.LEO() >= 100 && leo >= topicObj.Log.LEO()-100 {
-		topicObj.replicas[nodeId].State.IsISR = true
+		repl.State.IsISR = true
 	} else if topicObj.Log.LEO() < 100 {
 		if leo >= topicObj.Log.LEO() {
-			topicObj.replicas[nodeId].State.IsISR = true
+			repl.State.IsISR = true
 		}
 	} else {
-		topicObj.replicas[nodeId].State.IsISR = false
+		repl.State.IsISR = false
 	}
 	topicObj.mu.Unlock()
 	topicObj.maybeAdvanceHW()
 	t.node.ApplyIsrUpdateEvent(&protocol.MetadataEvent{IsrUpdateEvent: &protocol.IsrUpdateEvent{
 		Topic:         topic,
 		ReplicaNodeID: nodeId,
-		Isr:           topicObj.replicas[nodeId].State.IsISR,
+		Isr:           repl.State.IsISR,
 	}})
 	return nil
 }
