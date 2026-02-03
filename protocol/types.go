@@ -17,8 +17,9 @@ const (
 
 // Leader types (replace api/leader).
 type CreateTopicRequest struct {
-	Topic        string
-	ReplicaCount uint32
+	Topic                 string
+	ReplicaCount          uint32
+	DesignatedLeaderNodeID string // when set, only this node should create the topic (used when Raft leader forwards to topic leader)
 }
 type CreateTopicResponse struct {
 	Topic string

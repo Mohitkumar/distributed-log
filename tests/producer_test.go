@@ -7,253 +7,386 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/topic"
 )
 
-func TestProduce(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
+// producerTestServers holds the two-node cluster used by all producer tests (setup once).
+type producerTestServers struct {
+	leaderSrv   *TestServer
+	followerSrv *TestServer
+}
 
-	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
+func (s *producerTestServers) cleanup() {
+	if s.leaderSrv != nil {
+		s.leaderSrv.Cleanup()
 	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        "test-topic",
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic: %v", err)
+	if s.followerSrv != nil {
+		s.followerSrv.Cleanup()
 	}
-	remoteClient.Close()
+}
 
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
+func (s *producerTestServers) getLeaderAddr() string {
+	raftLeader := getLeaderNode(s.leaderSrv, s.followerSrv)
+	if raftLeader == nil {
+		return s.leaderSrv.Addr
 	}
-	defer producerClient.Close()
-	resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
-		Topic: "test-topic",
-		Value: []byte("hello"),
-		Acks:  protocol.AckLeader,
-	})
-	if err != nil {
-		t.Fatalf("Produce: %v", err)
+	if s.leaderSrv.Node() == raftLeader {
+		return s.leaderSrv.Addr
 	}
-	if resp.Offset != 0 {
-		t.Fatalf("expected offset 0, got %d", resp.Offset)
-	}
+	return s.followerSrv.Addr
+}
 
-	resp2, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
-		Topic: "test-topic",
-		Value: []byte("world"),
-		Acks:  protocol.AckLeader,
-	})
-	if err != nil {
-		t.Fatalf("Produce second: %v", err)
+func (s *producerTestServers) getLeaderTopicMgr() *topic.TopicManager {
+	raftLeader := getLeaderNode(s.leaderSrv, s.followerSrv)
+	if raftLeader == nil {
+		return s.leaderSrv.TopicManager
 	}
-	if resp2.Offset != 1 {
-		t.Fatalf("expected offset 1, got %d", resp2.Offset)
+	if s.leaderSrv.Node() == raftLeader {
+		return s.leaderSrv.TopicManager
 	}
+	return s.followerSrv.TopicManager
+}
 
-	// Verify messages on leader (GetLeader returns *log.LogManager)
-	leaderNode, err := servers.leaderTopicMgr.GetLeader("test-topic")
-	if err != nil {
-		t.Fatalf("GetLeader: %v", err)
-	}
-	const offWidth = 8
-	for i, want := range []string{"hello", "world"} {
-		entry, err := leaderNode.ReadUncommitted(uint64(i))
+// TestProducer runs all producer tests with a single two-node cluster setup.
+func TestProducer(t *testing.T) {
+	leaderSrv, followerSrv := StartTwoNodes(t, "producer-leader", "producer-follower")
+	defer leaderSrv.Cleanup()
+	defer followerSrv.Cleanup()
+	waitForLeader(t, leaderSrv.Node(), followerSrv.Node())
+
+	servers := &producerTestServers{leaderSrv: leaderSrv, followerSrv: followerSrv}
+
+	t.Run("Produce", func(t *testing.T) {
+		ctx := context.Background()
+		remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
 		if err != nil {
-			t.Fatalf("ReadUncommitted(%d): %v", i, err)
+			t.Fatalf("NewRemoteClient: %v", err)
 		}
-		if len(entry) < offWidth {
-			t.Fatalf("offset %d: short read", i)
+		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+			Topic:        "test-topic",
+			ReplicaCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
 		}
-		if got := string(entry[offWidth:]); got != want {
-			t.Fatalf("offset %d: got %q, want %q", i, got, want)
+		remoteClient.Close()
+
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
 		}
-	}
-}
-
-func TestProduce_TopicNotFound(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
-
-	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
-		Topic: "nonexistent-topic",
-		Value: []byte("x"),
-		Acks:  protocol.AckLeader,
-	})
-	if err == nil {
-		t.Fatal("expected error for unknown topic")
-	}
-}
-
-func TestProduce_WithAckLeader(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
-
-	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        "test-topic",
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	remoteClient.Close()
-
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
-		Topic: "test-topic",
-		Value: []byte("ack-leader"),
-		Acks:  protocol.AckLeader,
-	})
-	if err != nil {
-		t.Fatalf("Produce: %v", err)
-	}
-	if resp.Offset != 0 {
-		t.Fatalf("expected offset 0, got %d", resp.Offset)
-	}
-}
-
-func TestProduce_Verify(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
-
-	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        "test-topic",
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	remoteClient.Close()
-
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	for i := 0; i < 100; i++ {
+		defer producerClient.Close()
 		resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
 			Topic: "test-topic",
-			Value: []byte(fmt.Sprintf("message-%d", i)),
+			Value: []byte("hello"),
 			Acks:  protocol.AckLeader,
 		})
 		if err != nil {
 			t.Fatalf("Produce: %v", err)
 		}
-		if resp.Offset != uint64(i) {
-			t.Fatalf("expected offset %d, got %d", i, resp.Offset)
+		if resp.Offset != 0 {
+			t.Fatalf("expected offset 0, got %d", resp.Offset)
 		}
-	}
+
+		resp2, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
+			Topic: "test-topic",
+			Value: []byte("world"),
+			Acks:  protocol.AckLeader,
+		})
+		if err != nil {
+			t.Fatalf("Produce second: %v", err)
+		}
+		if resp2.Offset != 1 {
+			t.Fatalf("expected offset 1, got %d", resp2.Offset)
+		}
+
+		leaderNode, err := servers.getLeaderTopicMgr().GetLeader("test-topic")
+		if err != nil {
+			t.Fatalf("GetLeader: %v", err)
+		}
+		const offWidth = 8
+		for i, want := range []string{"hello", "world"} {
+			entry, err := leaderNode.ReadUncommitted(uint64(i))
+			if err != nil {
+				t.Fatalf("ReadUncommitted(%d): %v", i, err)
+			}
+			if len(entry) < offWidth {
+				t.Fatalf("offset %d: short read", i)
+			}
+			if got := string(entry[offWidth:]); got != want {
+				t.Fatalf("offset %d: got %q, want %q", i, got, want)
+			}
+		}
+	})
+
+	t.Run("TopicNotFound", func(t *testing.T) {
+		ctx := context.Background()
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
+		}
+		defer producerClient.Close()
+		_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
+			Topic: "nonexistent-topic",
+			Value: []byte("x"),
+			Acks:  protocol.AckLeader,
+		})
+		if err == nil {
+			t.Fatal("expected error for unknown topic")
+		}
+	})
+
+	t.Run("WithAckLeader", func(t *testing.T) {
+		ctx := context.Background()
+		remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewRemoteClient: %v", err)
+		}
+		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+			Topic:        "test-topic-ack",
+			ReplicaCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		remoteClient.Close()
+
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
+		}
+		defer producerClient.Close()
+		resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
+			Topic: "test-topic-ack",
+			Value: []byte("ack-leader"),
+			Acks:  protocol.AckLeader,
+		})
+		if err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+		if resp.Offset != 0 {
+			t.Fatalf("expected offset 0, got %d", resp.Offset)
+		}
+	})
+
+	t.Run("Verify", func(t *testing.T) {
+		ctx := context.Background()
+		remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewRemoteClient: %v", err)
+		}
+		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+			Topic:        "test-topic-verify",
+			ReplicaCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		remoteClient.Close()
+
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
+		}
+		defer producerClient.Close()
+		for i := 0; i < 100; i++ {
+			resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
+				Topic: "test-topic-verify",
+				Value: []byte(fmt.Sprintf("message-%d", i)),
+				Acks:  protocol.AckLeader,
+			})
+			if err != nil {
+				t.Fatalf("Produce: %v", err)
+			}
+			if resp.Offset != uint64(i) {
+				t.Fatalf("expected offset %d, got %d", i, resp.Offset)
+			}
+		}
+	})
+
+	t.Run("WithAckAll_NoReplicas", func(t *testing.T) {
+		ctx := context.Background()
+		remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewRemoteClient: %v", err)
+		}
+		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+			Topic:        "test-topic-ackall",
+			ReplicaCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		remoteClient.Close()
+
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
+		}
+		defer producerClient.Close()
+		resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
+			Topic: "test-topic-ackall",
+			Value: []byte("ack-all"),
+			Acks:  protocol.AckAll,
+		})
+		if err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+		if resp.Offset != 0 {
+			t.Fatalf("expected offset 0, got %d", resp.Offset)
+		}
+	})
 }
 
-func TestProduceBatch_Verify(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
+// TestProducerBatch runs all produce-batch tests with a single two-node cluster setup.
+func TestProducerBatch(t *testing.T) {
+	leaderSrv, followerSrv := StartTwoNodes(t, "producer-batch-leader", "producer-batch-follower")
+	defer leaderSrv.Cleanup()
+	defer followerSrv.Cleanup()
+	waitForLeader(t, leaderSrv.Node(), followerSrv.Node())
 
-	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        "test-topic",
-		ReplicaCount: 1,
+	servers := &producerTestServers{leaderSrv: leaderSrv, followerSrv: followerSrv}
+
+	t.Run("ProduceBatch", func(t *testing.T) {
+		ctx := context.Background()
+		remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewRemoteClient: %v", err)
+		}
+		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+			Topic:        "test-topic",
+			ReplicaCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		remoteClient.Close()
+
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
+		}
+		defer producerClient.Close()
+		resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
+			Topic:  "test-topic",
+			Values: [][]byte{[]byte("a"), []byte("b"), []byte("c")},
+			Acks:   protocol.AckLeader,
+		})
+		if err != nil {
+			t.Fatalf("ProduceBatch: %v", err)
+		}
+		if resp.Count != 3 {
+			t.Fatalf("expected count 3, got %d", resp.Count)
+		}
+		if resp.BaseOffset != 0 || resp.LastOffset != 2 {
+			t.Fatalf("expected offsets base=0,last=2 got base=%d,last=%d", resp.BaseOffset, resp.LastOffset)
+		}
 	})
-	if err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	remoteClient.Close()
 
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	messages := make([][]byte, 0)
-	for i := 0; i < 100; i++ {
-		messages = append(messages, []byte(fmt.Sprintf("message-%d", i)))
-	}
-	resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
-		Topic:  "test-topic",
-		Values: messages,
-		Acks:   protocol.AckLeader,
+	t.Run("Verify", func(t *testing.T) {
+		ctx := context.Background()
+		remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewRemoteClient: %v", err)
+		}
+		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+			Topic:        "test-topic-batch",
+			ReplicaCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		remoteClient.Close()
+
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
+		}
+		defer producerClient.Close()
+		messages := make([][]byte, 0)
+		for i := 0; i < 100; i++ {
+			messages = append(messages, []byte(fmt.Sprintf("message-%d", i)))
+		}
+		resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
+			Topic:  "test-topic-batch",
+			Values: messages,
+			Acks:   protocol.AckLeader,
+		})
+		if err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+		if resp.BaseOffset != 0 {
+			t.Fatalf("expected base offset 0 got %d", resp.BaseOffset)
+		}
+		if resp.LastOffset != 99 {
+			t.Fatalf("expected last offset 99 got %d", resp.LastOffset)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Produce: %v", err)
-	}
 
-	if resp.BaseOffset != 0 {
-		t.Fatalf("expected base offset 0 got %d", resp.BaseOffset)
-	}
-	if resp.LastOffset != 99 {
-		t.Fatalf("expected base offset 0 got %d", resp.LastOffset)
-	}
-}
-
-func TestProduce_WithAckAll_NoReplicas(t *testing.T) {
-	// With one replica (follower), ACK_ALL waits for replication.
-	servers := setupTestServers(t)
-	defer servers.cleanup()
-
-	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        "test-topic",
-		ReplicaCount: 1,
+	t.Run("TopicNotFound", func(t *testing.T) {
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
+		}
+		defer producerClient.Close()
+		_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
+			Topic:  "missing",
+			Values: [][]byte{[]byte("x")},
+			Acks:   protocol.AckLeader,
+		})
+		if err == nil {
+			t.Fatal("expected error for unknown topic")
+		}
 	})
-	if err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	remoteClient.Close()
 
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	resp, err := producerClient.Produce(ctx, &protocol.ProduceRequest{
-		Topic: "test-topic",
-		Value: []byte("ack-all"),
-		Acks:  protocol.AckAll,
+	t.Run("InvalidArgs", func(t *testing.T) {
+		ctx := context.Background()
+		remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewRemoteClient: %v", err)
+		}
+		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+			Topic:        "test-topic",
+			ReplicaCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		remoteClient.Close()
+
+		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		if err != nil {
+			t.Fatalf("NewProducerClient: %v", err)
+		}
+		defer producerClient.Close()
+
+		_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
+			Topic:  "",
+			Values: [][]byte{[]byte("x")},
+			Acks:   protocol.AckLeader,
+		})
+		if err == nil {
+			t.Fatal("expected error for empty topic")
+		}
+
+		_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
+			Topic:  "test-topic",
+			Values: nil,
+			Acks:   protocol.AckLeader,
+		})
+		if err == nil {
+			t.Fatal("expected error for empty values")
+		}
 	})
-	if err != nil {
-		t.Fatalf("Produce: %v", err)
-	}
-	if resp.Offset != 0 {
-		t.Fatalf("expected offset 0, got %d", resp.Offset)
-	}
 }
 
 func BenchmarkProduce(b *testing.B) {
-	servers := setupTestServers(b)
-	defer servers.cleanup()
+	leaderSrv, followerSrv := StartTwoNodes(b, "bench-produce-leader", "bench-produce-follower")
+	defer leaderSrv.Cleanup()
+	defer followerSrv.Cleanup()
+	waitForLeader(b, leaderSrv.Node(), followerSrv.Node())
+
+	servers := &producerTestServers{leaderSrv: leaderSrv, followerSrv: followerSrv}
 
 	ctx := context.Background()
 	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
@@ -280,7 +413,7 @@ func BenchmarkProduce(b *testing.B) {
 		Acks:  protocol.AckLeader,
 	}
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		_, err = producerClient.Produce(ctx, req)
 		if err != nil {
 			b.Fatalf("Produce: %v", err)
@@ -292,110 +425,13 @@ func BenchmarkProduce(b *testing.B) {
 	}
 }
 
-func TestProduceBatch(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
-
-	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        "test-topic",
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	remoteClient.Close()
-
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	resp, err := producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
-		Topic:  "test-topic",
-		Values: [][]byte{[]byte("a"), []byte("b"), []byte("c")},
-		Acks:   protocol.AckLeader,
-	})
-	if err != nil {
-		t.Fatalf("ProduceBatch: %v", err)
-	}
-	if resp.Count != 3 {
-		t.Fatalf("expected count 3, got %d", resp.Count)
-	}
-	if resp.BaseOffset != 0 || resp.LastOffset != 2 {
-		t.Fatalf("expected offsets base=0,last=2 got base=%d,last=%d", resp.BaseOffset, resp.LastOffset)
-	}
-}
-
-func TestProduceBatch_TopicNotFound(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
-
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
-		Topic:  "missing",
-		Values: [][]byte{[]byte("x")},
-		Acks:   protocol.AckLeader,
-	})
-	if err == nil {
-		t.Fatal("expected error for unknown topic")
-	}
-}
-
-func TestProduceBatch_InvalidArgs(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
-
-	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        "test-topic",
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	remoteClient.Close()
-
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-
-	_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
-		Topic:  "",
-		Values: [][]byte{[]byte("x")},
-		Acks:   protocol.AckLeader,
-	})
-	if err == nil {
-		t.Fatal("expected error for empty topic")
-	}
-
-	_, err = producerClient.ProduceBatch(context.Background(), &protocol.ProduceBatchRequest{
-		Topic:  "test-topic",
-		Values: nil,
-		Acks:   protocol.AckLeader,
-	})
-	if err == nil {
-		t.Fatal("expected error for empty values")
-	}
-}
-
 func BenchmarkProduceBatch(b *testing.B) {
-	servers := setupTestServers(b)
-	defer servers.cleanup()
+	leaderSrv, followerSrv := StartTwoNodes(b, "bench-batch-leader", "bench-batch-follower")
+	defer leaderSrv.Cleanup()
+	defer followerSrv.Cleanup()
+	waitForLeader(b, leaderSrv.Node(), followerSrv.Node())
+
+	servers := &producerTestServers{leaderSrv: leaderSrv, followerSrv: followerSrv}
 
 	ctx := context.Background()
 	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
@@ -422,7 +458,7 @@ func BenchmarkProduceBatch(b *testing.B) {
 		Acks:   protocol.AckLeader,
 	}
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		_, err = producerClient.ProduceBatch(ctx, req)
 		if err != nil {
 			b.Fatalf("ProduceBatch: %v", err)

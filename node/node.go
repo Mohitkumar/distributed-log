@@ -129,13 +129,15 @@ func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
 	return nil
 }
 
-func (n *Node) Join(id, addr string) error {
+// Join adds a node to the Raft cluster and records it in metadata. raftAddr is the node's Raft transport address;
+// rpcAddr is the node's RPC address (for CreateTopic/Produce forwarding). If rpcAddr is empty, raftAddr is used for both.
+func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 	configFuture := n.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
 		return err
 	}
 	serverID := raft.ServerID(id)
-	serverAddr := raft.ServerAddress(addr)
+	serverAddr := raft.ServerAddress(raftAddr)
 	for _, srv := range configFuture.Configuration().Servers {
 		if srv.ID == serverID || srv.Address == serverAddr {
 			if srv.ID == serverID && srv.Address == serverAddr {
@@ -149,15 +151,29 @@ func (n *Node) Join(id, addr string) error {
 			}
 		}
 	}
+	// Ensure this node (bootstrap leader) is in metadata so GetClusterNodeIDs() and GetRpcAddrForNodeID work.
+	if n.metadataStore.GetNodeMetadata(n.NodeID) == nil {
+		_ = n.ApplyNodeAddEvent(&protocol.MetadataEvent{
+			AddNodeEvent: &protocol.AddNodeEvent{
+				NodeID:  n.NodeID,
+				Addr:    n.cfg.RaftConfig.Address,
+				RpcAddr: n.NodeAddr,
+			},
+		})
+	}
 	addFuture := n.raft.AddVoter(serverID, serverAddr, 0, 0)
 	if err := addFuture.Error(); err != nil {
 		return err
 	}
+	joinRpcAddr := rpcAddr
+	if joinRpcAddr == "" {
+		joinRpcAddr = raftAddr
+	}
 	n.ApplyNodeAddEvent(&protocol.MetadataEvent{
 		AddNodeEvent: &protocol.AddNodeEvent{
 			NodeID:  id,
-			Addr:    addr,
-			RpcAddr: n.NodeAddr,
+			Addr:    raftAddr,
+			RpcAddr: joinRpcAddr,
 		},
 	})
 	return nil
@@ -222,6 +238,8 @@ func (n *Node) GetNodeAddr() string {
 	return n.NodeAddr
 }
 
+// GetOtherNodes returns other cluster nodes with their RPC addresses (from metadata), not Raft addresses.
+// CreateReplica and other RPCs must dial RpcAddr; using Raft srv.Address would send RPC to Raft transport and cause msgpack/EOF errors.
 func (n *Node) GetOtherNodes() []common.NodeInfo {
 	servers := n.raft.GetConfiguration().Configuration().Servers
 	nodes := make([]common.NodeInfo, 0)
@@ -229,7 +247,12 @@ func (n *Node) GetOtherNodes() []common.NodeInfo {
 		if srv.ID == raft.ServerID(n.NodeID) {
 			continue
 		}
-		nodes = append(nodes, common.NodeInfo{NodeID: string(srv.ID), RpcAddr: string(srv.Address)})
+		nodeID := string(srv.ID)
+		rpcAddr := n.GetRpcAddrForNodeID(nodeID)
+		if rpcAddr == "" {
+			rpcAddr = string(srv.Address) // fallback for tests that haven't set metadata
+		}
+		nodes = append(nodes, common.NodeInfo{NodeID: nodeID, RpcAddr: rpcAddr})
 	}
 	return nodes
 }

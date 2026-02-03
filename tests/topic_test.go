@@ -12,11 +12,11 @@ import (
 )
 
 func TestCreateTopic(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
+	servers := StartTwoNodesForTests(t, "topic-create-leader", "topic-create-follower")
+	defer servers.Cleanup()
 
 	ctx := context.Background()
-	replClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	replClient, err := client.NewRemoteClient(servers.GetLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewReplicationClient: %v", err)
 	}
@@ -33,24 +33,24 @@ func TestCreateTopic(t *testing.T) {
 		t.Fatalf("expected topic %s, got %s", topicName, resp.Topic)
 	}
 
-	if _, err := os.Stat(filepath.Join(servers.leaderBaseDir, topicName)); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(servers.LeaderBaseDir(), topicName)); os.IsNotExist(err) {
 		t.Fatalf("expected topic directory %s to exist on leader, got error: %v", topicName, err)
 	}
-	if _, err := os.Stat(filepath.Join(servers.followerBaseDir, topicName)); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(servers.FollowerBaseDir(), topicName)); os.IsNotExist(err) {
 		t.Fatalf("expected topic directory %s to exist on follower, got error: %v", topicName, err)
 	}
 }
 
 func TestDeleteTopic(t *testing.T) {
-	servers := setupTestServers(t)
-	defer servers.cleanup()
+	servers := StartTwoNodesForTests(t, "topic-delete-leader", "topic-delete-follower")
+	defer servers.Cleanup()
 
 	ctx := context.Background()
-	leaderClient, err := client.NewRemoteClient(servers.getLeaderAddr())
+	leaderClient, err := client.NewRemoteClient(servers.GetLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewReplicationClient: %v", err)
 	}
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+	producerClient, err := client.NewProducerClient(servers.GetLeaderAddr())
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -78,15 +78,14 @@ func TestDeleteTopic(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	leaderTopicDir := filepath.Join(servers.leaderBaseDir, topicName)
-	followerTopicDir := filepath.Join(servers.followerBaseDir, topicName)
-	replicaDir := filepath.Join(followerTopicDir, "replica-0")
+	leaderTopicDir := filepath.Join(servers.LeaderBaseDir(), topicName)
+	followerTopicDir := filepath.Join(servers.FollowerBaseDir(), topicName)
 
 	if _, err := os.Stat(leaderTopicDir); os.IsNotExist(err) {
 		t.Fatalf("expected leader topic directory %s to exist before deletion", leaderTopicDir)
 	}
-	if _, err := os.Stat(replicaDir); os.IsNotExist(err) {
-		t.Fatalf("expected replica directory %s to exist before deletion", replicaDir)
+	if _, err := os.Stat(followerTopicDir); os.IsNotExist(err) {
+		t.Fatalf("expected replica directory %s to exist before deletion", followerTopicDir)
 	}
 
 	deleteResp, err := leaderClient.DeleteTopic(ctx, &protocol.DeleteTopicRequest{Topic: topicName})
@@ -105,8 +104,8 @@ func TestDeleteTopic(t *testing.T) {
 	if _, err := os.Stat(followerTopicDir); !os.IsNotExist(err) {
 		t.Fatalf("expected follower topic directory %s to be deleted, but it still exists", followerTopicDir)
 	}
-	if _, err := os.Stat(replicaDir); !os.IsNotExist(err) {
-		t.Fatalf("expected replica directory %s to be deleted, but it still exists", replicaDir)
+	if _, err := os.Stat(followerTopicDir); !os.IsNotExist(err) {
+		t.Fatalf("expected replica directory %s to be deleted, but it still exists", followerTopicDir)
 	}
 
 	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{

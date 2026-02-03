@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/hashicorp/raft"
 	"github.com/mohitkumar/mlog/log"
@@ -24,25 +25,43 @@ func NewLogStore(dir string) (*logStore, error) {
 	}, nil
 }
 
+// Raft uses 1-based log indices (first entry is index 1). Our log uses 0-based offsets.
+// Map: raft_index = our_offset + 1.
+
 func (l *logStore) FirstIndex() (uint64, error) {
-	return l.LowestOffset(), nil
+	if l.IsEmpty() {
+		return 0, nil
+	}
+	return l.LowestOffset() + 1, nil
 }
 
 func (l *logStore) LastIndex() (uint64, error) {
-	return l.HighestOffset(), nil
+	if l.IsEmpty() {
+		return 0, nil
+	}
+	return l.HighestOffset() + 1, nil
 }
 
 func (l *logStore) GetLog(index uint64, out *raft.Log) error {
-	in, err := l.Read(index)
+	if index < 1 {
+		return fmt.Errorf("raft log index must be >= 1, got %d", index)
+	}
+	offset := index - 1
+	in, err := l.Read(offset)
 	if err != nil {
 		return err
 	}
-	entry, err := segment.Decode(in)
-	if err != nil {
+	// Segment stores [8 offset][4 len][value]; Segment.Read returns [8 offset][payload]
+	// where payload is what we Appended. StoreLog appends segment.Encode(entry) = [8][4][json],
+	// so payload is [8][4][json]. Skip 8 (segment header) + 12 (Encode header) = 20 to get the JSON.
+	if len(in) < 20 {
+		return fmt.Errorf("log record too short at offset %d", offset)
+	}
+	value := in[20:]
+	if err := json.Unmarshal(value, out); err != nil {
 		return err
 	}
-	json.Unmarshal(entry.Value, out)
-	out.Index = entry.Offset
+	out.Index = index
 	return nil
 }
 
@@ -75,6 +94,12 @@ func (l *logStore) StoreLogs(logs []*raft.Log) error {
 	return nil
 }
 
+// DeleteRange deletes Raft log entries [min, max] inclusive.
+// Our log uses 0-based offsets (raft_index = our_offset + 1), so we truncate from the start
+// to remove our offsets (min-1)..(max-1), i.e. keep our offset >= max.
 func (l *logStore) DeleteRange(min, max uint64) error {
-	return l.Truncate(max)
+	if max < 1 {
+		return nil
+	}
+	return l.Truncate(max - 1)
 }

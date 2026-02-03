@@ -135,6 +135,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) error {
 
 // CreateTopicWithForwarding creates a topic, forwarding to the Raft leader and then to the topic leader when node is set.
 // When node is nil (e.g. single-node/test), creates the topic locally only.
+// When DesignatedLeaderNodeID is set and equals this node, we create the topic locally (avoids loop: leader -> follower -> leader).
 func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if tm.node == nil {
 		if err := tm.CreateTopic(req.Topic, int(req.ReplicaCount)); err != nil {
@@ -143,6 +144,16 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		return &protocol.CreateTopicResponse{Topic: req.Topic}, nil
 	}
 	n := tm.node
+
+	// We are the designated topic leader: create locally and return (stops the forward loop).
+	if req.DesignatedLeaderNodeID != "" && req.DesignatedLeaderNodeID == n.NodeID {
+		if err := tm.CreateTopic(req.Topic, int(req.ReplicaCount)); err != nil {
+			return nil, fmt.Errorf("failed to create topic: %w", err)
+		}
+		return &protocol.CreateTopicResponse{Topic: req.Topic}, nil
+	}
+
+	// Not the designated leader: if we're not Raft leader, forward to Raft leader.
 	if !n.IsLeader() {
 		leaderAddr := n.GetLeaderRpcAddr()
 		if leaderAddr == "" {
@@ -155,7 +166,8 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		defer remote.Close()
 		return remote.CreateTopic(ctx, req)
 	}
-	// We are the Raft leader: decide topic leader from metadata, apply event, forward to that node.
+
+	// We are the Raft leader: decide topic leader from metadata, set designated leader, forward to that node.
 	if n.TopicExists(req.Topic) {
 		return nil, fmt.Errorf("topic %s already exists", req.Topic)
 	}
@@ -163,18 +175,21 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("no nodes in cluster")
 	}
-	topicLeaderID := ids[0] //TODO select random node as topic leader
+	topicLeaderID := ids[0] // TODO: select random node as topic leader
 	topicLeaderAddr := n.GetRpcAddrForNodeID(topicLeaderID)
 	if topicLeaderAddr == "" {
-		return nil, fmt.Errorf("no RPC address for topic leader node %s (ensure membership is set)", topicLeaderID)
+		return nil, fmt.Errorf("no RPC address for topic leader node %s", topicLeaderID)
 	}
 
+	// Forward to topic leader with DesignatedLeaderNodeID so it creates locally instead of forwarding back.
+	forwardReq := *req
+	forwardReq.DesignatedLeaderNodeID = topicLeaderID
 	remote, err := client.NewRemoteClient(topicLeaderAddr)
 	if err != nil {
 		return nil, fmt.Errorf("forward to topic leader: %w", err)
 	}
 	defer remote.Close()
-	resp, err := remote.CreateTopic(ctx, req)
+	resp, err := remote.CreateTopic(ctx, &forwardReq)
 	if err != nil {
 		return nil, fmt.Errorf("forward to topic leader: %w", err)
 	}

@@ -45,7 +45,8 @@ func (m *Membership) setupSerf() (err error) {
 		return err
 	}
 	config.Tags = map[string]string{
-		"rpc_addr": rpcAddr,
+		"rpc_addr":  rpcAddr,
+		"raft_addr": m.RaftConfig.Address,
 	}
 	config.NodeName = m.NodeConfig.ID
 	m.serf, err = serf.Create(config)
@@ -63,7 +64,7 @@ func (m *Membership) setupSerf() (err error) {
 }
 
 type Handler interface {
-	Join(name, addr string) error
+	Join(id, raftAddr, rpcAddr string) error
 	Leave(name string) error
 }
 
@@ -89,10 +90,15 @@ func (m *Membership) eventHandler() {
 }
 
 func (m *Membership) handleJoin(member serf.Member) {
-	if err := m.handler.Join(
-		member.Name,
-		member.Tags["rpc_addr"],
-	); err != nil {
+	raftAddr := member.Tags["raft_addr"]
+	rpcAddr := member.Tags["rpc_addr"]
+	if raftAddr == "" {
+		raftAddr = rpcAddr
+	}
+	if rpcAddr == "" {
+		rpcAddr = raftAddr
+	}
+	if err := m.handler.Join(member.Name, raftAddr, rpcAddr); err != nil {
 		m.logError(err, "failed to join", member)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"net"
 	"path"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,8 +13,28 @@ import (
 	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
-	"github.com/travisjeffery/go-dynaport"
 )
+
+// Hardcoded port range for tests. Each StartSingleNode uses 3 ports; each StartTwoNodes uses 2 blocks of 3 (leader + follower).
+const (
+	testPortBase = 15000
+	testPortStep = 20 // next cluster starts at base + step
+)
+
+var testPortMu sync.Mutex
+var testNextPort = testPortBase
+
+func allocPorts(n int) []int {
+	testPortMu.Lock()
+	start := testNextPort
+	testNextPort += testPortStep
+	testPortMu.Unlock()
+	ports := make([]int, n)
+	for i := 0; i < n; i++ {
+		ports[i] = start + i
+	}
+	return ports
+}
 
 // TestServerComponents contains the components needed for a test server.
 type TestServerComponents struct {
@@ -31,6 +52,11 @@ type TestServer struct {
 	node *node.Node
 }
 
+// Node returns the node for tests that need to call node methods (e.g. Raft-related).
+func (ts *TestServer) Node() *node.Node {
+	return ts.node
+}
+
 // Cleanup closes all resources associated with the test server.
 func (ts *TestServer) Cleanup() {
 	_ = ts.srv.Stop()
@@ -39,7 +65,7 @@ func (ts *TestServer) Cleanup() {
 	}
 }
 
-// buildTestConfigFromPorts builds a Config using dynaport-allocated ports for RPC, Raft, and Serf (same shape as helper).
+// buildTestConfigFromPorts builds a Config using the given ports for RPC, Raft, and Serf (same shape as helper).
 // rpcPort, raftPort, serfPort are used for NodeConfig.RPCPort, RaftConfig.Address, and BindAddr (Serf) respectively.
 func buildTestConfigFromPorts(t testing.TB, baseDir, nodeID string, rpcPort, raftPort, serfPort int, bootstrap bool) config.Config {
 	t.Helper()
@@ -60,11 +86,10 @@ func buildTestConfigFromPorts(t testing.TB, baseDir, nodeID string, rpcPort, raf
 }
 
 // StartSingleNode creates and starts a single test server with a real node (Raft), TopicManager, and ConsumerManager, and RPC server.
-// Uses dynaport for RPC, Raft, and Serf ports. Same pattern as cmd/server/helper: node from config, then TopicManager, ConsumerManager, RpcServer.
-// Caller should defer ts.Cleanup().
+// Uses hardcoded port range (testPortBase + alloc). Caller should defer ts.Cleanup().
 func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	t.Helper()
-	ports := dynaport.Get(3)
+	ports := allocPorts(3)
 	rpcPort, raftPort, serfPort := ports[0], ports[1], ports[2]
 	baseDir := path.Join(t.TempDir(), baseDirSuffix)
 	rpcAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(rpcPort))
@@ -83,21 +108,19 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 		n.Shutdown()
 		t.Fatalf("NewConsumerManager: %v", err)
 	}
-	ln, err := net.Listen("tcp", rpcAddr)
-	if err != nil {
-		n.Shutdown()
-		t.Fatalf("Listen: %v", err)
-	}
 	srv := rpc.NewRpcServer(rpcAddr, topicMgr, consumerMgr)
-	srv.ServeOnListener(ln)
+	if err := srv.Start(); err != nil {
+		n.Shutdown()
+		t.Fatalf("Start: %v", err)
+	}
 	return &TestServer{
 		TestServerComponents: &TestServerComponents{
 			TopicManager:    topicMgr,
 			ConsumerManager: consumerMgr,
 			BaseDir:         baseDir,
-			Addr:            rpcAddr,
+			Addr:            srv.Addr,
 		},
-		Addr: rpcAddr,
+		Addr: srv.Addr,
 		srv:  srv,
 		node: n,
 	}
@@ -120,90 +143,83 @@ func StartTwoNodes(t testing.TB, leaderBaseDirSuffix string, followerBaseDirSuff
 // setupTwoTestServersImpl is the implementation shared by StartTwoNodes and SetupTwoTestServers.
 func setupTwoTestServersImpl(t testing.TB, leaderBaseDirSuffix string, followerBaseDirSuffix string) (*TestServer, *TestServer) {
 	t.Helper()
-	ports := dynaport.Get(6)
+	ports := allocPorts(6)
 	leaderRPC, leaderRaft, leaderSerf := ports[0], ports[1], ports[2]
 	followerRPC, followerRaft, followerSerf := ports[3], ports[4], ports[5]
 	leaderBaseDir := path.Join(t.TempDir(), leaderBaseDirSuffix)
 	followerBaseDir := path.Join(t.TempDir(), followerBaseDirSuffix)
 	leaderAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(leaderRPC))
 	followerAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(followerRPC))
-
 	leaderCfg := buildTestConfigFromPorts(t, leaderBaseDir, "node-1", leaderRPC, leaderRaft, leaderSerf, true)
 	followerCfg := buildTestConfigFromPorts(t, followerBaseDir, "node-2", followerRPC, followerRaft, followerSerf, false)
 	followerRaftAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(followerRaft))
 
-	ln1, err := net.Listen("tcp", leaderAddr)
-	if err != nil {
-		t.Fatalf("Listen leader: %v", err)
-	}
-	ln2, err := net.Listen("tcp", followerAddr)
-	if err != nil {
-		ln1.Close()
-		t.Fatalf("Listen follower: %v", err)
-	}
-
 	node1, err := node.NewNodeFromConfig(leaderCfg)
 	if err != nil {
-		ln1.Close()
-		ln2.Close()
 		t.Fatalf("NewNodeFromConfig leader: %v", err)
 	}
 	node2, err := node.NewNodeFromConfig(followerCfg)
 	if err != nil {
-		ln1.Close()
-		ln2.Close()
 		node1.Shutdown()
 		t.Fatalf("NewNodeFromConfig follower: %v", err)
 	}
 
 	leaderTopicMgr, err := topic.NewTopicManager(leaderBaseDir, node1)
 	if err != nil {
-		ln1.Close()
-		ln2.Close()
 		node1.Shutdown()
 		node2.Shutdown()
 		t.Fatalf("NewTopicManager leader: %v", err)
 	}
 	leaderConsumerMgr, err := consumermgr.NewConsumerManager(leaderBaseDir)
 	if err != nil {
-		ln1.Close()
-		ln2.Close()
 		node1.Shutdown()
 		node2.Shutdown()
 		t.Fatalf("NewConsumerManager leader: %v", err)
 	}
 	followerTopicMgr, err := topic.NewTopicManager(followerBaseDir, node2)
 	if err != nil {
-		ln1.Close()
-		ln2.Close()
 		node1.Shutdown()
 		node2.Shutdown()
 		t.Fatalf("NewTopicManager follower: %v", err)
 	}
 	followerConsumerMgr, err := consumermgr.NewConsumerManager(followerBaseDir)
 	if err != nil {
-		ln1.Close()
-		ln2.Close()
 		node1.Shutdown()
 		node2.Shutdown()
 		t.Fatalf("NewConsumerManager follower: %v", err)
 	}
 
-	leaderSrv := rpc.NewRpcServer(leaderAddr, leaderTopicMgr, leaderConsumerMgr)
-	followerSrv := rpc.NewRpcServer(followerAddr, followerTopicMgr, followerConsumerMgr)
-	leaderSrv.ServeOnListener(ln1)
-	followerSrv.ServeOnListener(ln2)
+	leaderRpcSrv := rpc.NewRpcServer(leaderAddr, leaderTopicMgr, leaderConsumerMgr)
+	followerRpcSrv := rpc.NewRpcServer(followerAddr, followerTopicMgr, followerConsumerMgr)
+	if err := leaderRpcSrv.Start(); err != nil {
+		node1.Shutdown()
+		node2.Shutdown()
+		t.Fatalf("leader RPC Start: %v", err)
+	}
+	if err := followerRpcSrv.Start(); err != nil {
+		leaderRpcSrv.Stop()
+		node1.Shutdown()
+		node2.Shutdown()
+		t.Fatalf("follower RPC Start: %v", err)
+	}
 
-	// Give node1 (bootstrap) time to become Raft leader before adding node2
-	for i := 0; i < 50; i++ {
+	// Wait for node1 (bootstrap) to become Raft leader, then add node2 so they form a cluster.
+	for i := 0; i < 150; i++ {
 		if node1.IsLeader() {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-	// Add node2 to node1's Raft cluster so node1.GetOtherNodes() returns node2.
-	if err := node1.Join("node-2", followerRaftAddr); err != nil {
-		t.Logf("node1.Join (may be ok if already joined): %v", err)
+	var joinErr error
+	for j := 0; j < 30; j++ {
+		joinErr = node1.Join("node-2", followerRaftAddr, followerRpcSrv.Addr)
+		if joinErr == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if joinErr != nil {
+		t.Logf("node1.Join failed after retries (cluster may be single-node): %v", joinErr)
 	}
 
 	leader := &TestServer{
@@ -211,10 +227,10 @@ func setupTwoTestServersImpl(t testing.TB, leaderBaseDirSuffix string, followerB
 			TopicManager:    leaderTopicMgr,
 			ConsumerManager: leaderConsumerMgr,
 			BaseDir:         leaderBaseDir,
-			Addr:            leaderAddr,
+			Addr:            leaderRpcSrv.Addr,
 		},
-		Addr: leaderAddr,
-		srv:  leaderSrv,
+		Addr: leaderRpcSrv.Addr,
+		srv:  leaderRpcSrv,
 		node: node1,
 	}
 	follower := &TestServer{
@@ -222,10 +238,10 @@ func setupTwoTestServersImpl(t testing.TB, leaderBaseDirSuffix string, followerB
 			TopicManager:    followerTopicMgr,
 			ConsumerManager: followerConsumerMgr,
 			BaseDir:         followerBaseDir,
-			Addr:            followerAddr,
+			Addr:            followerRpcSrv.Addr,
 		},
-		Addr: followerAddr,
-		srv:  followerSrv,
+		Addr: followerRpcSrv.Addr,
+		srv:  followerRpcSrv,
 		node: node2,
 	}
 	return leader, follower
@@ -234,4 +250,109 @@ func setupTwoTestServersImpl(t testing.TB, leaderBaseDirSuffix string, followerB
 // SetupTwoTestServers creates two test servers (alias for StartTwoNodes for backward compatibility).
 func SetupTwoTestServers(t testing.TB, leaderBaseDirSuffix string, followerBaseDirSuffix string) (*TestServer, *TestServer) {
 	return StartTwoNodes(t, leaderBaseDirSuffix, followerBaseDirSuffix)
+}
+
+// getLeaderNode returns the node that is currently Raft leader; nil if neither is leader.
+func getLeaderNode(leaderSrv, followerSrv *TestServer) *node.Node {
+	if leaderSrv.Node().IsLeader() {
+		return leaderSrv.Node()
+	}
+	if followerSrv.Node().IsLeader() {
+		return followerSrv.Node()
+	}
+	return nil
+}
+
+// waitForLeader blocks until one of the two nodes is Raft leader or times out (then calls tb.Fatal).
+func waitForLeader(tb testing.TB, a, b *node.Node) {
+	tb.Helper()
+	for i := 0; i < 100; i++ {
+		if a.IsLeader() || b.IsLeader() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	tb.Fatal("no Raft leader within timeout")
+}
+
+// TwoNodeTestHelper holds two test servers and provides leader/follower access (getLeaderAddr, TopicMgrs, base dirs).
+// Used by replication_acks_test, topic_test, etc. Call Cleanup() when done.
+type TwoNodeTestHelper struct {
+	leaderSrv   *TestServer
+	followerSrv *TestServer
+}
+
+// Cleanup closes both servers.
+func (h *TwoNodeTestHelper) Cleanup() {
+	if h.leaderSrv != nil {
+		h.leaderSrv.Cleanup()
+	}
+	if h.followerSrv != nil {
+		h.followerSrv.Cleanup()
+	}
+}
+
+// GetLeaderAddr returns the RPC address of the current Raft leader.
+func (h *TwoNodeTestHelper) GetLeaderAddr() string {
+	raftLeader := getLeaderNode(h.leaderSrv, h.followerSrv)
+	if raftLeader == nil {
+		return h.leaderSrv.Addr
+	}
+	if h.leaderSrv.Node() == raftLeader {
+		return h.leaderSrv.Addr
+	}
+	return h.followerSrv.Addr
+}
+
+// GetLeaderTopicMgr returns the TopicManager of the current Raft leader.
+func (h *TwoNodeTestHelper) GetLeaderTopicMgr() *topic.TopicManager {
+	raftLeader := getLeaderNode(h.leaderSrv, h.followerSrv)
+	if raftLeader == nil {
+		return h.leaderSrv.TopicManager
+	}
+	if h.leaderSrv.Node() == raftLeader {
+		return h.leaderSrv.TopicManager
+	}
+	return h.followerSrv.TopicManager
+}
+
+// GetFollowerTopicMgr returns the TopicManager of the non-leader node.
+func (h *TwoNodeTestHelper) GetFollowerTopicMgr() *topic.TopicManager {
+	raftLeader := getLeaderNode(h.leaderSrv, h.followerSrv)
+	if h.leaderSrv.Node() == raftLeader {
+		return h.followerSrv.TopicManager
+	}
+	return h.leaderSrv.TopicManager
+}
+
+// LeaderBaseDir returns the leader server's base directory.
+func (h *TwoNodeTestHelper) LeaderBaseDir() string { return h.leaderSrv.BaseDir }
+
+// FollowerBaseDir returns the follower server's base directory.
+func (h *TwoNodeTestHelper) FollowerBaseDir() string { return h.followerSrv.BaseDir }
+
+// WaitReplicaCatchUp polls until the follower's topic log LEO >= targetLEO or timeout. Returns catch-up duration and true if caught up.
+func (h *TwoNodeTestHelper) WaitReplicaCatchUp(topicName string, targetLEO uint64, timeout time.Duration) (time.Duration, bool) {
+	pollMs := 10 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	for time.Now().Before(deadline) {
+		replicaTopic, err := h.GetFollowerTopicMgr().GetTopic(topicName)
+		if err != nil || replicaTopic == nil || replicaTopic.Log == nil {
+			time.Sleep(pollMs)
+			continue
+		}
+		if replicaTopic.Log.LEO() >= targetLEO {
+			return time.Since(start), true
+		}
+		time.Sleep(pollMs)
+	}
+	return time.Since(start), false
+}
+
+// StartTwoNodesForTests starts two nodes, waits for a Raft leader, and returns a helper. Caller must call Cleanup().
+func StartTwoNodesForTests(tb testing.TB, leaderSuffix, followerSuffix string) *TwoNodeTestHelper {
+	leaderSrv, followerSrv := StartTwoNodes(tb, leaderSuffix, followerSuffix)
+	waitForLeader(tb, leaderSrv.Node(), followerSrv.Node())
+	return &TwoNodeTestHelper{leaderSrv: leaderSrv, followerSrv: followerSrv}
 }

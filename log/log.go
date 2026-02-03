@@ -108,7 +108,22 @@ func (l *Log) Read(offset uint64) ([]byte, error) {
 func (l *Log) LowestOffset() uint64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	if len(l.segments) == 0 {
+		return 0
+	}
 	return l.segments[0].BaseOffset
+}
+
+// IsEmpty returns true if the log has no entries (no Append has been called).
+// Used by Raft log store to distinguish "no entries" from "first entry at offset 0".
+func (l *Log) IsEmpty() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if len(l.segments) == 0 {
+		return true
+	}
+	seg := l.segments[0]
+	return seg.NextOffset == seg.BaseOffset
 }
 
 func (l *Log) HighestOffset() uint64 {
@@ -138,6 +153,11 @@ func (l *Log) Truncate(lowest uint64) error {
 		segments = append(segments, s)
 	}
 	l.segments = segments
+	if len(segments) == 0 {
+		l.activeSegment = nil
+	} else {
+		l.activeSegment = segments[len(segments)-1]
+	}
 	return nil
 }
 
