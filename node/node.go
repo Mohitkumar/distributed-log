@@ -211,7 +211,7 @@ func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 			RpcAddr: joinRpcAddr,
 		},
 	})
-	n.Logger.Info("node joined cluster", zap.String("node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", joinRpcAddr))
+	n.Logger.Info("node joined cluster", zap.String("joined_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", joinRpcAddr))
 	return nil
 }
 
@@ -223,7 +223,7 @@ func (n *Node) ApplyNodeAddEvent(ev *protocol.MetadataEvent) error {
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		if ev.AddNodeEvent != nil {
-			n.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("node_id", ev.AddNodeEvent.NodeID))
+			n.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("add_node_id", ev.AddNodeEvent.NodeID))
 		}
 		return ErrRaftApply(err)
 	}
@@ -238,7 +238,7 @@ func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		if ev.RemoveNodeEvent != nil {
-			n.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("node_id", ev.RemoveNodeEvent.NodeID))
+			n.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("remove_node_id", ev.RemoveNodeEvent.NodeID))
 		}
 		return ErrRaftApply(err)
 	}
@@ -276,7 +276,7 @@ func (n *Node) Leave(id string) error {
 			NodeID: id,
 		},
 	})
-	n.Logger.Info("node left cluster", zap.String("node_id", id))
+	n.Logger.Info("node left cluster", zap.String("left_node_id", id))
 	return nil
 }
 
@@ -320,7 +320,7 @@ func (n *Node) GetTopicLeaderNodeID(topic string) string {
 }
 
 func (n *Node) Shutdown() error {
-	n.Logger.Info("node shutting down", zap.String("node_id", n.NodeID))
+	n.Logger.Info("node shutting down")
 	f := n.raft.Shutdown()
 	return f.Error()
 }
