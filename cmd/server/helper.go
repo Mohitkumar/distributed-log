@@ -46,6 +46,8 @@ func (cmdHelper *CommandHelper) setupNode() error {
 		return fmt.Errorf("create logger: %w", err)
 	}
 	logger = logger.With(zap.String("node_id", cmdHelper.NodeConfig.ID))
+	// discovery.Membership uses zap.L(); ensure it logs through this node's logger.
+	zap.ReplaceGlobals(logger)
 	n, err := node.NewNodeFromConfig(cmdHelper.Config, logger)
 	if err != nil {
 		logger.Sync()

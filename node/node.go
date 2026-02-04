@@ -128,9 +128,14 @@ func (n *Node) TopicExists(topic string) bool {
 }
 
 func (n *Node) ApplyCreateTopicEvent(ev *protocol.MetadataEvent) error {
-	if ev.CreateTopicEvent != nil {
-		n.Logger.Info("applying create topic event", zap.String("topic", ev.CreateTopicEvent.Topic), zap.String("leader_node_id", ev.CreateTopicEvent.LeaderNodeID))
+	if n.raft.State() != raft.Leader {
+		n.Logger.Debug("not leader, skipping create topic event", zap.String("topic", ev.CreateTopicEvent.Topic))
+		return nil
 	}
+	if ev.CreateTopicEvent == nil {
+		return ErrInvalidEvent(ev)
+	}
+	n.Logger.Info("applying create topic event", zap.String("topic", ev.CreateTopicEvent.Topic), zap.String("leader_node_id", ev.CreateTopicEvent.LeaderNodeID))
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
@@ -148,9 +153,14 @@ func (n *Node) ApplyCreateTopicEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
-	if ev.DeleteTopicEvent != nil {
-		n.Logger.Info("applying delete topic event", zap.String("topic", ev.DeleteTopicEvent.Topic))
+	if n.raft.State() != raft.Leader {
+		n.Logger.Debug("not leader, skipping delete topic event", zap.String("topic", ev.DeleteTopicEvent.Topic))
+		return nil
 	}
+	if ev.DeleteTopicEvent == nil {
+		return ErrInvalidEvent(ev)
+	}
+	n.Logger.Info("applying delete topic event", zap.String("topic", ev.DeleteTopicEvent.Topic))
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
@@ -168,6 +178,7 @@ func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Join(id, raftAddr, rpcAddr string) error {
+	n.Logger.Info("joining cluster", zap.String("node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	configFuture := n.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
 		return err
@@ -217,6 +228,10 @@ func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 }
 
 func (n *Node) ApplyNodeAddEvent(ev *protocol.MetadataEvent) error {
+	if n.raft.State() != raft.Leader {
+		n.Logger.Debug("not leader, skipping node add event", zap.String("node_id", ev.AddNodeEvent.NodeID))
+		return nil
+	}
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
@@ -232,6 +247,10 @@ func (n *Node) ApplyNodeAddEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
+	if n.raft.State() != raft.Leader {
+		n.Logger.Debug("not leader, skipping node remove event", zap.String("node_id", ev.RemoveNodeEvent.NodeID))
+		return nil
+	}
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
@@ -247,6 +266,10 @@ func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
+	if n.raft.State() != raft.Leader {
+		n.Logger.Debug("not leader, skipping ISR update event", zap.String("topic", ev.IsrUpdateEvent.Topic))
+		return nil
+	}
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err

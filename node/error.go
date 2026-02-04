@@ -3,6 +3,8 @@ package node
 import (
 	"errors"
 	"fmt"
+
+	"github.com/mohitkumar/mlog/protocol"
 )
 
 var (
@@ -14,3 +16,5 @@ var (
 
 // ErrRaftApply wraps Raft Apply failure.
 func ErrRaftApply(err error) error { return fmt.Errorf("raft apply: %w", err) }
+
+func ErrInvalidEvent(ev *protocol.MetadataEvent) error { return fmt.Errorf("invalid event: %v", ev) }

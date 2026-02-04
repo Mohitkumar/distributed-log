@@ -35,5 +35,12 @@ cluster-down:
 cluster-logs:
 	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) logs -f
 
+# 3-node local cluster (scripts; run from repo root)
+local-cluster-start:
+	./scripts/start-local-cluster.sh
+
+local-cluster-stop:
+	./scripts/stop-local-cluster.sh
+
 test:
 	$(GO_CMD) test -v ./...
