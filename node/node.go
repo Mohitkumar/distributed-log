@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -178,7 +179,7 @@ func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Join(id, raftAddr, rpcAddr string) error {
-	n.Logger.Info("joining cluster", zap.String("node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+	n.Logger.Info("joining cluster", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	configFuture := n.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
 		return err
@@ -210,6 +211,7 @@ func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 	}
 	addFuture := n.raft.AddVoter(serverID, serverAddr, 0, 0)
 	if err := addFuture.Error(); err != nil {
+		n.Logger.Error("raft add voter failed", zap.Error(err))
 		return err
 	}
 	joinRpcAddr := rpcAddr
@@ -289,16 +291,10 @@ func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Leave(id string) error {
-	//Apply event to local node metadata
-	if n.metadataStore.GetNodeMetadata(n.NodeID) != nil {
-		_ = n.ApplyNodeRemoveEvent(&protocol.MetadataEvent{
-			RemoveNodeEvent: &protocol.RemoveNodeEvent{
-				NodeID: n.NodeID,
-			},
-		})
-	}
+	n.Logger.Info("leaving cluster", zap.String("leaving_node_id", id))
 	removeFuture := n.raft.RemoveServer(raft.ServerID(id), 0, 0)
 	if err := removeFuture.Error(); err != nil {
+		n.Logger.Error("raft remove server failed", zap.Error(err))
 		return err
 	}
 	n.ApplyNodeRemoveEvent(&protocol.MetadataEvent{
@@ -307,6 +303,13 @@ func (n *Node) Leave(id string) error {
 		},
 	})
 	n.Logger.Info("node left cluster", zap.String("left_node_id", id))
+	if n.metadataStore.GetNodeMetadata(n.NodeID) != nil {
+		_ = n.ApplyNodeRemoveEvent(&protocol.MetadataEvent{
+			RemoveNodeEvent: &protocol.RemoveNodeEvent{
+				NodeID: n.NodeID,
+			},
+		})
+	}
 	return nil
 }
 
@@ -347,6 +350,22 @@ func (n *Node) GetTopicLeaderNodeID(topic string) string {
 		return ""
 	}
 	return tm.LeaderNodeID
+}
+
+func (n *Node) WaitForLeader(timeout time.Duration) error {
+	timeoutc := time.After(timeout)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-timeoutc:
+			return fmt.Errorf("timed out waiting for leader")
+		case <-ticker.C:
+			if n.IsLeader() {
+				return nil
+			}
+		}
+	}
 }
 
 func (n *Node) Shutdown() error {

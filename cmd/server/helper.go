@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mohitkumar/mlog/config"
 	"github.com/mohitkumar/mlog/consumer"
@@ -54,6 +55,11 @@ func (cmdHelper *CommandHelper) setupNode() error {
 		return err
 	}
 	cmdHelper.node = n
+	if cmdHelper.RaftConfig.Boostatrap {
+		if err := cmdHelper.node.WaitForLeader(10 * time.Second); err != nil {
+			return fmt.Errorf("wait for leader: %w", err)
+		}
+	}
 	return nil
 }
 
