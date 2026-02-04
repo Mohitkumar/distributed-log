@@ -12,42 +12,42 @@ import (
 
 // producerTestServers holds the two-node cluster used by all producer tests (setup once).
 type producerTestServers struct {
-	leaderSrv   *TestServer
-	followerSrv *TestServer
+	server1 *TestServer
+	server2 *TestServer
 }
 
 func (s *producerTestServers) getLeaderAddr() string {
-	raftLeader := getLeaderNode(s.leaderSrv, s.followerSrv)
+	raftLeader := getRaftLeaderNode(s.server1, s.server2)
 	if raftLeader == nil {
-		return s.leaderSrv.Addr
+		return s.server1.Addr
 	}
-	if s.leaderSrv.Node() == raftLeader {
-		return s.leaderSrv.Addr
+	if s.server1.Node() == raftLeader {
+		return s.server1.Addr
 	}
-	return s.followerSrv.Addr
+	return s.server2.Addr
 }
 
 // getTopicLeaderTopicMgr returns the TopicManager of the node that is the topic leader for topicName (from metadata).
 // Use this for verification when the topic leader may be different from the Raft leader.
 func (s *producerTestServers) getTopicLeaderTopicMgr(topicName string) *topic.TopicManager {
-	nodeID := s.leaderSrv.Node().GetTopicLeaderNodeID(topicName)
+	nodeID := s.server1.Node().GetTopicLeaderNodeID(topicName)
 	if nodeID == "" {
-		return s.leaderSrv.TopicManager
+		return s.server1.TopicManager
 	}
-	if s.leaderSrv.Node().GetNodeID() == nodeID {
-		return s.leaderSrv.TopicManager
+	if s.server1.Node().GetNodeID() == nodeID {
+		return s.server1.TopicManager
 	}
-	return s.followerSrv.TopicManager
+	return s.server2.TopicManager
 }
 
 // TestProducer runs all producer tests with a single two-node cluster setup.
 func TestProducer(t *testing.T) {
-	leaderSrv, followerSrv := StartTwoNodes(t, "producer-leader", "producer-follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
-	waitForLeader(t, leaderSrv.Node(), followerSrv.Node())
+	server1, server2 := StartTwoNodes(t, "producer-server1", "producer-server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
+	waitForLeader(t, server1.Node(), server2.Node())
 
-	servers := &producerTestServers{leaderSrv: leaderSrv, followerSrv: followerSrv}
+	servers := &producerTestServers{server1: server1, server2: server2}
 
 	t.Run("Produce", func(t *testing.T) {
 		ctx := context.Background()
@@ -233,12 +233,12 @@ func TestProducer(t *testing.T) {
 
 // TestProducerBatch runs all produce-batch tests with a single two-node cluster setup.
 func TestProducerBatch(t *testing.T) {
-	leaderSrv, followerSrv := StartTwoNodes(t, "producer-batch-leader", "producer-batch-follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
-	waitForLeader(t, leaderSrv.Node(), followerSrv.Node())
+	server1, server2 := StartTwoNodes(t, "producer-batch-server1", "producer-batch-server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
+	waitForLeader(t, server1.Node(), server2.Node())
 
-	servers := &producerTestServers{leaderSrv: leaderSrv, followerSrv: followerSrv}
+	servers := &producerTestServers{server1: server1, server2: server2}
 
 	t.Run("ProduceBatch", func(t *testing.T) {
 		ctx := context.Background()
@@ -339,7 +339,7 @@ func TestProducerBatch(t *testing.T) {
 			t.Fatalf("NewRemoteClient: %v", err)
 		}
 		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-			Topic:        "test-topic",
+			Topic:        "test-topic-2",
 			ReplicaCount: 1,
 		})
 		if err != nil {
@@ -374,12 +374,12 @@ func TestProducerBatch(t *testing.T) {
 }
 
 func BenchmarkProduce(b *testing.B) {
-	leaderSrv, followerSrv := StartTwoNodes(b, "bench-produce-leader", "bench-produce-follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
-	waitForLeader(b, leaderSrv.Node(), followerSrv.Node())
+	server1, server2 := StartTwoNodes(b, "bench-produce-server1", "bench-produce-server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
+	waitForLeader(b, server1.Node(), server2.Node())
 
-	servers := &producerTestServers{leaderSrv: leaderSrv, followerSrv: followerSrv}
+	servers := &producerTestServers{server1: server1, server2: server2}
 
 	ctx := context.Background()
 	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())
@@ -419,12 +419,12 @@ func BenchmarkProduce(b *testing.B) {
 }
 
 func BenchmarkProduceBatch(b *testing.B) {
-	leaderSrv, followerSrv := StartTwoNodes(b, "bench-batch-leader", "bench-batch-follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
-	waitForLeader(b, leaderSrv.Node(), followerSrv.Node())
+	server1, server2 := StartTwoNodes(b, "bench-batch-server1", "bench-batch-server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
+	waitForLeader(b, server1.Node(), server2.Node())
 
-	servers := &producerTestServers{leaderSrv: leaderSrv, followerSrv: followerSrv}
+	servers := &producerTestServers{server1: server1, server2: server2}
 
 	ctx := context.Background()
 	remoteClient, err := client.NewRemoteClient(servers.getLeaderAddr())

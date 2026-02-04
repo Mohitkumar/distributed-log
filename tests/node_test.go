@@ -10,20 +10,20 @@ import (
 
 // TestNode_TwoNodeCluster starts a 2-node cluster and tests node methods related to Raft.
 func TestNode_TwoNodeCluster(t *testing.T) {
-	leaderSrv, followerSrv := StartTwoNodes(t, "node-leader", "node-follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := StartTwoNodes(t, "node-server1", "node-server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
-	leader := leaderSrv.Node()
-	follower := followerSrv.Node()
-	if leader == nil || follower == nil {
+	node1 := server1.Node()
+	node2 := server2.Node()
+	if node1 == nil || node2 == nil {
 		t.Fatal("expected non-nil nodes")
 	}
 
 	// Wait for one node to become Raft leader (bootstrap node may take a moment)
 	var ok bool
 	for i := 0; i < 100; i++ {
-		if leader.IsLeader() || follower.IsLeader() {
+		if node1.IsLeader() || node2.IsLeader() {
 			ok = true
 			break
 		}
@@ -34,28 +34,28 @@ func TestNode_TwoNodeCluster(t *testing.T) {
 	}
 
 	// Exactly one node should be leader
-	leaderIsLeader := leader.IsLeader()
-	followerIsLeader := follower.IsLeader()
-	if leaderIsLeader == followerIsLeader {
+	node1IsLeader := node1.IsLeader()
+	node2IsLeader := node2.IsLeader()
+	if node1IsLeader == node2IsLeader {
 		t.Fatal("exactly one node should be Raft leader")
 	}
 
 	// Node IDs and addresses (node-1 / node-2 are fixed in StartTwoNodes)
-	if got := leader.GetNodeID(); got != "node-1" {
-		t.Errorf("leader GetNodeID() = %q, want node-1", got)
+	if got := node1.GetNodeID(); got != "node-1" {
+		t.Errorf("node1 GetNodeID() = %q, want node-1", got)
 	}
-	if got := follower.GetNodeID(); got != "node-2" {
-		t.Errorf("follower GetNodeID() = %q, want node-2", got)
+	if got := node2.GetNodeID(); got != "node-2" {
+		t.Errorf("node2 GetNodeID() = %q, want node-2", got)
 	}
-	if leader.GetNodeAddr() != leaderSrv.Addr {
-		t.Errorf("leader GetNodeAddr() = %q, want %q", leader.GetNodeAddr(), leaderSrv.Addr)
+	if node1.GetNodeAddr() != server1.Addr {
+		t.Errorf("node1 GetNodeAddr() = %q, want %q", node1.GetNodeAddr(), server1.Addr)
 	}
-	if follower.GetNodeAddr() != followerSrv.Addr {
-		t.Errorf("follower GetNodeAddr() = %q, want %q", follower.GetNodeAddr(), followerSrv.Addr)
+	if node2.GetNodeAddr() != server2.Addr {
+		t.Errorf("node2 GetNodeAddr() = %q, want %q", node2.GetNodeAddr(), server2.Addr)
 	}
 
-	// GetOtherNodes: if Join succeeded in StartTwoNodes, leader should see node-2
-	otherNodes := leader.GetOtherNodes()
+	// GetOtherNodes: if Join succeeded in StartTwoNodes, node1 should see node-2
+	otherNodes := node1.GetOtherNodes()
 	if len(otherNodes) >= 1 {
 		found := false
 		for _, n := range otherNodes {
@@ -70,22 +70,20 @@ func TestNode_TwoNodeCluster(t *testing.T) {
 	}
 
 	// TopicExists: no topic yet
-	if leader.TopicExists("no-such-topic") {
+	if node1.TopicExists("no-such-topic") {
 		t.Error("TopicExists(no-such-topic) should be false")
 	}
 }
 
 // TestNode_ApplyCreateTopicEvent applies a CreateTopicEvent on the Raft leader and verifies the topic appears on both nodes.
 func TestNode_ApplyCreateTopicEvent(t *testing.T) {
-	leaderSrv, followerSrv := StartTwoNodes(t, "create-topic-leader", "create-topic-follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := StartTwoNodes(t, "create-topic-server1", "create-topic-server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
-	leaderNode := leaderSrv.Node()
-	followerNode := followerSrv.Node()
-	waitForLeader(t, leaderNode, followerNode)
+	waitForLeader(t, server1.Node(), server2.Node())
 
-	raftLeader := getLeaderNode(leaderSrv, followerSrv)
+	raftLeader := getRaftLeaderNode(server1, server2)
 	if raftLeader == nil {
 		t.Fatal("no Raft leader")
 	}
@@ -105,7 +103,7 @@ func TestNode_ApplyCreateTopicEvent(t *testing.T) {
 	}
 
 	waitForReplication(t, 200*time.Millisecond)
-	for _, n := range []*node.Node{leaderNode, followerNode} {
+	for _, n := range []*node.Node{server1.Node(), server2.Node()} {
 		if !n.TopicExists(topicName) {
 			t.Errorf("TopicExists(%q) = false on node %s, want true", topicName, n.GetNodeID())
 		}
@@ -117,15 +115,13 @@ func TestNode_ApplyCreateTopicEvent(t *testing.T) {
 
 // TestNode_ApplyDeleteTopicEvent creates a topic via ApplyCreateTopicEvent then deletes it via ApplyDeleteTopicEvent.
 func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
-	leaderSrv, followerSrv := StartTwoNodes(t, "delete-topic-leader", "delete-topic-follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := StartTwoNodes(t, "delete-topic-server1", "delete-topic-server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
-	leaderNode := leaderSrv.Node()
-	followerNode := followerSrv.Node()
-	waitForLeader(t, leaderNode, followerNode)
+	waitForLeader(t, server1.Node(), server2.Node())
 
-	raftLeader := getLeaderNode(leaderSrv, followerSrv)
+	raftLeader := getRaftLeaderNode(server1, server2)
 	if raftLeader == nil {
 		t.Fatal("no Raft leader")
 	}
@@ -144,7 +140,7 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 		t.Fatalf("ApplyCreateTopicEvent: %v", err)
 	}
 	waitForReplication(t, 200*time.Millisecond)
-	if !leaderNode.TopicExists(topicName) || !followerNode.TopicExists(topicName) {
+	if !server1.Node().TopicExists(topicName) || !server2.Node().TopicExists(topicName) {
 		t.Fatal("topic should exist after create")
 	}
 
@@ -153,7 +149,7 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 		t.Fatalf("ApplyDeleteTopicEvent: %v", err)
 	}
 	waitForReplication(t, 200*time.Millisecond)
-	for _, n := range []*node.Node{leaderNode, followerNode} {
+	for _, n := range []*node.Node{server1.Node(), server2.Node()} {
 		if n.TopicExists(topicName) {
 			t.Errorf("TopicExists(%q) = true on node %s after delete, want false", topicName, n.GetNodeID())
 		}
@@ -162,15 +158,12 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 
 // TestNode_ApplyNodeAddEvent applies an AddNodeEvent on the Raft leader and verifies the node appears in metadata on both nodes.
 func TestNode_ApplyNodeAddEvent(t *testing.T) {
-	leaderSrv, followerSrv := StartTwoNodes(t, "add-node-leader", "add-node-follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := StartTwoNodes(t, "add-node-server1", "add-node-server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
-	leaderNode := leaderSrv.Node()
-	followerNode := followerSrv.Node()
-	waitForLeader(t, leaderNode, followerNode)
-
-	raftLeader := getLeaderNode(leaderSrv, followerSrv)
+	waitForLeader(t, server1.Node(), server2.Node())
+	raftLeader := getRaftLeaderNode(server1, server2)
 	if raftLeader == nil {
 		t.Fatal("no Raft leader")
 	}
@@ -190,7 +183,7 @@ func TestNode_ApplyNodeAddEvent(t *testing.T) {
 	}
 
 	waitForReplication(t, 200*time.Millisecond)
-	for _, n := range []*node.Node{leaderNode, followerNode} {
+	for _, n := range []*node.Node{server1.Node(), server2.Node()} {
 		got, err := n.GetRpcAddrForNodeID(newNodeID)
 		if err != nil || got != newRpcAddr {
 			t.Errorf("GetRpcAddrForNodeID(%q) = %q, %v on node %s, want %q, nil", newNodeID, got, err, n.GetNodeID(), newRpcAddr)

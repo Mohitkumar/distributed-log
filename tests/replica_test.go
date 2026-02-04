@@ -2,7 +2,6 @@ package tests
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,36 +12,16 @@ import (
 	"github.com/mohitkumar/mlog/protocol"
 )
 
-// parseRawChunk parses segment-format [Offset 8][Len 4][Value]... into LogEntries (for tests).
-func parseRawChunk(chunk []byte) []*protocol.LogEntry {
-	const headerSize = 8 + 4
-	var entries []*protocol.LogEntry
-	for len(chunk) >= headerSize {
-		offset := binary.BigEndian.Uint64(chunk[0:8])
-		msgLen := binary.BigEndian.Uint32(chunk[8:12])
-		recordSize := headerSize + int(msgLen)
-		if len(chunk) < recordSize {
-			break
-		}
-		value := make([]byte, msgLen)
-		copy(value, chunk[headerSize:recordSize])
-		entries = append(entries, &protocol.LogEntry{Offset: offset, Value: value})
-		chunk = chunk[recordSize:]
-	}
-	return entries
-}
-
 func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
-	t.Skip("two-node Raft formation in tests hits follower panic; use integration test with real cluster")
-	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader", "follower")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := SetupTwoTestServers(t, "server1", "server2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
 	topicName := "test-topic"
 	ctx := context.Background()
 
 	// Create topic via ReplicationClient (RPC to leader); leader will CreateReplica on follower via RPC
-	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	remoteClient, err := client.NewRemoteClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewReplicationClient: %v", err)
 	}
@@ -58,7 +37,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	}
 
 	// Verify topic exists on leader (leader has the topic with leader log)
-	leaderView, err := leaderSrv.TopicManager.GetLeader(topicName)
+	leaderView, err := server1.TopicManager.GetLeader(topicName)
 	if err != nil {
 		t.Fatalf("GetLeader on leader: %v", err)
 	}
@@ -67,7 +46,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	}
 
 	// Verify leader topic directory exists (BaseDir/topic)
-	leaderTopicDir := filepath.Join(leaderSrv.BaseDir, topicName)
+	leaderTopicDir := filepath.Join(server1.BaseDir, topicName)
 	if fi, err := os.Stat(leaderTopicDir); err != nil {
 		t.Fatalf("leader topic dir %q should exist: %v", leaderTopicDir, err)
 	} else if !fi.IsDir() {
@@ -75,7 +54,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	}
 
 	// Verify topic/replica exists on follower (follower has replica for this topic)
-	replicaTopic, err := followerSrv.TopicManager.GetTopic(topicName)
+	replicaTopic, err := server2.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("GetTopic on follower: %v (creating topic on leader should create replica on follower)", err)
 	}
@@ -84,7 +63,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	}
 
 	// Verify follower topic directory exists (BaseDir/topic)
-	followerTopicDir := filepath.Join(followerSrv.BaseDir, topicName)
+	followerTopicDir := filepath.Join(server2.BaseDir, topicName)
 	if fi, err := os.Stat(followerTopicDir); err != nil {
 		t.Fatalf("follower topic dir %q should exist: %v", followerTopicDir, err)
 	} else if !fi.IsDir() {
@@ -95,15 +74,14 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 // TestCreateTopicOnLeaderWithTwoReplicas requires two followers; with only one follower we use replica count 1.
 // This test is a variant that explicitly checks the topic object exists on follower (GetTopic).
 func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
-	t.Skip("two-node Raft formation in tests hits follower panic; use integration test with real cluster")
-	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader2", "follower2")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := SetupTwoTestServers(t, "leader2", "follower2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
 	topicName := "my-topic"
 	ctx := context.Background()
 
-	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	remoteClient, err := client.NewRemoteClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
@@ -116,24 +94,19 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 	}
 
 	// Leader has topic
-	_, err = leaderSrv.TopicManager.GetTopic(topicName)
+	_, err = server1.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("leader should have topic: %v", err)
 	}
 
 	// Follower has topic (with replica; CreateReplica adds the topic to follower's TopicManager)
-	_, err = followerSrv.TopicManager.GetTopic(topicName)
+	_, err = server2.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("follower should have topic after leader created it with replica: %v", err)
 	}
 
-	_, err = followerSrv.TopicManager.GetTopic(topicName)
-	if err != nil {
-		t.Fatalf("follower should have topic (replica): %v", err)
-	}
-
 	// Verify topic directory exists on follower (BaseDir/topic/replicaID)
-	replicaDir := filepath.Join(followerSrv.BaseDir, topicName, "replica-0")
+	replicaDir := filepath.Join(server2.BaseDir, topicName)
 	if fi, err := os.Stat(replicaDir); err != nil {
 		t.Fatalf("follower replica dir %q should exist: %v", replicaDir, err)
 	} else if !fi.IsDir() {
@@ -144,16 +117,15 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 // TestDeleteReplica verifies that deleting a replica on the follower removes it from
 // the TopicManager and removes the replica directory on disk.
 func TestDeleteReplica(t *testing.T) {
-	t.Skip("two-node Raft formation in tests hits follower panic; use integration test with real cluster")
-	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader-del", "follower-del")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := SetupTwoTestServers(t, "leader-del", "follower-del")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
 	topicName := "del-topic"
 	ctx := context.Background()
 
 	// Create topic on leader with 1 replica via RPC (follower gets replica-0)
-	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	remoteClient, err := client.NewRemoteClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
@@ -166,8 +138,8 @@ func TestDeleteReplica(t *testing.T) {
 	}
 
 	// Verify replica and directory exist on follower
-	replicaDir := filepath.Join(followerSrv.BaseDir, topicName)
-	_, err = followerSrv.TopicManager.GetTopic(topicName)
+	replicaDir := filepath.Join(server2.BaseDir, topicName)
+	_, err = server2.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("GetTopic before delete: %v", err)
 	}
@@ -176,7 +148,7 @@ func TestDeleteReplica(t *testing.T) {
 	}
 
 	// Delete replica on follower via RPC
-	replClient, err := client.NewRemoteClient(followerSrv.Addr)
+	replClient, err := client.NewRemoteClient(server2.Addr)
 	if err != nil {
 		t.Fatalf("NewReplicationClient: %v", err)
 	}
@@ -188,7 +160,7 @@ func TestDeleteReplica(t *testing.T) {
 	}
 
 	// Verify replica is gone from TopicManager
-	_, err = followerSrv.TopicManager.GetTopic(topicName)
+	_, err = server2.TopicManager.GetTopic(topicName)
 	if err == nil {
 		t.Fatal("GetTopic after delete should fail (replica should be gone)")
 	}
@@ -204,15 +176,14 @@ func TestDeleteReplica(t *testing.T) {
 // TestDeleteReplica_TopicDirRemoved verifies that when the last replica is deleted on the follower,
 // the topic entry and topic directory are removed (follower has no leader for this topic).
 func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
-	t.Skip("two-node Raft formation in tests hits follower panic; use integration test with real cluster")
-	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader-del2", "follower-del2")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := SetupTwoTestServers(t, "leader-del2", "follower-del2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
 	topicName := "del-topic2"
 	ctx := context.Background()
 
-	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	remoteClient, err := client.NewRemoteClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
@@ -224,10 +195,10 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 		t.Fatalf("CreateTopic via client: %v", err)
 	}
 
-	topicDir := filepath.Join(followerSrv.BaseDir, topicName)
+	topicDir := filepath.Join(server2.BaseDir, topicName)
 	replicaDir := filepath.Join(topicDir, "replica-0")
 
-	_, err = followerSrv.TopicManager.GetTopic(topicName)
+	_, err = server2.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("follower should have topic before delete: %v", err)
 	}
@@ -235,7 +206,7 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 		t.Fatalf("topic dir %q should exist before delete: %v", topicDir, err)
 	}
 
-	replClient, err := client.NewRemoteClient(followerSrv.Addr)
+	replClient, err := client.NewRemoteClient(server2.Addr)
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
@@ -247,7 +218,7 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 	}
 
 	// Topic should be gone from follower (no leader, no replicas left)
-	_, err = followerSrv.TopicManager.GetTopic(topicName)
+	_, err = server2.TopicManager.GetTopic(topicName)
 	if err == nil {
 		t.Fatal("GetTopic after delete should fail (topic should be removed when last replica is deleted)")
 	}
@@ -268,14 +239,13 @@ func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
 // TestReplication_FollowerHasMessagesAfterReplication verifies that after producing on the leader,
 // the follower replica eventually has the same messages (replication runs in background).
 func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
-	t.Skip("two-node Raft formation in tests hits follower panic; use integration test with real cluster")
-	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
 	topicName := "repl-topic2"
 	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	remoteClient, err := client.NewRemoteClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
@@ -286,7 +256,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTopic via client: %v", err)
 	}
-	producerClient, err := client.NewProducerClient(leaderSrv.Addr)
+	producerClient, err := client.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -306,7 +276,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 
 	// Wait for replication to catch up (follower replica fetches from leader)
 	// Then verify follower's replica log has the same messages
-	replicaTopic, err := followerSrv.TopicManager.GetTopic(topicName)
+	replicaTopic, err := server2.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("GetTopic (replica): %v", err)
 	}
@@ -347,14 +317,13 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 }
 
 func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
-	t.Skip("two-node Raft formation in tests hits follower panic; use integration test with real cluster")
-	leaderSrv, followerSrv := SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
-	defer leaderSrv.Cleanup()
-	defer followerSrv.Cleanup()
+	server1, server2 := SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
+	defer server1.Cleanup()
+	defer server2.Cleanup()
 
 	topicName := "repl-topic2"
 	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(leaderSrv.Addr)
+	remoteClient, err := client.NewRemoteClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
@@ -365,7 +334,7 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTopic via client: %v", err)
 	}
-	producerClient, err := client.NewProducerClient(leaderSrv.Addr)
+	producerClient, err := client.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -386,7 +355,7 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 
 	// Wait for replication to catch up (follower replica fetches from leader)
 	// Then verify follower's replica log has the same messages
-	replicaTopic, err := followerSrv.TopicManager.GetTopic(topicName)
+	replicaTopic, err := server2.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("GetTopic (replica): %v", err)
 	}

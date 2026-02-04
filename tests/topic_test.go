@@ -33,10 +33,10 @@ func TestCreateTopic(t *testing.T) {
 		t.Fatalf("expected topic %s, got %s", topicName, resp.Topic)
 	}
 
-	if _, err := os.Stat(filepath.Join(servers.LeaderBaseDir(), topicName)); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(servers.Server1BaseDir(), topicName)); os.IsNotExist(err) {
 		t.Fatalf("expected topic directory %s to exist on leader, got error: %v", topicName, err)
 	}
-	if _, err := os.Stat(filepath.Join(servers.FollowerBaseDir(), topicName)); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(servers.Server2BaseDir(), topicName)); os.IsNotExist(err) {
 		t.Fatalf("expected topic directory %s to exist on follower, got error: %v", topicName, err)
 	}
 }
@@ -78,8 +78,8 @@ func TestDeleteTopic(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	leaderTopicDir := filepath.Join(servers.LeaderBaseDir(), topicName)
-	followerTopicDir := filepath.Join(servers.FollowerBaseDir(), topicName)
+	leaderTopicDir := filepath.Join(servers.Server1BaseDir(), topicName)
+	followerTopicDir := filepath.Join(servers.Server2BaseDir(), topicName)
 
 	if _, err := os.Stat(leaderTopicDir); os.IsNotExist(err) {
 		t.Fatalf("expected leader topic directory %s to exist before deletion", leaderTopicDir)
