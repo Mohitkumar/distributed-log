@@ -8,12 +8,10 @@ import (
 	"github.com/mohitkumar/mlog/transport"
 )
 
-// ConsumerClient performs consumer RPCs to a broker address (used from separate consumer machines).
 type ConsumerClient struct {
 	tc *transport.TransportClient
 }
 
-// NewConsumerClient dials addr and returns a consumer client. Call Close when done.
 func NewConsumerClient(addr string) (*ConsumerClient, error) {
 	tc, err := transport.Dial(addr)
 	if err != nil {
@@ -22,7 +20,6 @@ func NewConsumerClient(addr string) (*ConsumerClient, error) {
 	return &ConsumerClient{tc: tc}, nil
 }
 
-// Close closes the transport connection.
 func (c *ConsumerClient) Close() error {
 	return c.tc.Close()
 }
@@ -36,12 +33,10 @@ func (c *ConsumerClient) Fetch(ctx context.Context, req *protocol.FetchRequest) 
 	return &r, nil
 }
 
-// FetchStream returns a reader that polls Fetch in a loop.
 func (c *ConsumerClient) FetchStream(ctx context.Context, req *protocol.FetchRequest) (FetchStreamReader, error) {
 	return &fetchStreamReader{tc: c.tc, req: *req}, nil
 }
 
-// FetchStreamReader reads FetchResponse messages.
 type FetchStreamReader interface {
 	Recv() (*protocol.FetchResponse, error)
 }

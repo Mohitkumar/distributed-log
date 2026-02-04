@@ -7,12 +7,10 @@ import (
 	"github.com/mohitkumar/mlog/transport"
 )
 
-// ProducerClient performs produce RPCs to a broker address (used from separate producer machines).
 type ProducerClient struct {
 	tc *transport.TransportClient
 }
 
-// NewProducerClient dials addr and returns a producer client. Call Close when done.
 func NewProducerClient(addr string) (*ProducerClient, error) {
 	tc, err := transport.Dial(addr)
 	if err != nil {
@@ -21,7 +19,6 @@ func NewProducerClient(addr string) (*ProducerClient, error) {
 	return &ProducerClient{tc: tc}, nil
 }
 
-// Close closes the transport connection.
 func (c *ProducerClient) Close() error {
 	return c.tc.Close()
 }

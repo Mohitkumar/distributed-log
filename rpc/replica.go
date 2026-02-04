@@ -26,7 +26,6 @@ func (s *RpcServer) CreateReplica(ctx context.Context, req *protocol.CreateRepli
 	}, nil
 }
 
-// DeleteReplica deletes a replica for a topic
 func (s *RpcServer) DeleteReplica(ctx context.Context, req *protocol.DeleteReplicaRequest) (*protocol.DeleteReplicaResponse, error) {
 	if req.Topic == "" {
 		return nil, ErrTopicRequired

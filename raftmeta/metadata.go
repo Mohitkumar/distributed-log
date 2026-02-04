@@ -36,7 +36,6 @@ func NewMetadataStore() *MetadataStore {
 	}
 }
 
-// GetTopic returns topic metadata if it exists. Caller must not modify the result.
 func (ms *MetadataStore) GetTopic(topic string) *TopicMetadata {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
@@ -96,10 +95,4 @@ func (ms *MetadataStore) GetNodeMetadata(nodeID string) *NodeMetadata {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 	return ms.Nodes[nodeID]
-}
-
-func (ms *MetadataStore) GetTopicMetadata(topic string) *TopicMetadata {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-	return ms.Topics[topic]
 }

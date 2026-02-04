@@ -5,7 +5,6 @@ import (
 
 	"github.com/hashicorp/raft"
 	"github.com/mohitkumar/mlog/log"
-	"github.com/mohitkumar/mlog/segment"
 )
 
 var _ raft.LogStore = (*logStore)(nil)
@@ -25,8 +24,6 @@ func NewLogStore(dir string) (*logStore, error) {
 }
 
 // Raft uses 1-based log indices (first entry is index 1). Our log uses 0-based offsets.
-// Map: raft_index = our_offset + 1.
-
 func (l *logStore) FirstIndex() (uint64, error) {
 	if l.IsEmpty() {
 		return 0, nil
@@ -41,6 +38,9 @@ func (l *logStore) LastIndex() (uint64, error) {
 	return l.HighestOffset() + 1, nil
 }
 
+// Segment format: each record is [offset 8 bytes][payload]. Read returns that whole slice.
+const segmentOffsetPrefix = 8
+
 func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	if index < 1 {
 		return ErrRaftLogIndex(index)
@@ -50,14 +50,11 @@ func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	if err != nil {
 		return err
 	}
-	// Segment stores [8 offset][4 len][value]; Segment.Read returns [8 offset][payload]
-	// where payload is what we Appended. StoreLog appends segment.Encode(entry) = [8][4][json],
-	// so payload is [8][4][json]. Skip 8 (segment header) + 12 (Encode header) = 20 to get the JSON.
-	if len(in) < 20 {
+	if len(in) < segmentOffsetPrefix {
 		return ErrLogRecordTooShort(offset)
 	}
-	value := in[20:]
-	if err := json.Unmarshal(value, out); err != nil {
+	payload := in[segmentOffsetPrefix:]
+	if err := json.Unmarshal(payload, out); err != nil {
 		return err
 	}
 	out.Index = index
@@ -69,15 +66,7 @@ func (l *logStore) StoreLog(log *raft.Log) error {
 	if err != nil {
 		return err
 	}
-	entry := &segment.LogEntry{
-		Offset: log.Index,
-		Value:  data,
-	}
-	encoded, err := segment.Encode(entry)
-	if err != nil {
-		return err
-	}
-	_, err = l.Append(encoded)
+	_, err = l.Append(data)
 	if err != nil {
 		return err
 	}
@@ -93,9 +82,6 @@ func (l *logStore) StoreLogs(logs []*raft.Log) error {
 	return nil
 }
 
-// DeleteRange deletes Raft log entries [min, max] inclusive.
-// Our log uses 0-based offsets (raft_index = our_offset + 1), so we truncate from the start
-// to remove our offsets (min-1)..(max-1), i.e. keep our offset >= max.
 func (l *logStore) DeleteRange(min, max uint64) error {
 	if max < 1 {
 		return nil

@@ -12,10 +12,10 @@ import (
 
 const (
 	// LeaderEpoch is hardcoded until Raft is implemented; then we use the actual epoch.
-	LeaderEpoch        = 0
-	CompressionNone    = 0
-	replicationBatchHeaderSize = 8 + 4 + 4 + 4 + 1 + 4 // 25 bytes
-	replicationRecordHeaderSize = 8 + 4                // offset + size
+	LeaderEpoch                 = 0
+	CompressionNone             = 0
+	replicationBatchHeaderSize  = 8 + 4 + 4 + 4 + 1 + 4 // 25 bytes
+	replicationRecordHeaderSize = 8 + 4                 // offset + size
 )
 
 var replicationByteOrder = binary.BigEndian
@@ -26,9 +26,6 @@ type ReplicationRecord struct {
 	Value  []byte
 }
 
-// EncodeReplicationBatch encodes a batch of records into the wire format.
-// Header: baseOffset (8), batchLength (4), leaderEpoch (4), crc (4), attributes (1), lastOffsetDelta (4).
-// Body: for each record [offset 8][size 4][value].
 func EncodeReplicationBatch(records []ReplicationRecord) ([]byte, error) {
 	if len(records) == 0 {
 		return nil, nil
@@ -71,8 +68,6 @@ func encodeRecord(r ReplicationRecord) []byte {
 	return buf
 }
 
-// DecodeReplicationBatch decodes a batch payload (header + records) and returns the records.
-// Caller applies each record to the local log (e.g. Append(record.Value)).
 func DecodeReplicationBatch(data []byte) ([]ReplicationRecord, error) {
 	if len(data) < replicationBatchHeaderSize {
 		return nil, io.ErrUnexpectedEOF
@@ -109,8 +104,6 @@ func DecodeReplicationBatch(data []byte) ([]ReplicationRecord, error) {
 	return records, nil
 }
 
-// ReadRecordFromStream reads one record in segment format [offset 8][len 4][value] from r.
-// Used by the leader to read from Log.ReaderFrom() and build replication batches.
 func ReadRecordFromStream(r io.Reader) (offset uint64, value []byte, err error) {
 	header := make([]byte, 8+4)
 	if _, err = io.ReadFull(r, header); err != nil {

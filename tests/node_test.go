@@ -191,8 +191,9 @@ func TestNode_ApplyNodeAddEvent(t *testing.T) {
 
 	waitForReplication(t, 200*time.Millisecond)
 	for _, n := range []*node.Node{leaderNode, followerNode} {
-		if got := n.GetRpcAddrForNodeID(newNodeID); got != newRpcAddr {
-			t.Errorf("GetRpcAddrForNodeID(%q) = %q on node %s, want %q", newNodeID, got, n.GetNodeID(), newRpcAddr)
+		got, err := n.GetRpcAddrForNodeID(newNodeID)
+		if err != nil || got != newRpcAddr {
+			t.Errorf("GetRpcAddrForNodeID(%q) = %q, %v on node %s, want %q, nil", newNodeID, got, err, n.GetNodeID(), newRpcAddr)
 		}
 		ids := n.GetClusterNodeIDs()
 		found := false

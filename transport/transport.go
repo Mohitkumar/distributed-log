@@ -34,13 +34,10 @@ func (t *Transport) RegisterHandler(msgType protocol.MessageType, handler func(c
 	t.handlers[msgType] = handler
 }
 
-// RegisterStreamHandler registers a handler that writes multiple response frames to the connection.
-// The handler should encode and write to conn using codec; when it returns, the connection loop reads the next request.
 func (t *Transport) RegisterStreamHandler(msgType protocol.MessageType, handler StreamHandler) {
 	t.streamHandlers[msgType] = handler
 }
 
-// Listen binds to addr and returns the listener. The transport keeps a reference so Close() can stop the server.
 func (t *Transport) Listen(addr string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -50,7 +47,6 @@ func (t *Transport) Listen(addr string) (net.Listener, error) {
 	return ln, nil
 }
 
-// Addr returns the listener's address (e.g. "127.0.0.1:12345") if Listen was called, otherwise "".
 func (t *Transport) Addr() string {
 	if t.ln != nil {
 		return t.ln.Addr().String()
@@ -58,7 +54,6 @@ func (t *Transport) Addr() string {
 	return ""
 }
 
-// Close closes the listener if one was created by Listen/ListenAndServe.
 func (t *Transport) Close() error {
 	if t.ln != nil {
 		err := t.ln.Close()
@@ -68,7 +63,6 @@ func (t *Transport) Close() error {
 	return nil
 }
 
-// Serve accepts connections on ln and handles them with the registered handlers.
 func (t *Transport) Serve(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
@@ -77,13 +71,6 @@ func (t *Transport) Serve(ln net.Listener) {
 		}
 		go t.handleConn(conn)
 	}
-}
-
-// ServeWithListener sets ln as the transport's listener (so Close works) and serves on it in a goroutine.
-// Use this when the listener was created outside the transport (e.g. tests that need the bound address before creating the node).
-func (t *Transport) ServeWithListener(ln net.Listener) {
-	t.ln = ln
-	go t.Serve(ln)
 }
 
 func (t *Transport) ListenAndServe(addr string) error {
@@ -130,13 +117,11 @@ func (t *Transport) handleConn(conn net.Conn) {
 	}
 }
 
-// TransportClient holds a persistent connection for request-response calls (avoids dialing each time).
 type TransportClient struct {
 	conn  net.Conn
 	codec *protocol.Codec
 }
 
-// Dial creates a TransportClient connected to addr. Call Close when done.
 func Dial(addr string) (*TransportClient, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -145,7 +130,6 @@ func Dial(addr string) (*TransportClient, error) {
 	return &TransportClient{conn: conn, codec: &protocol.Codec{}}, nil
 }
 
-// Call encodes msg, writes to the connection, reads one decoded response, and returns it.
 func (c *TransportClient) Call(msg any) (any, error) {
 	if err := c.Write(msg); err != nil {
 		return nil, err
@@ -153,18 +137,15 @@ func (c *TransportClient) Call(msg any) (any, error) {
 	return c.Read()
 }
 
-// Write encodes and writes one message to the connection (for use with stream RPCs: write once, then Read multiple times).
 func (c *TransportClient) Write(msg any) error {
 	return c.codec.Encode(c.conn, msg)
 }
 
-// Read decodes and returns one message from the connection.
 func (c *TransportClient) Read() (any, error) {
 	_, resp, err := c.codec.Decode(c.conn)
 	return resp, err
 }
 
-// Close closes the connection.
 func (c *TransportClient) Close() error {
 	return c.conn.Close()
 }

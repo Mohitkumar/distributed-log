@@ -9,12 +9,11 @@ import (
 
 // ReplicationStreamClient is a dedicated client for the replication stream only.
 // It sends one ReplicateRequest and then reads ReplicateResponse frames until EndOfStream.
-// Use this for replication; use ReplicationClient for RecordLEO and other RPCs.
+// Use this for replication;
 type ReplicationStreamClient struct {
 	tc *transport.TransportClient
 }
 
-// NewReplicationStreamClient dials addr and returns a client used only for ReplicateStream.
 func NewReplicationStreamClient(addr string) (*ReplicationStreamClient, error) {
 	tc, err := transport.Dial(addr)
 	if err != nil {
@@ -39,13 +38,10 @@ func (c *ReplicationStreamClient) Recv() (*protocol.ReplicateResponse, error) {
 	return &rep, nil
 }
 
-// RemoteClient performs request-response RPCs to the leader (CreateReplica, DeleteReplica, RecordLEO, etc.).
-// Do not use for ReplicateStream; use ReplicationStreamClient for the replication stream.
 type RemoteClient struct {
 	tc *transport.TransportClient
 }
 
-// NewRemoteClient dials addr and returns a client for request-response RPCs.
 func NewRemoteClient(addr string) (*RemoteClient, error) {
 	tc, err := transport.Dial(addr)
 	if err != nil {
@@ -54,7 +50,6 @@ func NewRemoteClient(addr string) (*RemoteClient, error) {
 	return &RemoteClient{tc: tc}, nil
 }
 
-// Close closes the transport connection.
 func (c *RemoteClient) Close() error {
 	return c.tc.Close()
 }

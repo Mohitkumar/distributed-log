@@ -9,7 +9,6 @@ import (
 	"github.com/mohitkumar/mlog/protocol"
 )
 
-// CreateTopic creates a new topic. Forwarding to Raft leader and topic leader is handled by TopicManager.
 func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if req.Topic == "" {
 		return nil, ErrTopicNameRequired
@@ -20,7 +19,6 @@ func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRe
 	return s.topicManager.CreateTopicWithForwarding(ctx, req)
 }
 
-// DeleteTopic deletes a topic. Forwarding to the topic leader is handled by TopicManager.
 func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
 	if req.Topic == "" {
 		return nil, ErrTopicNameRequired

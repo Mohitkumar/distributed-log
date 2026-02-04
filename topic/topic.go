@@ -171,8 +171,8 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	// Not the designated leader: if we're not Raft leader, forward to Raft leader.
 	if !n.IsLeader() {
 		tm.Logger.Debug("forwarding create topic to Raft leader", zap.String("topic", req.Topic))
-		leaderAddr := n.GetLeaderRpcAddr()
-		if leaderAddr == "" {
+		leaderAddr, err := n.GetRaftLeaderRpcAddr()
+		if err != nil {
 			return nil, ErrCannotReachLeader
 		}
 		remote, err := client.NewRemoteClient(leaderAddr)
@@ -192,8 +192,8 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		return nil, ErrNoNodesInCluster
 	}
 	topicLeaderID := ids[0] // TODO: select random node as topic leader
-	topicLeaderAddr := n.GetRpcAddrForNodeID(topicLeaderID)
-	if topicLeaderAddr == "" {
+	topicLeaderAddr, err := n.GetRpcAddrForNodeID(topicLeaderID)
+	if err != nil {
 		return nil, ErrNoRPCForTopicLeaderf(topicLeaderID)
 	}
 
@@ -281,8 +281,8 @@ func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *prot
 		}
 	}
 	// Forward to topic leader.
-	leaderAddr := tm.node.GetTopicLeaderRpcAddr(req.Topic)
-	if leaderAddr == "" {
+	leaderAddr, err := tm.node.GetTopicLeaderRpcAddr(req.Topic)
+	if err != nil {
 		return nil, ErrTopicNotFoundf(req.Topic)
 	}
 	remote, err := client.NewRemoteClient(leaderAddr)
