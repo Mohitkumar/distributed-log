@@ -101,6 +101,27 @@ func (n *Node) GetClusterNodeIDs() []string {
 	return ids
 }
 
+// GetNodeIDWithLeastTopics returns the cluster node ID that is leader of the fewest topics.
+// Use this to balance topic leadership (e.g. when choosing a topic leader for a new topic).
+// Returns ErrNoNodesInCluster if there are no nodes in the cluster.
+func (n *Node) GetNodeIDWithLeastTopics() (string, error) {
+	ids := n.GetClusterNodeIDs()
+	if len(ids) == 0 {
+		return "", ErrNoNodesInCluster
+	}
+	counts := n.metadataStore.TopicCountByLeader()
+	best := ids[0]
+	minCount := counts[best]
+	for _, id := range ids[1:] {
+		c := counts[id]
+		if c < minCount {
+			minCount = c
+			best = id
+		}
+	}
+	return best, nil
+}
+
 func (n *Node) TopicExists(topic string) bool {
 	return n.metadataStore.GetTopic(topic) != nil
 }

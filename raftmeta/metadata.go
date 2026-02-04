@@ -96,3 +96,16 @@ func (ms *MetadataStore) GetNodeMetadata(nodeID string) *NodeMetadata {
 	defer ms.mu.RUnlock()
 	return ms.Nodes[nodeID]
 }
+
+// TopicCountByLeader returns the number of topics each node is leader of.
+func (ms *MetadataStore) TopicCountByLeader() map[string]int {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	counts := make(map[string]int)
+	for _, tm := range ms.Topics {
+		if tm != nil && tm.LeaderNodeID != "" {
+			counts[tm.LeaderNodeID]++
+		}
+	}
+	return counts
+}
