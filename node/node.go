@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -252,7 +253,13 @@ func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		n.Logger.Error("raft apply ISR update failed", zap.Error(err))
+		// During shutdown or leadership change, apply fails; log at Debug to avoid noise.
+		msg := err.Error()
+		if strings.Contains(msg, "shutdown") || strings.Contains(msg, "leadership lost") {
+			n.Logger.Debug("raft apply ISR update failed (shutdown or leadership change)", zap.Error(err))
+		} else {
+			n.Logger.Error("raft apply ISR update failed", zap.Error(err))
+		}
 		return ErrRaftApply(err)
 	}
 	return nil
