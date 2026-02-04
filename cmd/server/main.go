@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"os"
-	"strconv"
+	"os/signal"
+	"syscall"
 
 	"github.com/mohitkumar/mlog/config"
 	"github.com/spf13/cobra"
@@ -13,7 +13,8 @@ import (
 
 func main() {
 	var (
-		addr      string
+		bindAddr  string
+		rpcPort   int
 		dataDir   string
 		nodeID    string
 		peers     []string
@@ -25,7 +26,7 @@ func main() {
 		Use:   "server",
 		Short: "Run the mlog TCP transport server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := buildConfig(addr, dataDir, nodeID, peers, raftAddr, bootstrap)
+			cfg, err := buildConfig(bindAddr, rpcPort, dataDir, nodeID, peers, raftAddr, bootstrap)
 			if err != nil {
 				return err
 			}
@@ -36,11 +37,16 @@ func main() {
 			if err := cmdHelper.Start(); err != nil {
 				return fmt.Errorf("start server: %w", err)
 			}
-			return nil
+			// Block until shutdown signal so the process (and container) stays alive.
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+			<-sigCh
+			return cmdHelper.Shutdown()
 		},
 	}
 
-	rootCmd.Flags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP listen address")
+	rootCmd.Flags().StringVar(&bindAddr, "bind-addr", "127.0.0.1:9092", "TCP listen address")
+	rootCmd.Flags().IntVar(&rpcPort, "rpc-port", 9094, "RPC listen port")
 	rootCmd.Flags().StringVar(&dataDir, "data-dir", "/tmp/mlog", "data directory")
 	rootCmd.Flags().StringVar(&nodeID, "node-id", "node-1", "node ID")
 	rootCmd.Flags().StringSliceVar(&peers, "peer", nil, "peer nodes (nodeID=addr) for discovery join, repeatable")
@@ -49,15 +55,15 @@ func main() {
 
 	viper.SetEnvPrefix("mlog")
 	viper.AutomaticEnv()
-	viper.BindPFlag("addr", rootCmd.Flags().Lookup("addr"))
+	viper.BindPFlag("bind-addr", rootCmd.Flags().Lookup("bind-addr"))
 	viper.BindPFlag("data_dir", rootCmd.Flags().Lookup("data-dir"))
 	viper.BindPFlag("node_id", rootCmd.Flags().Lookup("node-id"))
 	viper.BindPFlag("peers", rootCmd.Flags().Lookup("peer"))
 	viper.BindPFlag("raft_addr", rootCmd.Flags().Lookup("raft-addr"))
 	viper.BindPFlag("bootstrap", rootCmd.Flags().Lookup("bootstrap"))
-
-	if viper.IsSet("addr") {
-		addr = viper.GetString("addr")
+	viper.BindPFlag("rpc-port", rootCmd.Flags().Lookup("rpc-port"))
+	if viper.IsSet("bind-addr") {
+		bindAddr = viper.GetString("bind-addr")
 	}
 	if viper.IsSet("data_dir") {
 		dataDir = viper.GetString("data_dir")
@@ -74,22 +80,16 @@ func main() {
 	if viper.IsSet("bootstrap") {
 		bootstrap = viper.GetBool("bootstrap")
 	}
-
+	if viper.IsSet("rpc-port") {
+		rpcPort = viper.GetInt("rpc-port")
+	}
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func buildConfig(addr, dataDir, nodeID string, peers []string, raftAddr string, bootstrap bool) (config.Config, error) {
-	_, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return config.Config{}, fmt.Errorf("invalid addr %q: %w", addr, err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return config.Config{}, fmt.Errorf("invalid port in addr %q: %w", addr, err)
-	}
+func buildConfig(addr string, rpcPort int, dataDir, nodeID string, peers []string, raftAddr string, bootstrap bool) (config.Config, error) {
 	startJoinAddrs := make([]string, 0, len(peers))
 	for _, p := range peers {
 		var peerNode, peerAddr string
@@ -102,7 +102,7 @@ func buildConfig(addr, dataDir, nodeID string, peers []string, raftAddr string, 
 		StartJoinAddrs: startJoinAddrs,
 		NodeConfig: config.NodeConfig{
 			ID:      nodeID,
-			RPCPort: port,
+			RPCPort: rpcPort,
 			DataDir: dataDir,
 		},
 		RaftConfig: config.RaftConfig{

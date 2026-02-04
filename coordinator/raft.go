@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"errors"
 	"log"
 	"net"
 	"os"
@@ -71,6 +72,10 @@ func SetupRaft(fsm raft.FSM, id, raftAddress, raftDir string, boostrap bool) (*r
 			},
 		}
 		if err := ra.BootstrapCluster(configuration).Error(); err != nil {
+			// Restart with existing data (e.g. Docker volume): cluster already bootstrapped; continue.
+			if errors.Is(err, raft.ErrCantBootstrap) {
+				return ra, nil
+			}
 			return nil, ErrBootstrapCluster(err)
 		}
 	}

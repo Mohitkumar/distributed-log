@@ -1,0 +1,98 @@
+# 3-node mlog cluster. Each node exposes Serf (bind-addr), Raft, and RPC on separate ports.
+# Node-1 bootstraps; node-2 and node-3 join via --peer (use Serf/bind-addr of node1).
+# Usage: from repo root: make cluster-up  OR  docker compose -f infra/docker-compose.yml up -d
+
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    container_name: mlog-node1
+    hostname: node1
+    ports:
+      - "9092:9092"   # Serf (bind-addr)
+      - "9093:9093"   # Raft
+      - "9094:9094"   # RPC
+    volumes:
+      - node1-data:/data
+    command: [
+      "server",
+      "--bind-addr", "node1:9092",
+      "--raft-addr", "node1:9093",
+      "--rpc-port", "9094",
+      "--data-dir", "/data",
+      "--node-id", "node-1",
+      "--bootstrap", "true"
+    ]
+    networks:
+      - mlog-net
+    # RPC server binds to hostname:port (e.g. node1:9094), not localhost; probe the same address.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "node1", "9094"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  node2:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    container_name: mlog-node2
+    hostname: node2
+    ports:
+      - "9095:9095"   # Serf
+      - "9096:9096"   # Raft
+      - "9097:9097"   # RPC
+    volumes:
+      - node2-data:/data
+    command: [
+      "server",
+      "--bind-addr", "node2:9095",
+      "--raft-addr", "node2:9096",
+      "--rpc-port", "9097",
+      "--data-dir", "/data",
+      "--node-id", "node-2",
+      "--peer", "node-1=node1:9092"
+    ]
+    depends_on:
+      node1:
+        condition: service_healthy
+    networks:
+      - mlog-net
+
+  node3:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    container_name: mlog-node3
+    hostname: node3
+    ports:
+      - "9098:9098"   # Serf
+      - "9099:9099"   # Raft
+      - "9100:9100"   # RPC
+    volumes:
+      - node3-data:/data
+    command: [
+      "server",
+      "--bind-addr", "node3:9098",
+      "--raft-addr", "node3:9099",
+      "--rpc-port", "9100",
+      "--data-dir", "/data",
+      "--node-id", "node-3",
+      "--peer", "node-1=node1:9092"
+    ]
+    depends_on:
+      node1:
+        condition: service_healthy
+    networks:
+      - mlog-net
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+
+networks:
+  mlog-net:
+    driver: bridge
