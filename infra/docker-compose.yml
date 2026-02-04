@@ -24,7 +24,9 @@ services:
       "--advertise-addr", "node1",
       "--data-dir", "/data",
       "--node-id", "node-1",
-      "--bootstrap", "true"
+      "--bootstrap", "true",
+      "--peer", "node-2=node2:9095",
+      "--peer", "node-3=node3:9098"
     ]
     networks:
       - mlog-net
@@ -55,7 +57,8 @@ services:
       "--advertise-addr", "node2",
       "--data-dir", "/data",
       "--node-id", "node-2",
-      "--peer", "node-1=node1:9092"
+      "--peer", "node-1=node1:9092",
+      "--peer", "node-3=node3:9098"
     ]
     depends_on:
       node1:
@@ -83,7 +86,8 @@ services:
       "--advertise-addr", "node3",
       "--data-dir", "/data",
       "--node-id", "node-3",
-      "--peer", "node-1=node1:9092"
+      "--peer", "node-1=node1:9092",
+      "--peer", "node-2=node2:9095"
     ]
     depends_on:
       node1:

@@ -183,6 +183,9 @@ func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Join(id, raftAddr, rpcAddr string) error {
+	if n.raft.State() != raft.Leader {
+		return raft.ErrNotLeader
+	}
 	n.Logger.Info("joining cluster", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	configFuture := n.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
@@ -295,6 +298,9 @@ func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Leave(id string) error {
+	if n.raft.State() != raft.Leader {
+		return raft.ErrNotLeader
+	}
 	n.Logger.Info("leaving cluster", zap.String("leaving_node_id", id))
 	removeFuture := n.raft.RemoveServer(raft.ServerID(id), 0, 0)
 	if err := removeFuture.Error(); err != nil {

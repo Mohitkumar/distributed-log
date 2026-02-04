@@ -30,7 +30,9 @@ echo "Starting node1 (Serf 9092, Raft 9093, RPC 9094)..."
   --rpc-port 9094 \
   --data-dir "$DATA_ROOT/node1" \
   --node-id node-1 \
-  --bootstrap true &
+  --bootstrap true \
+  --peer "node-2=127.0.0.1:9095" \
+  --peer "node-3=127.0.0.1:9098" &
 echo $! >> "$PID_FILE"
 sleep 3
 
@@ -41,7 +43,8 @@ echo "Starting node2 (Serf 9095, Raft 9096, RPC 9097)..."
   --rpc-port 9097 \
   --data-dir "$DATA_ROOT/node2" \
   --node-id node-2 \
-  --peer "node-1=127.0.0.1:9092" &
+  --peer "node-1=127.0.0.1:9092" \
+  --peer "node-3=127.0.0.1:9098" &
 echo $! >> "$PID_FILE"
 sleep 1
 
@@ -52,7 +55,8 @@ echo "Starting node3 (Serf 9098, Raft 9099, RPC 9100)..."
   --rpc-port 9100 \
   --data-dir "$DATA_ROOT/node3" \
   --node-id node-3 \
-  --peer "node-1=127.0.0.1:9092" &
+  --peer "node-1=127.0.0.1:9092" \
+  --peer "node-2=127.0.0.1:9095" &
 echo $! >> "$PID_FILE"
 
 echo ""
