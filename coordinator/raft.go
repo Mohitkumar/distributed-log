@@ -18,7 +18,13 @@ const (
 	RetainSnapshotCount = 10
 )
 
-func SetupRaft(fsm raft.FSM, id, raftAddress, raftDir string, boostrap bool) (*raft.Raft, error) {
+// SetupRaft creates a Raft node. raftBindAddr is the address to listen on (e.g. 0.0.0.0:9093);
+// raftAdvertiseAddr is the address other nodes use to reach this node (e.g. node1:9093).
+// When raftAdvertiseAddr is empty, raftBindAddr is used for both.
+func SetupRaft(fsm raft.FSM, id, raftBindAddr, raftAdvertiseAddr, raftDir string, boostrap bool) (*raft.Raft, error) {
+	if raftAdvertiseAddr == "" {
+		raftAdvertiseAddr = raftBindAddr
+	}
 	config := raft.DefaultConfig()
 	// Override defaults with configured values
 	config.SnapshotThreshold = uint64(SnapshotThreshold)
@@ -26,16 +32,16 @@ func SetupRaft(fsm raft.FSM, id, raftAddress, raftDir string, boostrap bool) (*r
 	config.LocalID = raft.ServerID(id)
 	config.LogLevel = "INFO"
 
-	// Setup Raft communication.
-	var TCPAddress *net.TCPAddr
+	// Setup Raft communication: bind on raftBindAddr, advertise raftAdvertiseAddr so other nodes can reach us.
+	var advertiseAddr *net.TCPAddr
 	var transport *raft.NetworkTransport
 	var err error
 	var snapshots *raft.FileSnapshotStore
-	if TCPAddress, err = net.ResolveTCPAddr("tcp", raftAddress); err != nil {
-		log.Fatalf("failed to resolve TCP address %s: %s", raftAddress, err)
+	if advertiseAddr, err = net.ResolveTCPAddr("tcp", raftAdvertiseAddr); err != nil {
+		log.Fatalf("failed to resolve Raft advertise address %s: %s", raftAdvertiseAddr, err)
 	}
-	if transport, err = raft.NewTCPTransport(raftAddress, TCPAddress, 3, 10*time.Second, os.Stderr); err != nil {
-		log.Fatalf("failed to make TCP transport on %s: %s", raftAddress, err.Error())
+	if transport, err = raft.NewTCPTransport(raftBindAddr, advertiseAddr, 3, 10*time.Second, os.Stderr); err != nil {
+		log.Fatalf("failed to make TCP transport bind %s advertise %s: %s", raftBindAddr, raftAdvertiseAddr, err.Error())
 	}
 
 	// Create the snapshot store. This allows the Raft to truncate the log.

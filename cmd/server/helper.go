@@ -56,7 +56,7 @@ func (cmdHelper *CommandHelper) setupNode() error {
 	}
 	cmdHelper.node = n
 	if cmdHelper.RaftConfig.Boostatrap {
-		if err := cmdHelper.node.WaitForLeader(10 * time.Second); err != nil {
+		if err := cmdHelper.node.WaitForLeader(30 * time.Second); err != nil {
 			return fmt.Errorf("wait for leader: %w", err)
 		}
 	}
@@ -64,7 +64,7 @@ func (cmdHelper *CommandHelper) setupNode() error {
 }
 
 func (cmdHelper *CommandHelper) setupRpcServer() error {
-	rpcAddr, err := cmdHelper.Config.RPCAddr()
+	listenAddr, err := cmdHelper.Config.RPCListenAddr()
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func (cmdHelper *CommandHelper) setupRpcServer() error {
 	if err != nil {
 		return fmt.Errorf("create consumer manager: %w", err)
 	}
-	cmdHelper.rpcServer = rpc.NewRpcServer(rpcAddr, topicMgr, consumerMgr)
+	cmdHelper.rpcServer = rpc.NewRpcServer(listenAddr, topicMgr, consumerMgr)
 	return nil
 }
 

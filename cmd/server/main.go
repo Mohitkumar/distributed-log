@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,32 +15,30 @@ import (
 
 func main() {
 	var (
-		bindAddr  string
-		rpcPort   int
-		dataDir   string
-		nodeID    string
-		peers     []string
-		raftAddr  string
-		bootstrap bool
+		bindAddr      string
+		advertiseAddr string
+		rpcPort       int
+		dataDir       string
+		nodeID        string
+		peers         []string
+		raftAddr      string
+		bootstrap     bool
 	)
 
 	rootCmd := &cobra.Command{
 		Use:   "server",
 		Short: "Run the mlog TCP transport server",
 		PreRun: func(cmd *cobra.Command, args []string) {
-			// Read final values from viper (env + flags). No IsSet checks needed
-			// because BoundPFlags already provide defaults.
 			bindAddr = viper.GetString("bind-addr")
+			advertiseAddr = viper.GetString("advertise-addr")
 			dataDir = viper.GetString("data_dir")
 			nodeID = viper.GetString("node_id")
 			raftAddr = viper.GetString("raft_addr")
 			bootstrap = viper.GetBool("bootstrap")
 			rpcPort = viper.GetInt("rpc-port")
-			// NOTE: peers intentionally come only from Cobra flags (no viper override),
-			// because viper empty-slice behavior can clobber --peer.
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := buildConfig(bindAddr, rpcPort, dataDir, nodeID, peers, raftAddr, bootstrap)
+			cfg, err := buildConfig(bindAddr, advertiseAddr, rpcPort, dataDir, nodeID, peers, raftAddr, bootstrap)
 			if err != nil {
 				return err
 			}
@@ -58,7 +57,8 @@ func main() {
 		},
 	}
 
-	rootCmd.Flags().StringVar(&bindAddr, "bind-addr", "127.0.0.1:9092", "TCP listen address")
+	rootCmd.Flags().StringVar(&bindAddr, "bind-addr", "127.0.0.1:9092", "Serf listen address (use 0.0.0.0 in Docker)")
+	rootCmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "Address other nodes use to reach this node (e.g. node1). When set, bind 0.0.0.0 for Serf/Raft/RPC")
 	rootCmd.Flags().IntVar(&rpcPort, "rpc-port", 9094, "RPC listen port")
 	rootCmd.Flags().StringVar(&dataDir, "data-dir", "/tmp/mlog", "data directory")
 	rootCmd.Flags().StringVar(&nodeID, "node-id", "node-1", "node ID")
@@ -69,6 +69,7 @@ func main() {
 	viper.SetEnvPrefix("mlog")
 	viper.AutomaticEnv()
 	viper.BindPFlag("bind-addr", rootCmd.Flags().Lookup("bind-addr"))
+	viper.BindPFlag("advertise-addr", rootCmd.Flags().Lookup("advertise-addr"))
 	viper.BindPFlag("data_dir", rootCmd.Flags().Lookup("data-dir"))
 	viper.BindPFlag("node_id", rootCmd.Flags().Lookup("node-id"))
 	viper.BindPFlag("raft_addr", rootCmd.Flags().Lookup("raft-addr"))
@@ -80,7 +81,7 @@ func main() {
 	}
 }
 
-func buildConfig(addr string, rpcPort int, dataDir, nodeID string, peers []string, raftAddr string, bootstrap bool) (config.Config, error) {
+func buildConfig(bindAddr, advertiseAddr string, rpcPort int, dataDir, nodeID string, peers []string, raftAddr string, bootstrap bool) (config.Config, error) {
 	startJoinAddrs := make([]string, 0, len(peers))
 	for _, p := range peers {
 		parts := strings.SplitN(p, "=", 2)
@@ -93,19 +94,29 @@ func buildConfig(addr string, rpcPort int, dataDir, nodeID string, peers []strin
 		}
 		startJoinAddrs = append(startJoinAddrs, peerAddr)
 	}
+	raftConfig := config.RaftConfig{
+		ID:         nodeID,
+		Address:    raftAddr,
+		Dir:        dataDir,
+		Boostatrap: bootstrap,
+	}
+	if advertiseAddr != "" {
+		_, raftPort, err := net.SplitHostPort(raftAddr)
+		if err != nil {
+			return config.Config{}, fmt.Errorf("invalid raft-addr %q: %w", raftAddr, err)
+		}
+		raftConfig.Address = net.JoinHostPort(advertiseAddr, raftPort)
+		raftConfig.BindAddress = raftAddr
+	}
 	return config.Config{
-		BindAddr:       addr,
+		BindAddr:       bindAddr,
+		AdvertiseAddr:  advertiseAddr,
 		StartJoinAddrs: startJoinAddrs,
 		NodeConfig: config.NodeConfig{
 			ID:      nodeID,
 			RPCPort: rpcPort,
 			DataDir: dataDir,
 		},
-		RaftConfig: config.RaftConfig{
-			ID:         nodeID,
-			Address:    raftAddr,
-			Dir:        dataDir,
-			Boostatrap: bootstrap,
-		},
+		RaftConfig: raftConfig,
 	}, nil
 }

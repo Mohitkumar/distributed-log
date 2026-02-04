@@ -37,7 +37,11 @@ func NewNodeFromConfig(config config.Config, logger *zap.Logger) (*Node, error) 
 	if err != nil {
 		return nil, err
 	}
-	raftNode, err := coordinator.SetupRaft(fsm, config.RaftConfig.ID, config.RaftConfig.Address, config.RaftConfig.Dir, config.RaftConfig.Boostatrap)
+	raftBindAddr := config.RaftConfig.Address
+	if config.RaftConfig.BindAddress != "" {
+		raftBindAddr = config.RaftConfig.BindAddress
+	}
+	raftNode, err := coordinator.SetupRaft(fsm, config.RaftConfig.ID, raftBindAddr, config.RaftConfig.Address, config.RaftConfig.Dir, config.RaftConfig.Boostatrap)
 	if err != nil {
 		return nil, err
 	}
