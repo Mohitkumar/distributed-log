@@ -183,9 +183,7 @@ func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Join(id, raftAddr, rpcAddr string) error {
-	if !n.IsLeader() {
-		n.WaitforLeaderWithRetryBackoff(2*time.Second, 5)
-	}
+	n.WaitforRaftReadyWithRetryBackoff(2*time.Second, 5)
 	if !n.IsLeader() {
 		n.Logger.Error("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 		return nil
@@ -289,9 +287,7 @@ func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Leave(id string) error {
-	if !n.IsLeader() {
-		n.WaitforLeaderWithRetryBackoff(2*time.Second, 5)
-	}
+	n.WaitforRaftReadyWithRetryBackoff(2*time.Second, 5)
 	if !n.IsLeader() {
 		n.Logger.Error("not leader, skipping leave", zap.String("leaving_node_id", id))
 		return nil
@@ -349,6 +345,41 @@ func (n *Node) GetTopicLeaderNodeID(topic string) string {
 	return tm.LeaderNodeID
 }
 
+// ListTopicNames returns all topic names from metadata (for topic manager restore).
+func (n *Node) ListTopicNames() []string {
+	return n.metadataStore.ListTopicNames()
+}
+
+// GetTopicReplicaNodeIDs returns replica node IDs for a topic from metadata.
+func (n *Node) GetTopicReplicaNodeIDs(topic string) []string {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.Replicas == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(tm.Replicas))
+	for id := range tm.Replicas {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// GetTopicReplicaState returns LEO and IsISR for a topic replica from metadata (for restore).
+func (n *Node) GetTopicReplicaState(topic, replicaNodeID string) (leo uint64, isISR bool) {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.Replicas == nil {
+		return 0, false
+	}
+	rs := tm.Replicas[replicaNodeID]
+	if rs == nil {
+		return 0, false
+	}
+	if rs.LEO < 0 {
+		return 0, rs.IsISR
+	}
+	return uint64(rs.LEO), rs.IsISR
+}
+
+// WaitForLeader waits until this node is the Raft leader (for bootstrap).
 func (n *Node) WaitForLeader(timeout time.Duration) error {
 	timeoutc := time.After(timeout)
 	ticker := time.NewTicker(time.Second)
@@ -365,7 +396,25 @@ func (n *Node) WaitForLeader(timeout time.Duration) error {
 	}
 }
 
-func (n *Node) WaitforLeaderWithRetryBackoff(timeout time.Duration, retryCount int) error {
+// WaitForRaftReady waits until the cluster has a Raft leader (any node), so metadata and RPC resolution are usable.
+// Use after restart before restoring topic manager.
+func (n *Node) WaitForRaftReady(timeout time.Duration) error {
+	timeoutc := time.After(timeout)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-timeoutc:
+			return fmt.Errorf("timed out waiting for Raft leader")
+		case <-ticker.C:
+			if n.raft.Leader() != "" {
+				return nil
+			}
+		}
+	}
+}
+
+func (n *Node) WaitforRaftReadyWithRetryBackoff(timeout time.Duration, retryCount int) error {
 	timeoutc := time.After(timeout)
 	backoff := time.Duration(1 * time.Second)
 	for i := 0; i < retryCount; i++ {
@@ -373,7 +422,7 @@ func (n *Node) WaitforLeaderWithRetryBackoff(timeout time.Duration, retryCount i
 		case <-timeoutc:
 			return fmt.Errorf("timed out waiting for leader")
 		default:
-			if n.IsLeader() {
+			if n.raft.Leader() != "" {
 				return nil
 			}
 			time.Sleep(backoff)

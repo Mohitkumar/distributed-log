@@ -14,10 +14,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// RaftReadyTimeout is how long to wait for a Raft leader before restoring topic manager (restart/replay can take time).
+const RaftReadyTimeout = 15 * time.Second
+
 type CommandHelper struct {
 	config.Config
 	membership   *discovery.Membership
 	node         *node.Node
+	topicMgr     *topic.TopicManager
 	rpcServer    *rpc.RpcServer
 	shutdown     bool
 	shutdowns    chan struct{}
@@ -32,10 +36,13 @@ func NewCommandHelper(config config.Config) (*CommandHelper, error) {
 	if err := cmdHelper.setupNode(); err != nil {
 		return nil, err
 	}
-	if err := cmdHelper.setupMembership(); err != nil {
+	if err := cmdHelper.setupTopicManager(); err != nil {
 		return nil, err
 	}
 	if err := cmdHelper.setupRpcServer(); err != nil {
+		return nil, err
+	}
+	if err := cmdHelper.setupMembership(); err != nil {
 		return nil, err
 	}
 	return cmdHelper, nil
@@ -63,20 +70,32 @@ func (cmdHelper *CommandHelper) setupNode() error {
 	return nil
 }
 
+func (cmdHelper *CommandHelper) setupTopicManager() error {
+	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, cmdHelper.node, cmdHelper.node.Logger)
+	if err != nil {
+		return fmt.Errorf("create topic manager: %w", err)
+	}
+	cmdHelper.topicMgr = topicMgr
+	// Raft may still be replaying log/snapshot after restart; wait for a leader so metadata and RPC addrs are usable.
+	if err := cmdHelper.node.WaitForRaftReady(RaftReadyTimeout); err != nil {
+		cmdHelper.node.Logger.Warn("Raft not ready before restore (continuing anyway)", zap.Error(err))
+	}
+	if err := topicMgr.RestoreFromMetadata(); err != nil {
+		return fmt.Errorf("restore topic manager from metadata: %w", err)
+	}
+	return nil
+}
+
 func (cmdHelper *CommandHelper) setupRpcServer() error {
 	listenAddr, err := cmdHelper.Config.RPCListenAddr()
 	if err != nil {
 		return err
 	}
-	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, cmdHelper.node, cmdHelper.node.Logger)
-	if err != nil {
-		return fmt.Errorf("create topic manager: %w", err)
-	}
 	consumerMgr, err := consumer.NewConsumerManager(cmdHelper.NodeConfig.DataDir)
 	if err != nil {
 		return fmt.Errorf("create consumer manager: %w", err)
 	}
-	cmdHelper.rpcServer = rpc.NewRpcServer(listenAddr, topicMgr, consumerMgr)
+	cmdHelper.rpcServer = rpc.NewRpcServer(listenAddr, cmdHelper.topicMgr, consumerMgr)
 	return nil
 }
 

@@ -42,6 +42,17 @@ func (ms *MetadataStore) GetTopic(topic string) *TopicMetadata {
 	return ms.Topics[topic]
 }
 
+// ListTopicNames returns all topic names in the metadata (for restore after restart).
+func (ms *MetadataStore) ListTopicNames() []string {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	names := make([]string, 0, len(ms.Topics))
+	for name := range ms.Topics {
+		names = append(names, name)
+	}
+	return names
+}
+
 func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()

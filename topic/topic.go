@@ -300,6 +300,93 @@ func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
 	return topicObj, nil
 }
 
+// RestoreFromMetadata rebuilds the topic manager from Raft-backed metadata (after node restart).
+// Call once after Raft has replayed log/snapshot so metadata is up to date.
+func (tm *TopicManager) RestoreFromMetadata() error {
+	topicNames := tm.node.ListTopicNames()
+	if len(topicNames) == 0 {
+		return nil
+	}
+	tm.Logger.Info("restoring topic manager from metadata", zap.Int("topic_count", len(topicNames)), zap.Strings("topics", topicNames))
+	for _, topic := range topicNames {
+		leaderID := tm.node.GetTopicLeaderNodeID(topic)
+		if leaderID == "" {
+			continue
+		}
+		if leaderID == tm.currentNodeID() {
+			if err := tm.restoreLeaderTopic(topic); err != nil {
+				tm.Logger.Warn("restore leader topic failed", zap.String("topic", topic), zap.Error(err))
+				continue
+			}
+		} else {
+			leaderAddr, err := tm.node.GetTopicLeaderRpcAddr(topic)
+			if err != nil {
+				tm.Logger.Warn("restore replica: cannot get leader addr", zap.String("topic", topic), zap.Error(err))
+				continue
+			}
+			if err := tm.CreateReplicaRemote(topic, leaderAddr); err != nil {
+				tm.Logger.Warn("restore replica topic failed", zap.String("topic", topic), zap.Error(err))
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+// restoreLeaderTopic rebuilds a leader topic from metadata: open local log and reconnect to replica clients (no RPC to replicas).
+func (tm *TopicManager) restoreLeaderTopic(topic string) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if _, exists := tm.topics[topic]; exists {
+		return nil
+	}
+
+	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
+	if err != nil {
+		return ErrCreateLog(err)
+	}
+
+	topicObj := &Topic{
+		Name:     topic,
+		Log:      logManager,
+		Logger:   tm.Logger,
+		nodeID:   tm.currentNodeID(),
+		replicas: make(map[string]*ReplicaInfo),
+	}
+	tm.topics[topic] = topicObj
+
+	replicaNodeIDs := tm.node.GetTopicReplicaNodeIDs(topic)
+	for _, nodeID := range replicaNodeIDs {
+		if nodeID == tm.currentNodeID() {
+			continue
+		}
+		rpcAddr, err := tm.node.GetRpcAddrForNodeID(nodeID)
+		if err != nil {
+			tm.Logger.Debug("restore: skip replica (no rpc addr)", zap.String("topic", topic), zap.String("node_id", nodeID))
+			continue
+		}
+		replClient, err := client.NewRemoteClient(rpcAddr)
+		if err != nil {
+			tm.Logger.Debug("restore: skip replica (client failed)", zap.String("topic", topic), zap.String("node_id", nodeID), zap.Error(err))
+			continue
+		}
+		leo, isISR := tm.node.GetTopicReplicaState(topic, nodeID)
+		topicObj.replicas[nodeID] = &ReplicaInfo{
+			NodeID: nodeID,
+			State: ReplicaState{
+				LastFetchTime: time.Now(),
+				LEO:           leo,
+				IsISR:         isISR,
+			},
+			client: replClient,
+		}
+	}
+
+	tm.Logger.Info("restored leader topic from metadata", zap.String("topic", topic), zap.Int("replicas", len(topicObj.replicas)))
+	return nil
+}
+
 // CreateReplicaRemote creates a replica for the topic on this node (called by leader via RPC).
 func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) error {
 	tm.mu.Lock()
