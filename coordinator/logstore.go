@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"encoding/json"
+	"path/filepath"
 
 	"github.com/hashicorp/raft"
 	"github.com/mohitkumar/mlog/log"
@@ -14,7 +15,7 @@ type logStore struct {
 }
 
 func NewLogStore(dir string) (*logStore, error) {
-	log, err := log.NewLog(dir + "__metadata__.log")
+	log, err := log.NewLog(filepath.Join(dir, "__metadata__.log"))
 	if err != nil {
 		return nil, err
 	}
