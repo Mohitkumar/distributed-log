@@ -32,8 +32,7 @@ func (c *MetadataFSM) Apply(l *raft.Log) interface{} {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.MetadataStore.Apply(&metadataEvent)
-	return nil
+	return c.MetadataStore.Apply(&metadataEvent)
 }
 
 func (c *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {

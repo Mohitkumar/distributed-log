@@ -12,6 +12,7 @@ var (
 	ErrTopicRequired       = errors.New("topic is required")
 	ErrLeaderAddrRequired  = errors.New("leader_addr is required")
 	ErrValuesRequired      = errors.New("values are required")
+	ErrNotTopicLeader      = errors.New("this node is not the topic leader; produce to the topic leader")
 )
 
 // ErrTopicNotFound wraps a topic-manager error for topic not found.

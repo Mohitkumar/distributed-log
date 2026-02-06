@@ -67,6 +67,12 @@ func (cmdHelper *CommandHelper) setupNode() error {
 			return fmt.Errorf("wait for leader: %w", err)
 		}
 	}
+	// So this node appears in metadata (bootstrap node never joins, so never gets AddNodeEvent otherwise).
+	if cmdHelper.node.IsLeader() {
+		if err := cmdHelper.node.EnsureSelfInMetadata(); err != nil {
+			return fmt.Errorf("ensure self in metadata: %w", err)
+		}
+	}
 	return nil
 }
 

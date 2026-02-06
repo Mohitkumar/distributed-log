@@ -26,6 +26,22 @@ func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRe
 	return s.topicManager.DeleteTopicWithForwarding(ctx, req)
 }
 
+// ApplyDeleteTopicEvent applies DeleteTopicEvent to the Raft log. Call on the Raft leader (e.g. from topic leader via RPC).
+func (s *RpcServer) ApplyDeleteTopicEvent(ctx context.Context, req *protocol.ApplyDeleteTopicEventRequest) (*protocol.ApplyDeleteTopicEventResponse, error) {
+	if err := s.topicManager.ApplyDeleteTopicEvent(req.Topic); err != nil {
+		return nil, err
+	}
+	return &protocol.ApplyDeleteTopicEventResponse{}, nil
+}
+
+// ApplyIsrUpdateEvent applies IsrUpdateEvent to the Raft log. Call on the Raft leader (e.g. from replica/leader via RPC).
+func (s *RpcServer) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.ApplyIsrUpdateEventRequest) (*protocol.ApplyIsrUpdateEventResponse, error) {
+	if err := s.topicManager.ApplyIsrUpdateEvent(req.Topic, req.ReplicaNodeID, req.Isr, req.Leo); err != nil {
+		return nil, err
+	}
+	return &protocol.ApplyIsrUpdateEventResponse{}, nil
+}
+
 // RecordLEO records the Log End Offset (LEO) of a replica
 func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
 	err := s.topicManager.RecordLEORemote(req.NodeID, req.Topic, uint64(req.Leo), time.Now())

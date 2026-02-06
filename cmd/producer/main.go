@@ -51,7 +51,7 @@ func main() {
 		},
 	}
 
-	rootCmd.PersistentFlags().StringVar(&addr, "addr", "127.0.0.1:9092", "TCP server address")
+	rootCmd.PersistentFlags().StringVar(&addr, "addr", "127.0.0.1:9094", "RPC server address (use 9094 for node1; when cluster in Docker, use localhost:9094)")
 	rootCmd.Flags().StringVar(&topic, "topic", "", "topic name (required)")
 	rootCmd.Flags().StringVar(&value, "value", "", "message value (required)")
 	rootCmd.Flags().Int32Var(&acks, "acks", int32(protocol.AckLeader), "acks: 0=none,1=leader,2=all")

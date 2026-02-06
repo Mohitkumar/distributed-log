@@ -11,6 +11,9 @@ func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest)
 	if err != nil {
 		return nil, ErrTopicNotFound(req.Topic, err)
 	}
+	if !srv.topicManager.IsLeader(req.Topic) {
+		return nil, ErrNotTopicLeader
+	}
 
 	offset, err := topicObj.HandleProduce(ctx, &protocol.LogEntry{
 		Value: req.Value,
@@ -32,6 +35,9 @@ func (srv *RpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBat
 	topicObj, err := srv.topicManager.GetTopic(req.Topic)
 	if err != nil {
 		return nil, ErrTopicNotFound(req.Topic, err)
+	}
+	if !srv.topicManager.IsLeader(req.Topic) {
+		return nil, ErrNotTopicLeader
 	}
 
 	base, last, err := topicObj.HandleProduceBatch(ctx, req.Values, req.Acks)

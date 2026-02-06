@@ -98,3 +98,21 @@ func (c *RemoteClient) RecordLEO(ctx context.Context, req *protocol.RecordLEOReq
 	r := resp.(protocol.RecordLEOResponse)
 	return &r, nil
 }
+
+func (c *RemoteClient) ApplyDeleteTopicEvent(ctx context.Context, req *protocol.ApplyDeleteTopicEventRequest) (*protocol.ApplyDeleteTopicEventResponse, error) {
+	resp, err := c.tc.Call(*req)
+	if err != nil {
+		return nil, err
+	}
+	r := resp.(protocol.ApplyDeleteTopicEventResponse)
+	return &r, nil
+}
+
+func (c *RemoteClient) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.ApplyIsrUpdateEventRequest) (*protocol.ApplyIsrUpdateEventResponse, error) {
+	resp, err := c.tc.Call(*req)
+	if err != nil {
+		return nil, err
+	}
+	r := resp.(protocol.ApplyIsrUpdateEventResponse)
+	return &r, nil
+}

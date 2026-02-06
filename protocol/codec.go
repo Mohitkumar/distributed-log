@@ -78,6 +78,18 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	case DeleteTopicResponse, *DeleteTopicResponse:
 		mType = MsgDeleteTopicResp
 		payload, err = json.Marshal(v)
+	case ApplyDeleteTopicEventRequest, *ApplyDeleteTopicEventRequest:
+		mType = MsgApplyDeleteTopicEvent
+		payload, err = json.Marshal(v)
+	case ApplyDeleteTopicEventResponse, *ApplyDeleteTopicEventResponse:
+		mType = MsgApplyDeleteTopicEventResp
+		payload, err = json.Marshal(v)
+	case ApplyIsrUpdateEventRequest, *ApplyIsrUpdateEventRequest:
+		mType = MsgApplyIsrUpdateEvent
+		payload, err = json.Marshal(v)
+	case ApplyIsrUpdateEventResponse, *ApplyIsrUpdateEventResponse:
+		mType = MsgApplyIsrUpdateEventResp
+		payload, err = json.Marshal(v)
 	default:
 		return ErrUnknownMessageType(mType)
 	}
@@ -179,6 +191,22 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		return mType, msg, err
 	case MsgDeleteTopicResp:
 		var msg DeleteTopicResponse
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgApplyDeleteTopicEvent:
+		var msg ApplyDeleteTopicEventRequest
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgApplyDeleteTopicEventResp:
+		var msg ApplyDeleteTopicEventResponse
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgApplyIsrUpdateEvent:
+		var msg ApplyIsrUpdateEventRequest
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgApplyIsrUpdateEventResp:
+		var msg ApplyIsrUpdateEventResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	default:

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/mohitkumar/mlog/node"
-	"github.com/mohitkumar/mlog/protocol"
 )
 
 // TestNode_TwoNodeCluster starts a 2-node cluster and tests node methods related to Raft.
@@ -89,16 +88,8 @@ func TestNode_ApplyCreateTopicEvent(t *testing.T) {
 	}
 
 	topicName := "test-apply-create-topic"
-	ev := &protocol.MetadataEvent{
-		CreateTopicEvent: &protocol.CreateTopicEvent{
-			Topic:          topicName,
-			ReplicaCount:   1,
-			LeaderNodeID:   raftLeader.GetNodeID(),
-			LeaderEpoch:    1,
-			ReplicaNodeIds: []string{raftLeader.GetNodeID()},
-		},
-	}
-	if err := raftLeader.ApplyCreateTopicEvent(ev); err != nil {
+	replicaNodeIds := []string{raftLeader.GetNodeID()}
+	if err := raftLeader.ApplyCreateTopicEvent(topicName, 1, raftLeader.GetNodeID(), replicaNodeIds); err != nil {
 		t.Fatalf("ApplyCreateTopicEvent: %v", err)
 	}
 
@@ -127,16 +118,8 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 	}
 
 	topicName := "test-apply-delete-topic"
-	ev := &protocol.MetadataEvent{
-		CreateTopicEvent: &protocol.CreateTopicEvent{
-			Topic:          topicName,
-			ReplicaCount:   1,
-			LeaderNodeID:   raftLeader.GetNodeID(),
-			LeaderEpoch:    1,
-			ReplicaNodeIds: []string{raftLeader.GetNodeID()},
-		},
-	}
-	if err := raftLeader.ApplyCreateTopicEvent(ev); err != nil {
+	replicaNodeIds := []string{raftLeader.GetNodeID()}
+	if err := raftLeader.ApplyCreateTopicEvent(topicName, 1, raftLeader.GetNodeID(), replicaNodeIds); err != nil {
 		t.Fatalf("ApplyCreateTopicEvent: %v", err)
 	}
 	waitForReplication(t, 200*time.Millisecond)
@@ -144,8 +127,7 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 		t.Fatal("topic should exist after create")
 	}
 
-	delEv := &protocol.MetadataEvent{DeleteTopicEvent: &protocol.DeleteTopicEvent{Topic: topicName}}
-	if err := raftLeader.ApplyDeleteTopicEvent(delEv); err != nil {
+	if err := raftLeader.ApplyDeleteTopicEvent(topicName); err != nil {
 		t.Fatalf("ApplyDeleteTopicEvent: %v", err)
 	}
 	waitForReplication(t, 200*time.Millisecond)
@@ -171,14 +153,7 @@ func TestNode_ApplyNodeAddEvent(t *testing.T) {
 	newNodeID := "node-test-add"
 	newRaftAddr := "127.0.0.1:19999"
 	newRpcAddr := "127.0.0.1:19998"
-	ev := &protocol.MetadataEvent{
-		AddNodeEvent: &protocol.AddNodeEvent{
-			NodeID:  newNodeID,
-			Addr:    newRaftAddr,
-			RpcAddr: newRpcAddr,
-		},
-	}
-	if err := raftLeader.ApplyNodeAddEvent(ev); err != nil {
+	if err := raftLeader.ApplyNodeAddEvent(newNodeID, newRaftAddr, newRpcAddr); err != nil {
 		t.Fatalf("ApplyNodeAddEvent: %v", err)
 	}
 

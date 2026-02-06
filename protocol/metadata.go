@@ -1,14 +1,24 @@
 package protocol
 
+import "encoding/json"
+
+type MetadataEventType uint16
+
+const (
+	MetadataEventTypeCreateTopic MetadataEventType = iota
+	MetadataEventTypeDeleteTopic
+	MetadataEventTypeLeaderChange
+	MetadataEventTypeIsrUpdate
+	MetadataEventTypeAddNode
+	MetadataEventTypeRemoveNode
+	MetadataEventTypeUpdateNode
+)
+
 type MetadataEvent struct {
-	CreateTopicEvent  *CreateTopicEvent
-	DeleteTopicEvent  *DeleteTopicEvent
-	LeaderChangeEvent *LeaderChangeEvent
-	IsrUpdateEvent    *IsrUpdateEvent
-	AddNodeEvent      *AddNodeEvent
-	RemoveNodeEvent   *RemoveNodeEvent
-	UpdateNodeEvent   *UpdateNodeEvent
+	EventType MetadataEventType `json:"event_type"`
+	Data      json.RawMessage   `json:"data"`
 }
+
 type CreateTopicEvent struct {
 	Topic          string   `json:"topic"`
 	ReplicaCount   uint32   `json:"replica_count"`
@@ -31,6 +41,7 @@ type IsrUpdateEvent struct {
 	Topic         string `json:"topic"`
 	ReplicaNodeID string `json:"replica_id"`
 	Isr           bool   `json:"isr"`
+	Leo           int64  `json:"leo"`
 }
 
 type AddNodeEvent struct {
@@ -46,24 +57,4 @@ type RemoveNodeEvent struct {
 type UpdateNodeEvent struct {
 	NodeID    string `json:"node_id"`
 	IsHealthy bool   `json:"is_healthy"`
-}
-
-func (e *MetadataEvent) WhichEvent() string {
-	switch {
-	case e.CreateTopicEvent != nil:
-		return "CreateTopicEvent"
-	case e.DeleteTopicEvent != nil:
-		return "DeleteTopicEvent"
-	case e.LeaderChangeEvent != nil:
-		return "LeaderChangeEvent"
-	case e.IsrUpdateEvent != nil:
-		return "IsrUpdateEvent"
-	case e.AddNodeEvent != nil:
-		return "AddNodeEvent"
-	case e.RemoveNodeEvent != nil:
-		return "RemoveNodeEvent"
-	case e.UpdateNodeEvent != nil:
-		return "UpdateNodeEvent"
-	}
-	return ""
 }

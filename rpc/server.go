@@ -75,6 +75,14 @@ func (s *RpcServer) RegisterHandlers() {
 		r := req.(protocol.DeleteTopicRequest)
 		return s.DeleteTopic(ctx, &r)
 	})
+	s.transport.RegisterHandler(protocol.MsgApplyDeleteTopicEvent, func(ctx context.Context, req any) (any, error) {
+		r := req.(protocol.ApplyDeleteTopicEventRequest)
+		return s.ApplyDeleteTopicEvent(ctx, &r)
+	})
+	s.transport.RegisterHandler(protocol.MsgApplyIsrUpdateEvent, func(ctx context.Context, req any) (any, error) {
+		r := req.(protocol.ApplyIsrUpdateEventRequest)
+		return s.ApplyIsrUpdateEvent(ctx, &r)
+	})
 }
 
 func (s *RpcServer) Start() error {

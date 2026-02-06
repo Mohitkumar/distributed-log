@@ -1,7 +1,10 @@
 package raftmeta
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
@@ -23,16 +26,53 @@ type ReplicaState struct {
 	IsISR         bool   `json:"is_isr"`
 }
 
+const defaultLogInterval = 30 * time.Second
+
 type MetadataStore struct {
-	mu     sync.RWMutex
-	Nodes  map[string]*NodeMetadata  `json:"nodes"`
-	Topics map[string]*TopicMetadata `json:"topics"`
+	mu           sync.RWMutex
+	Nodes        map[string]*NodeMetadata  `json:"nodes"`
+	Topics       map[string]*TopicMetadata `json:"topics"`
+	stopPeriodic chan struct{}
 }
 
 func NewMetadataStore() *MetadataStore {
-	return &MetadataStore{
-		Nodes:  make(map[string]*NodeMetadata),
-		Topics: make(map[string]*TopicMetadata),
+	ms := &MetadataStore{
+		Nodes:        make(map[string]*NodeMetadata),
+		Topics:       make(map[string]*TopicMetadata),
+		stopPeriodic: make(chan struct{}),
+	}
+	go ms.periodicLog(defaultLogInterval)
+	return ms
+}
+
+// periodicLog prints the metadata store every interval until StopPeriodicLog is called.
+func (ms *MetadataStore) periodicLog(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ms.stopPeriodic:
+			return
+		case <-ticker.C:
+			ms.mu.RLock()
+			b, err := json.Marshal(ms)
+			ms.mu.RUnlock()
+			if err != nil {
+				fmt.Printf("[raftmeta] periodic log marshal error: %v\n", err)
+				continue
+			}
+			fmt.Printf("[raftmeta] metadata store (%s):\n%s\n", time.Now().Format(time.RFC3339), string(b))
+		}
+	}
+}
+
+// StopPeriodicLog stops the periodic logging goroutine. Safe to call multiple times.
+func (ms *MetadataStore) StopPeriodicLog() {
+	select {
+	case <-ms.stopPeriodic:
+		return
+	default:
+		close(ms.stopPeriodic)
 	}
 }
 
@@ -53,12 +93,15 @@ func (ms *MetadataStore) ListTopicNames() []string {
 	return names
 }
 
-func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) {
+func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	switch ev.WhichEvent() {
-	case "CreateTopicEvent":
-		e := ev.CreateTopicEvent
+	switch ev.EventType {
+	case protocol.MetadataEventTypeCreateTopic:
+		e := protocol.CreateTopicEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
 		ms.Topics[e.Topic] = &TopicMetadata{
 			LeaderNodeID: e.LeaderNodeID,
 			LeaderEpoch:  e.LeaderEpoch,
@@ -71,35 +114,58 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) {
 				IsISR:         true,
 			}
 		}
-	case "LeaderChangeEvent":
-		e := ev.LeaderChangeEvent
+	case protocol.MetadataEventTypeLeaderChange:
+		e := protocol.LeaderChangeEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
 		if tm := ms.Topics[e.Topic]; tm != nil {
 			tm.LeaderNodeID = e.LeaderNodeID
 			tm.LeaderEpoch = e.LeaderEpoch
 		}
-	case "IsrUpdateEvent":
-		e := ev.IsrUpdateEvent
+	case protocol.MetadataEventTypeIsrUpdate:
+		e := protocol.IsrUpdateEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
 		if tm := ms.Topics[e.Topic]; tm != nil {
 			if rs := tm.Replicas[e.ReplicaNodeID]; rs != nil {
 				rs.IsISR = e.Isr
+				rs.LEO = e.Leo
 			}
 		}
-	case "DeleteTopicEvent":
-		e := ev.DeleteTopicEvent
+	case protocol.MetadataEventTypeDeleteTopic:
+		e := protocol.DeleteTopicEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
 		delete(ms.Topics, e.Topic)
-	case "AddNodeEvent":
-		e := ev.AddNodeEvent
+	case protocol.MetadataEventTypeAddNode:
+		e := protocol.AddNodeEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
 		ms.Nodes[e.NodeID] = &NodeMetadata{
 			NodeID:  e.NodeID,
 			Addr:    e.Addr,
 			RpcAddr: e.RpcAddr,
 		}
-	case "RemoveNodeEvent":
-		e := ev.RemoveNodeEvent
+	case protocol.MetadataEventTypeRemoveNode:
+		e := protocol.RemoveNodeEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
 		delete(ms.Nodes, e.NodeID)
-	case "UpdateNodeEvent":
+	case protocol.MetadataEventTypeUpdateNode:
+		e := protocol.UpdateNodeEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
 		//TODO: update node status
+	default:
+		return fmt.Errorf("unknown event type: %d", ev.EventType)
 	}
+	return nil
 }
 
 func (ms *MetadataStore) GetNodeMetadata(nodeID string) *NodeMetadata {

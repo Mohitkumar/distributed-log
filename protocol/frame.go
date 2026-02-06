@@ -43,4 +43,8 @@ const (
 	MsgCreateTopicResp
 	MsgDeleteTopic
 	MsgDeleteTopicResp
+	MsgApplyDeleteTopicEvent
+	MsgApplyDeleteTopicEventResp
+	MsgApplyIsrUpdateEvent
+	MsgApplyIsrUpdateEventResp
 )

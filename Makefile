@@ -35,6 +35,11 @@ cluster-down:
 cluster-logs:
 	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) logs -f
 
+# Create a topic from host (cluster in Docker: node1 RPC exposed on 9094; bridge forwards localhost:9094 -> container)
+create-topic:
+	@test -n "$(topic)" || (echo "usage: make create-topic topic=NAME [replicas=N]"; exit 1)
+	$(GO_CMD) run ./cmd/producer create-topic --addr 127.0.0.1:9094 --topic "$(topic)" --replicas $(or $(replicas),1)
+
 # 3-node local cluster (scripts; run from repo root)
 local-cluster-start:
 	./scripts/start-local-cluster.sh

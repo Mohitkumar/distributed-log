@@ -22,7 +22,8 @@ type CreateTopicRequest struct {
 	DesignatedLeaderNodeID string // when set, only this node should create the topic (used when Raft leader forwards to topic leader)
 }
 type CreateTopicResponse struct {
-	Topic string
+	Topic          string
+	ReplicaNodeIds []string // actual replica set (topic leader + replicas) filled by topic leader
 }
 type DeleteTopicRequest struct {
 	Topic string
@@ -30,6 +31,22 @@ type DeleteTopicRequest struct {
 type DeleteTopicResponse struct {
 	Topic string
 }
+
+// ApplyDeleteTopicEventRequest is sent to the Raft leader to apply DeleteTopicEvent to the log.
+type ApplyDeleteTopicEventRequest struct {
+	Topic string
+}
+type ApplyDeleteTopicEventResponse struct{}
+
+// ApplyIsrUpdateEventRequest is sent to the Raft leader to apply IsrUpdateEvent to the log.
+type ApplyIsrUpdateEventRequest struct {
+	Topic         string
+	ReplicaNodeID string
+	Isr           bool
+	Leo           int64
+}
+type ApplyIsrUpdateEventResponse struct{}
+
 type RecordLEORequest struct {
 	NodeID string
 	Topic  string

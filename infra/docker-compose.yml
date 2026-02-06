@@ -2,6 +2,10 @@
 # --advertise-addr is the hostname other nodes use (must resolve on mlog-net).
 # Node-1 bootstraps; node-2 and node-3 join via --peer (Serf address of node1).
 # Usage: from repo root: make cluster-up  OR  docker compose -f infra/docker-compose.yml up -d
+#
+# From localhost (bridge maps host ports to containers): use RPC port 9094 for node1.
+#   make create-topic topic=my-topic
+#   ./bin/producer create-topic --addr 127.0.0.1:9094 --topic my-topic --replicas 1
 
 services:
   node1:

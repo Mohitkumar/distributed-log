@@ -62,6 +62,16 @@ func NewNodeFromConfig(config config.Config, logger *zap.Logger) (*Node, error) 
 	return n, nil
 }
 
+// EnsureSelfInMetadata adds this node to the metadata Nodes map so it appears in the store
+// (e.g. for topic leader resolution and the periodic metadata log). The bootstrap node
+// never triggers Join(), so it must add itself; call when this node is the Raft leader.
+func (n *Node) EnsureSelfInMetadata() error {
+	if n.raft.State() != raft.Leader {
+		return nil
+	}
+	return n.ApplyNodeAddEvent(n.NodeID, n.NodeRaftAddr, n.NodeRPCAddr)
+}
+
 func (n *Node) GetRaftLeaderRpcAddr() (string, error) {
 	if n.raft.State() == raft.Leader {
 		return n.NodeRPCAddr, nil
@@ -132,51 +142,59 @@ func (n *Node) TopicExists(topic string) bool {
 	return n.metadataStore.GetTopic(topic) != nil
 }
 
-func (n *Node) ApplyCreateTopicEvent(ev *protocol.MetadataEvent) error {
+func (n *Node) ApplyCreateTopicEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
 	if n.raft.State() != raft.Leader {
-		n.Logger.Debug("not leader, skipping create topic event", zap.String("topic", ev.CreateTopicEvent.Topic))
+		n.Logger.Debug("not leader, skipping create topic event", zap.String("topic", topic))
 		return nil
 	}
-	if ev.CreateTopicEvent == nil {
-		return ErrInvalidEvent(ev)
+	eventData, err := json.Marshal(protocol.CreateTopicEvent{
+		Topic:          topic,
+		ReplicaCount:   replicaCount,
+		LeaderNodeID:   leaderNodeID,
+		LeaderEpoch:    1,
+		ReplicaNodeIds: replicaNodeIds,
+	})
+	if err != nil {
+		return err
 	}
-	n.Logger.Info("applying create topic event", zap.String("topic", ev.CreateTopicEvent.Topic), zap.String("leader_node_id", ev.CreateTopicEvent.LeaderNodeID))
+	ev := &protocol.MetadataEvent{
+		EventType: protocol.MetadataEventTypeCreateTopic,
+		Data:      eventData,
+	}
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}
+	n.Logger.Info("applying create topic event", zap.String("topic", topic), zap.String("leader_node_id", leaderNodeID))
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		topicName := ""
-		if ev.CreateTopicEvent != nil {
-			topicName = ev.CreateTopicEvent.Topic
-		}
-		n.Logger.Error("raft apply create topic failed", zap.Error(err), zap.String("topic", topicName))
+		n.Logger.Error("raft apply create topic failed", zap.Error(err), zap.String("topic", topic))
 		return ErrRaftApply(err)
 	}
 	return nil
 }
 
-func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
+func (n *Node) ApplyDeleteTopicEvent(topic string) error {
 	if n.raft.State() != raft.Leader {
-		n.Logger.Debug("not leader, skipping delete topic event", zap.String("topic", ev.DeleteTopicEvent.Topic))
+		n.Logger.Debug("not leader, skipping delete topic event", zap.String("topic", topic))
 		return nil
 	}
-	if ev.DeleteTopicEvent == nil {
-		return ErrInvalidEvent(ev)
+	eventData, err := json.Marshal(protocol.DeleteTopicEvent{Topic: topic})
+	if err != nil {
+		return err
 	}
-	n.Logger.Info("applying delete topic event", zap.String("topic", ev.DeleteTopicEvent.Topic))
+	ev := &protocol.MetadataEvent{
+		EventType: protocol.MetadataEventTypeDeleteTopic,
+		Data:      eventData,
+	}
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}
+	n.Logger.Info("applying delete topic event", zap.String("topic", topic))
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		topicName := ""
-		if ev.DeleteTopicEvent != nil {
-			topicName = ev.DeleteTopicEvent.Topic
-		}
-		n.Logger.Error("raft apply delete topic failed", zap.Error(err), zap.String("topic", topicName))
+		n.Logger.Error("raft apply delete topic failed", zap.Error(err), zap.String("topic", topic))
 		return ErrRaftApply(err)
 	}
 	return nil
@@ -213,22 +231,24 @@ func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 		n.Logger.Error("raft add voter failed", zap.Error(err))
 		return err
 	}
-	n.ApplyNodeAddEvent(&protocol.MetadataEvent{
-		AddNodeEvent: &protocol.AddNodeEvent{
-			NodeID:  id,
-			Addr:    raftAddr,
-			RpcAddr: rpcAddr,
-		},
-	})
+	n.ApplyNodeAddEvent(id, raftAddr, rpcAddr)
 
 	n.Logger.Info("node joined cluster", zap.String("joined_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	return nil
 }
 
-func (n *Node) ApplyNodeAddEvent(ev *protocol.MetadataEvent) error {
+func (n *Node) ApplyNodeAddEvent(nodeID, addr, rpcAddr string) error {
 	if n.raft.State() != raft.Leader {
-		n.Logger.Debug("not leader, skipping node add event", zap.String("node_id", ev.AddNodeEvent.NodeID))
+		n.Logger.Debug("not leader, skipping node add event", zap.String("node_id", nodeID))
 		return nil
+	}
+	eventData, err := json.Marshal(protocol.AddNodeEvent{NodeID: nodeID, Addr: addr, RpcAddr: rpcAddr})
+	if err != nil {
+		return err
+	}
+	ev := &protocol.MetadataEvent{
+		EventType: protocol.MetadataEventTypeAddNode,
+		Data:      eventData,
 	}
 	data, err := json.Marshal(ev)
 	if err != nil {
@@ -236,18 +256,24 @@ func (n *Node) ApplyNodeAddEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		if ev.AddNodeEvent != nil {
-			n.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("add_node_id", ev.AddNodeEvent.NodeID))
-		}
+		n.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("add_node_id", nodeID))
 		return ErrRaftApply(err)
 	}
 	return nil
 }
 
-func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
+func (n *Node) ApplyNodeRemoveEvent(nodeID string) error {
 	if n.raft.State() != raft.Leader {
-		n.Logger.Debug("not leader, skipping node remove event", zap.String("node_id", ev.RemoveNodeEvent.NodeID))
+		n.Logger.Debug("not leader, skipping node remove event", zap.String("node_id", nodeID))
 		return nil
+	}
+	eventData, err := json.Marshal(protocol.RemoveNodeEvent{NodeID: nodeID})
+	if err != nil {
+		return err
+	}
+	ev := &protocol.MetadataEvent{
+		EventType: protocol.MetadataEventTypeRemoveNode,
+		Data:      eventData,
 	}
 	data, err := json.Marshal(ev)
 	if err != nil {
@@ -255,18 +281,24 @@ func (n *Node) ApplyNodeRemoveEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		if ev.RemoveNodeEvent != nil {
-			n.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("remove_node_id", ev.RemoveNodeEvent.NodeID))
-		}
+		n.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("remove_node_id", nodeID))
 		return ErrRaftApply(err)
 	}
 	return nil
 }
 
-func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
+func (n *Node) ApplyIsrUpdateEvent(topic, replicaNodeID string, isr bool, leo int64) error {
 	if n.raft.State() != raft.Leader {
-		n.Logger.Debug("not leader, skipping ISR update event", zap.String("topic", ev.IsrUpdateEvent.Topic))
+		n.Logger.Debug("not leader, skipping ISR update event", zap.String("topic", topic))
 		return nil
+	}
+	eventData, err := json.Marshal(protocol.IsrUpdateEvent{Topic: topic, ReplicaNodeID: replicaNodeID, Isr: isr, Leo: leo})
+	if err != nil {
+		return err
+	}
+	ev := &protocol.MetadataEvent{
+		EventType: protocol.MetadataEventTypeIsrUpdate,
+		Data:      eventData,
 	}
 	data, err := json.Marshal(ev)
 	if err != nil {
@@ -274,7 +306,6 @@ func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
 	}
 	f := n.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		// During shutdown or leadership change, apply fails; log at Debug to avoid noise.
 		msg := err.Error()
 		if strings.Contains(msg, "shutdown") || strings.Contains(msg, "leadership lost") {
 			n.Logger.Debug("raft apply ISR update failed (shutdown or leadership change)", zap.Error(err))
@@ -298,11 +329,7 @@ func (n *Node) Leave(id string) error {
 		n.Logger.Error("raft remove server failed", zap.Error(err))
 		return err
 	}
-	n.ApplyNodeRemoveEvent(&protocol.MetadataEvent{
-		RemoveNodeEvent: &protocol.RemoveNodeEvent{
-			NodeID: id,
-		},
-	})
+	n.ApplyNodeRemoveEvent(id)
 	return nil
 }
 
@@ -434,6 +461,7 @@ func (n *Node) WaitforRaftReadyWithRetryBackoff(timeout time.Duration, retryCoun
 
 func (n *Node) Shutdown() error {
 	n.Logger.Info("node shutting down")
+	n.metadataStore.StopPeriodicLog()
 	f := n.raft.Shutdown()
 	return f.Error()
 }
