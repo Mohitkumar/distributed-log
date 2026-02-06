@@ -90,6 +90,9 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	case ApplyIsrUpdateEventResponse, *ApplyIsrUpdateEventResponse:
 		mType = MsgApplyIsrUpdateEventResp
 		payload, err = json.Marshal(v)
+	case RPCErrorResponse, *RPCErrorResponse:
+		mType = MsgRPCError
+		payload, err = json.Marshal(v)
 	default:
 		return ErrUnknownMessageType(mType)
 	}
@@ -207,6 +210,10 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		return mType, msg, err
 	case MsgApplyIsrUpdateEventResp:
 		var msg ApplyIsrUpdateEventResponse
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgRPCError:
+		var msg RPCErrorResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	default:

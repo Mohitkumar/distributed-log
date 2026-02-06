@@ -47,6 +47,11 @@ type ApplyIsrUpdateEventRequest struct {
 }
 type ApplyIsrUpdateEventResponse struct{}
 
+// RPCErrorResponse is sent by the server when a handler returns an error, so the client gets the error message instead of EOF.
+type RPCErrorResponse struct {
+	Message string `json:"message"`
+}
+
 type RecordLEORequest struct {
 	NodeID string
 	Topic  string

@@ -47,4 +47,5 @@ const (
 	MsgApplyDeleteTopicEventResp
 	MsgApplyIsrUpdateEvent
 	MsgApplyIsrUpdateEventResp
+	MsgRPCError
 )

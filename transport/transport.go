@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -108,7 +109,9 @@ func (t *Transport) handleConn(conn net.Conn) {
 		resp, err := handler(context.Background(), msg)
 		if err != nil {
 			fmt.Println("Handler error:", err)
-			return // close conn so client gets an error instead of hanging
+			// Send error to client so it gets the message instead of EOF.
+			_ = t.Codec.Encode(conn, &protocol.RPCErrorResponse{Message: err.Error()})
+			return
 		}
 		if err := t.Codec.Encode(conn, resp); err != nil {
 			fmt.Println("Encode error:", err)
@@ -134,7 +137,22 @@ func (c *TransportClient) Call(msg any) (any, error) {
 	if err := c.Write(msg); err != nil {
 		return nil, err
 	}
-	return c.Read()
+	return c.ReadResponse()
+}
+
+// ReadResponse reads the next frame and returns the decoded value. If the server sent an RPC error frame, returns (nil, error with message).
+func (c *TransportClient) ReadResponse() (any, error) {
+	mType, value, err := c.codec.Decode(c.conn)
+	if err != nil {
+		return nil, err
+	}
+	if mType == protocol.MsgRPCError {
+		if r, ok := value.(protocol.RPCErrorResponse); ok {
+			return nil, errors.New(r.Message)
+		}
+		return nil, errors.New("rpc error")
+	}
+	return value, nil
 }
 
 func (c *TransportClient) Write(msg any) error {

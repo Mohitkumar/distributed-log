@@ -30,7 +30,7 @@ func (c *ReplicationStreamClient) ReplicateStream(ctx context.Context, req *prot
 
 // Recv reads the next ReplicateResponse from the stream. Call after ReplicateStream; loop until resp.EndOfStream.
 func (c *ReplicationStreamClient) Recv() (*protocol.ReplicateResponse, error) {
-	resp, err := c.tc.Read()
+	resp, err := c.tc.ReadResponse()
 	if err != nil {
 		return nil, err
 	}
