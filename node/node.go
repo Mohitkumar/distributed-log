@@ -183,8 +183,12 @@ func (n *Node) ApplyDeleteTopicEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Join(id, raftAddr, rpcAddr string) error {
-	if n.raft.State() != raft.Leader {
-		return raft.ErrNotLeader
+	if !n.IsLeader() {
+		n.WaitforLeaderWithRetryBackoff(2*time.Second, 5)
+	}
+	if !n.IsLeader() {
+		n.Logger.Error("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+		return nil
 	}
 	n.Logger.Info("joining cluster", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	configFuture := n.raft.GetConfiguration()
@@ -206,33 +210,20 @@ func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 			}
 		}
 	}
-	//Apply event to local node metadata
-	if n.metadataStore.GetNodeMetadata(n.NodeID) == nil {
-		_ = n.ApplyNodeAddEvent(&protocol.MetadataEvent{
-			AddNodeEvent: &protocol.AddNodeEvent{
-				NodeID:  n.NodeID,
-				Addr:    n.cfg.RaftConfig.Address,
-				RpcAddr: n.NodeRPCAddr,
-			},
-		})
-	}
 	addFuture := n.raft.AddVoter(serverID, serverAddr, 0, 0)
 	if err := addFuture.Error(); err != nil {
 		n.Logger.Error("raft add voter failed", zap.Error(err))
 		return err
 	}
-	joinRpcAddr := rpcAddr
-	if joinRpcAddr == "" {
-		joinRpcAddr = raftAddr
-	}
 	n.ApplyNodeAddEvent(&protocol.MetadataEvent{
 		AddNodeEvent: &protocol.AddNodeEvent{
 			NodeID:  id,
 			Addr:    raftAddr,
-			RpcAddr: joinRpcAddr,
+			RpcAddr: rpcAddr,
 		},
 	})
-	n.Logger.Info("node joined cluster", zap.String("joined_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", joinRpcAddr))
+
+	n.Logger.Info("node joined cluster", zap.String("joined_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	return nil
 }
 
@@ -298,8 +289,12 @@ func (n *Node) ApplyIsrUpdateEvent(ev *protocol.MetadataEvent) error {
 }
 
 func (n *Node) Leave(id string) error {
-	if n.raft.State() != raft.Leader {
-		return raft.ErrNotLeader
+	if !n.IsLeader() {
+		n.WaitforLeaderWithRetryBackoff(2*time.Second, 5)
+	}
+	if !n.IsLeader() {
+		n.Logger.Error("not leader, skipping leave", zap.String("leaving_node_id", id))
+		return nil
 	}
 	n.Logger.Info("leaving cluster", zap.String("leaving_node_id", id))
 	removeFuture := n.raft.RemoveServer(raft.ServerID(id), 0, 0)
@@ -312,14 +307,6 @@ func (n *Node) Leave(id string) error {
 			NodeID: id,
 		},
 	})
-	n.Logger.Info("node left cluster", zap.String("left_node_id", id))
-	if n.metadataStore.GetNodeMetadata(n.NodeID) != nil {
-		_ = n.ApplyNodeRemoveEvent(&protocol.MetadataEvent{
-			RemoveNodeEvent: &protocol.RemoveNodeEvent{
-				NodeID: n.NodeID,
-			},
-		})
-	}
 	return nil
 }
 
@@ -343,7 +330,7 @@ func (n *Node) GetOtherNodes() []common.NodeInfo {
 		nodeID := string(srv.ID)
 		rpcAddr, err := n.GetRpcAddrForNodeID(nodeID)
 		if err != nil {
-			rpcAddr = string(srv.Address) // fallback for tests that haven't set metadata
+			rpcAddr = string(srv.Address)
 		}
 		nodes = append(nodes, common.NodeInfo{NodeID: nodeID, RpcAddr: rpcAddr})
 	}
@@ -376,6 +363,24 @@ func (n *Node) WaitForLeader(timeout time.Duration) error {
 			}
 		}
 	}
+}
+
+func (n *Node) WaitforLeaderWithRetryBackoff(timeout time.Duration, retryCount int) error {
+	timeoutc := time.After(timeout)
+	backoff := time.Duration(1 * time.Second)
+	for i := 0; i < retryCount; i++ {
+		select {
+		case <-timeoutc:
+			return fmt.Errorf("timed out waiting for leader")
+		default:
+			if n.IsLeader() {
+				return nil
+			}
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
+	return fmt.Errorf("timed out waiting for leader")
 }
 
 func (n *Node) Shutdown() error {

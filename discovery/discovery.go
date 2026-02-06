@@ -2,8 +2,6 @@ package discovery
 
 import (
 	"net"
-	"sync"
-	"time"
 
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/serf/serf"
@@ -11,39 +9,23 @@ import (
 	"go.uber.org/zap"
 )
 
-const leaveRetryInterval = 10 * time.Second
-
 type Membership struct {
 	config.Config
 	handler Handler
 	serf    *serf.Serf
 	events  chan serf.Event
 	logger  *zap.Logger
-	// pendingJoin stores nodes we need to Join() once we become leader again.
-	pendingJoin map[string]struct {
-		RaftAddr string
-		RpcAddr  string
-	}
-	pendingLeave map[string]struct{}
-	pendingMu    sync.Mutex
-	stopCh       chan struct{}
-	leaveOnce    sync.Once
 }
 
 func New(handler Handler, config config.Config) (*Membership, error) {
 	c := &Membership{
-		Config:       config,
-		handler:      handler,
-		logger:       zap.L().Named("discovery"),
-		pendingJoin:  make(map[string]struct{ RaftAddr, RpcAddr string }),
-		pendingLeave: make(map[string]struct{}),
-		pendingMu:    sync.Mutex{},
-		stopCh:       make(chan struct{}),
+		Config:  config,
+		handler: handler,
+		logger:  zap.L().Named("discovery"),
 	}
 	if err := c.setupSerf(); err != nil {
 		return nil, err
 	}
-	go c.retryPendingEvents()
 	return c, nil
 }
 
@@ -116,90 +98,15 @@ func (m *Membership) handleJoin(member serf.Member) {
 	if rpcAddr == "" {
 		rpcAddr = raftAddr
 	}
-	if err := m.handler.Join(member.Name, raftAddr, rpcAddr); err != nil {
-		if err == raft.ErrNotLeader {
-			// Leader not ready / election in progress; queue join until we become leader.
-			m.pendingMu.Lock()
-			m.pendingJoin[member.Name] = struct {
-				RaftAddr string
-				RpcAddr  string
-			}{RaftAddr: raftAddr, RpcAddr: rpcAddr}
-			m.pendingMu.Unlock()
-			m.logger.Debug("join deferred (not leader), will retry", zap.String("name", member.Name), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
-			return
-		}
+	err := m.handler.Join(member.Name, raftAddr, rpcAddr)
+	if err != nil {
 		m.logError(err, "failed to join", member)
 	}
 }
 
 func (m *Membership) handleLeave(member serf.Member) {
 	if err := m.handler.Leave(member.Name); err != nil {
-		if err == raft.ErrNotLeader {
-			// Leader left or election in progress; queue for retry when we become leader.
-			m.pendingMu.Lock()
-			m.pendingLeave[member.Name] = struct{}{}
-			m.pendingMu.Unlock()
-			m.logger.Debug("leave deferred (not leader), will retry", zap.String("name", member.Name))
-			return
-		}
 		m.logError(err, "failed to leave", member)
-	}
-}
-
-// retryPendingEvents runs periodically so the new leader eventually processes queued joins/leaves.
-func (m *Membership) retryPendingEvents() {
-	ticker := time.NewTicker(leaveRetryInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-m.stopCh:
-			return
-		case <-ticker.C:
-			// Snapshot pending work under lock, then process without holding it.
-			m.pendingMu.Lock()
-			joinSnap := make(map[string]struct {
-				RaftAddr string
-				RpcAddr  string
-			}, len(m.pendingJoin))
-			for name, info := range m.pendingJoin {
-				joinSnap[name] = info
-			}
-			leaveNames := make([]string, 0, len(m.pendingLeave))
-			for name := range m.pendingLeave {
-				leaveNames = append(leaveNames, name)
-			}
-			m.pendingMu.Unlock()
-
-			// Retry joins first so the leader brings new nodes in.
-			for name, info := range joinSnap {
-				if err := m.handler.Join(name, info.RaftAddr, info.RpcAddr); err != nil {
-					if err == raft.ErrNotLeader {
-						continue
-					}
-					m.logger.Error("retry join failed", zap.Error(err), zap.String("name", name))
-					continue
-				}
-				m.pendingMu.Lock()
-				delete(m.pendingJoin, name)
-				m.pendingMu.Unlock()
-				m.logger.Info("join completed on retry", zap.String("name", name), zap.String("raft_addr", info.RaftAddr), zap.String("rpc_addr", info.RpcAddr))
-			}
-
-			// Retry leaves.
-			for _, name := range leaveNames {
-				if err := m.handler.Leave(name); err != nil {
-					if err == raft.ErrNotLeader {
-						continue
-					}
-					m.logger.Error("retry leave failed", zap.Error(err), zap.String("name", name))
-					continue
-				}
-				m.pendingMu.Lock()
-				delete(m.pendingLeave, name)
-				m.pendingMu.Unlock()
-				m.logger.Info("leave completed on retry", zap.String("name", name))
-			}
-		}
 	}
 }
 
@@ -212,7 +119,6 @@ func (m *Membership) Members() []serf.Member {
 }
 
 func (m *Membership) Leave() error {
-	m.leaveOnce.Do(func() { close(m.stopCh) })
 	return m.serf.Leave()
 }
 
