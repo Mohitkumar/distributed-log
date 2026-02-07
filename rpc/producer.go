@@ -15,7 +15,7 @@ func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest)
 		return nil, ErrNotTopicLeader
 	}
 
-	offset, err := topicObj.HandleProduce(ctx, &protocol.LogEntry{
+	offset, err := srv.topicManager.HandleProduce(ctx, topicObj, &protocol.LogEntry{
 		Value: req.Value,
 	}, req.Acks)
 	if err != nil {
@@ -40,7 +40,7 @@ func (srv *RpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBat
 		return nil, ErrNotTopicLeader
 	}
 
-	base, last, err := topicObj.HandleProduceBatch(ctx, req.Values, req.Acks)
+	base, last, err := srv.topicManager.HandleProduceBatch(ctx, topicObj, req.Values, req.Acks)
 	if err != nil {
 		return nil, err
 	}

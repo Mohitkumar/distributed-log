@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"io"
 	"net"
 
 	"github.com/hashicorp/raft"
@@ -38,6 +39,7 @@ func (m *Membership) setupSerf() (err error) {
 	config.Init()
 	config.MemberlistConfig.BindAddr = addr.IP.String()
 	config.MemberlistConfig.BindPort = addr.Port
+	config.MemberlistConfig.LogOutput = io.Discard
 	m.events = make(chan serf.Event)
 	config.EventCh = m.events
 	rpcAddr, err := m.Config.RPCAddr()

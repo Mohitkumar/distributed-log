@@ -2,6 +2,7 @@ package topic
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -421,6 +422,9 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 
 // StartReplication starts the replication loop (topic must be a replica). Fetches from leader and appends to log; reports LEO.
 func (tm *TopicManager) StartReplication(t *Topic) error {
+	if tm.node.GetTopicLeaderNodeID(t.Name) == tm.currentNodeID() {
+		return fmt.Errorf("topic %s is leader, cannot start replication", t.Name)
+	}
 	t.mu.Lock()
 	if t.stopChan != nil {
 		t.mu.Unlock()
@@ -438,10 +442,8 @@ func (tm *TopicManager) StartReplication(t *Topic) error {
 	return nil
 }
 
-// StopReplication stops the replication loop.
+// StopReplication stops the replication loop. Do not hold tm.mu when calling (e.g. from DeleteTopic).
 func (tm *TopicManager) StopReplication(t *Topic) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
 	t.stopOnce.Do(func() {
 		if t.Logger != nil {
 			t.Logger.Info("stopping replication for topic", zap.String("topic", t.Name))
@@ -499,11 +501,11 @@ func (tm *TopicManager) runReplication(t *Topic, ctx context.Context) {
 			continue
 		}
 		backoff = 50 * time.Millisecond
-		t.replicateStream(ctx)
+		tm.replicateStream(t, leaderStreamClient, ctx)
 	}
 }
 
-func (t *Topic) replicateStream(leaderStreamClient *client.ReplicationStreamClient, ctx context.Context) {
+func (tm *TopicManager) replicateStream(t *Topic, leaderStreamClient *client.ReplicationStreamClient, ctx context.Context) {
 	for {
 		select {
 		case <-t.stopChan:
@@ -512,7 +514,10 @@ func (t *Topic) replicateStream(leaderStreamClient *client.ReplicationStreamClie
 			return
 		default:
 		}
-		if t.Log == nil {
+		t.mu.RLock()
+		log := t.Log
+		t.mu.RUnlock()
+		if log == nil {
 			return
 		}
 
@@ -527,7 +532,7 @@ func (t *Topic) replicateStream(leaderStreamClient *client.ReplicationStreamClie
 			}
 			var appendErr error
 			for _, rec := range records {
-				_, appendErr = t.Log.Append(rec.Value)
+				_, appendErr = log.Append(rec.Value)
 				if appendErr != nil {
 					break
 				}
@@ -537,19 +542,23 @@ func (t *Topic) replicateStream(leaderStreamClient *client.ReplicationStreamClie
 			}
 		}
 		if resp.EndOfStream {
-			if t.Log != nil {
-				_ = t.reportLEO(ctx, t.Log.LEO())
-			}
+			_ = tm.reportLEO(ctx, t)
 			break
 		}
 	}
 }
 
 func (tm *TopicManager) reportLEO(ctx context.Context, t *Topic) error {
+	t.mu.RLock()
+	log := t.Log
+	t.mu.RUnlock()
+	if log == nil {
+		return nil
+	}
 	req := &protocol.RecordLEORequest{
 		NodeID: tm.currentNodeID(),
 		Topic:  t.Name,
-		Leo:    int64(t.Log.LEO()),
+		Leo:    int64(log.LEO()),
 	}
 	leaderClient := tm.node.GetTopicLeaderClient(t.Name)
 	if leaderClient == nil {
@@ -668,13 +677,17 @@ func (tm *TopicManager) maybeAdvanceHW(t *Topic) {
 		return
 	}
 	minOffset := t.Log.LEO()
+	t.mu.RUnlock()
 	for _, r := range tm.node.GetTopicReplicaStates(t.Name) {
-		if uint64(r.LEO) < minOffset {
+		if r != nil && uint64(r.LEO) < minOffset {
 			minOffset = uint64(r.LEO)
 		}
 	}
-	t.mu.RUnlock()
-	t.Log.SetHighWatermark(minOffset)
+	t.mu.Lock()
+	if t.Log != nil {
+		t.Log.SetHighWatermark(minOffset)
+	}
+	t.mu.Unlock()
 }
 
 // RecordLEORemote records the LEO of a replica (topic leader only). Called by RPC when a replica reports its LEO.
@@ -688,26 +701,29 @@ func (tm *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64,
 		tm.mu.RUnlock()
 		return ErrTopicNotFoundf(topic)
 	}
+	topicObj.mu.RLock()
+	leaderLog := topicObj.Log
+	topicObj.mu.RUnlock()
 	tm.mu.RUnlock()
+
 	replicaStates := tm.node.GetTopicReplicaStates(topic)
-	replicaState, ok := replicaStates[nodeId]
-	if !ok || replicaState == nil {
+	if replicaStates[nodeId] == nil {
 		return ErrReplicaNotFoundf(nodeId, topic)
 	}
-	replicaState.LEO = int64(leo)
-	if topicObj.Log.LEO() >= 100 && leo >= topicObj.Log.LEO()-100 {
-		replicaState.IsISR = true
-	} else if topicObj.Log.LEO() < 100 {
-		if leo >= topicObj.Log.LEO() {
-			replicaState.IsISR = true
-		} else {
-			replicaState.IsISR = false
+
+	var isr bool
+	if leaderLog != nil {
+		leaderLEO := leaderLog.LEO()
+		if leaderLEO >= 100 && leo >= leaderLEO-100 {
+			isr = true
+		} else if leaderLEO < 100 {
+			isr = leo >= leaderLEO
 		}
-	} else {
-		replicaState.IsISR = false
 	}
+	tm.node.UpdateTopicReplicaLEO(topic, nodeId, int64(leo), isr)
+
 	tm.maybeAdvanceHW(topicObj)
-	if err := tm.applyIsrUpdateEventOnRaftLeader(context.Background(), topic, nodeId, replicaState.IsISR, int64(replicaState.LEO)); err != nil {
+	if err := tm.applyIsrUpdateEventOnRaftLeader(context.Background(), topic, nodeId, isr, int64(leo)); err != nil {
 		tm.Logger.Debug("apply ISR update on Raft leader failed", zap.String("topic", topic), zap.String("replica", nodeId), zap.Error(err))
 	}
 	return nil

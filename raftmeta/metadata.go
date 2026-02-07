@@ -89,7 +89,10 @@ func (ms *MetadataStore) GetTopic(topic string) *TopicMetadata {
 func (ms *MetadataStore) GetTopicReplicas(topic string) map[string]*ReplicaState {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
-	return ms.Topics[topic].Replicas
+	if tm := ms.Topics[topic]; tm != nil {
+		return tm.Replicas
+	}
+	return nil
 }
 
 // ListTopicNames returns all topic names in the metadata (for restore after restart).
@@ -128,15 +131,14 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 			LeaderEpoch:  e.LeaderEpoch,
 			Replicas:     make(map[string]*ReplicaState),
 		}
-		ms.GetOrCreateLeaderClient(e.Topic)
-		ms.GetOrCreateLeaderStreamClient(e.Topic)
+		ms.setLeaderClients(e.Topic)
 		for _, replica := range e.ReplicaNodeIds {
 			ms.Topics[e.Topic].Replicas[replica] = &ReplicaState{
 				ReplicaNodeID: replica,
 				LEO:           0,
 				IsISR:         true,
 			}
-			ms.GetOrCreateReplicaClient(e.Topic, replica)
+			ms.setReplicaClient(e.Topic, replica)
 		}
 	case protocol.MetadataEventTypeLeaderChange:
 		e := protocol.LeaderChangeEvent{}
@@ -145,15 +147,18 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 		}
 		if tm := ms.Topics[e.Topic]; tm != nil {
 			if tm.LeaderNodeID != e.LeaderNodeID {
-				tm.LeaderClient.Close()
-				tm.LeaderClient = nil
-				tm.LeaderStreamClient.Close()
-				tm.LeaderStreamClient = nil
+				if tm.LeaderClient != nil {
+					tm.LeaderClient.Close()
+					tm.LeaderClient = nil
+				}
+				if tm.LeaderStreamClient != nil {
+					tm.LeaderStreamClient.Close()
+					tm.LeaderStreamClient = nil
+				}
 			}
 			tm.LeaderNodeID = e.LeaderNodeID
 			tm.LeaderEpoch = e.LeaderEpoch
-			ms.GetOrCreateLeaderClient(e.Topic)
-			ms.GetOrCreateLeaderStreamClient(e.Topic)
+			ms.setLeaderClients(e.Topic)
 		}
 	case protocol.MetadataEventTypeIsrUpdate:
 		e := protocol.IsrUpdateEvent{}
@@ -171,13 +176,21 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
 		}
-		ms.Topics[e.Topic].LeaderClient.Close()
-		ms.Topics[e.Topic].LeaderClient = nil
-		ms.Topics[e.Topic].LeaderStreamClient.Close()
-		ms.Topics[e.Topic].LeaderStreamClient = nil
-		for _, replica := range ms.Topics[e.Topic].Replicas {
-			replica.ReplicaClient.Close()
-			replica.ReplicaClient = nil
+		if tm := ms.Topics[e.Topic]; tm != nil {
+			if tm.LeaderClient != nil {
+				tm.LeaderClient.Close()
+				tm.LeaderClient = nil
+			}
+			if tm.LeaderStreamClient != nil {
+				tm.LeaderStreamClient.Close()
+				tm.LeaderStreamClient = nil
+			}
+			for _, replica := range tm.Replicas {
+				if replica != nil && replica.ReplicaClient != nil {
+					replica.ReplicaClient.Close()
+					replica.ReplicaClient = nil
+				}
+			}
 		}
 		delete(ms.Topics, e.Topic)
 	case protocol.MetadataEventTypeAddNode:
@@ -246,70 +259,46 @@ func (ms *MetadataStore) RestoreState(topics map[string]*TopicMetadata, nodes ma
 	ms.mu.Unlock()
 }
 
-func (ms *MetadataStore) GetOrCreateLeaderClient(topic string) *client.RemoteClient {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-	if ms.Topics[topic].LeaderClient == nil {
-		leaderNodeID := ms.GetTopic(topic).LeaderNodeID
-		leaderNode := ms.GetNodeMetadata(leaderNodeID)
-		if leaderNode == nil {
-			return nil
+// UpdateReplicaLEO updates LEO and IsISR for a topic replica under store lock. Use from topic layer (e.g. RecordLEORemote).
+func (ms *MetadataStore) UpdateReplicaLEO(topic, replicaNodeID string, leo int64, isr bool) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	if tm := ms.Topics[topic]; tm != nil && tm.Replicas != nil {
+		if rs := tm.Replicas[replicaNodeID]; rs != nil {
+			rs.LEO = leo
+			rs.IsISR = isr
 		}
-		leaderAddr := leaderNode.RpcAddr
-		if leaderAddr == "" {
-			return nil
-		}
-		cl, err := client.NewRemoteClient(leaderAddr)
-		if err != nil {
-			return nil
-		}
-		ms.Topics[topic].LeaderClient = cl
 	}
-	return ms.Topics[topic].LeaderClient
 }
 
-func (ms *MetadataStore) GetOrCreateReplicaClient(topic string, replicaNodeID string) *client.RemoteClient {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-	if ms.Topics[topic].Replicas[replicaNodeID].ReplicaClient == nil {
-		replicaNode := ms.GetNodeMetadata(replicaNodeID)
-		if replicaNode == nil {
-			return nil
-		}
-		replicaAddr := replicaNode.RpcAddr
-		if replicaAddr == "" {
-			return nil
-		}
-		cl, err := client.NewRemoteClient(replicaAddr)
-		if err != nil {
-			return nil
-		}
-		ms.Topics[topic].Replicas[replicaNodeID].ReplicaClient = cl
+func (ms *MetadataStore) setLeaderClients(topic string) error {
+	leaderNodeID := ms.Topics[topic].LeaderNodeID
+	leaderNode := ms.Nodes[leaderNodeID]
+	if leaderNode == nil || leaderNode.RpcAddr == "" {
+		return fmt.Errorf("leader node %s not found", leaderNodeID)
 	}
-	return ms.Topics[topic].Replicas[replicaNodeID].ReplicaClient
+	cl, err := client.NewRemoteClient(leaderNode.RpcAddr)
+	if err != nil {
+		return err
+	}
+	leaderStreamClient, err := client.NewReplicationStreamClient(leaderNode.RpcAddr)
+	if err != nil {
+		return err
+	}
+	ms.Topics[topic].LeaderClient = cl
+	ms.Topics[topic].LeaderStreamClient = leaderStreamClient
+	return nil
 }
 
-func (ms *MetadataStore) GetOrCreateLeaderStreamClient(topic string) *client.ReplicationStreamClient {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-	if ms.Topics[topic] == nil {
-		return nil
+func (ms *MetadataStore) setReplicaClient(topic string, replicaNodeID string) error {
+	replicaNode := ms.Nodes[replicaNodeID]
+	if replicaNode == nil || replicaNode.RpcAddr == "" {
+		return fmt.Errorf("replica node %s not found", replicaNodeID)
 	}
-	if ms.Topics[topic].LeaderStreamClient == nil {
-		leaderNodeID := ms.Topics[topic].LeaderNodeID
-		leaderNode := ms.GetNodeMetadata(leaderNodeID)
-		if leaderNode == nil {
-			return nil
-		}
-		leaderAddr := leaderNode.RpcAddr
-		if leaderAddr == "" {
-			return nil
-		}
-		streamClient, err := client.NewReplicationStreamClient(leaderAddr)
-		if err != nil {
-			return nil
-		}
-		ms.Topics[topic].LeaderStreamClient = streamClient
+	cl, err := client.NewRemoteClient(replicaNode.RpcAddr)
+	if err != nil {
+		return err
 	}
-	return ms.Topics[topic].LeaderStreamClient
+	ms.Topics[topic].Replicas[replicaNodeID].ReplicaClient = cl
+	return nil
 }

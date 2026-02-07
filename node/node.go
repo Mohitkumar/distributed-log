@@ -107,12 +107,7 @@ func (n *Node) GetTopicLeaderRpcAddr(topic string) (string, error) {
 }
 
 func (n *Node) GetClusterNodeIDs() []string {
-	nodes := n.metadataStore.Nodes
-	ids := make([]string, 0, len(nodes))
-	for _, node := range nodes {
-		ids = append(ids, node.NodeID)
-	}
-	return ids
+	return n.metadataStore.ListNodeIDs()
 }
 
 // GetNodeIDWithLeastTopics returns the cluster node ID that is leader of the fewest topics.
@@ -201,7 +196,8 @@ func (n *Node) maybeReassignTopicLeaders(nodeID string) {
 	if n.raft.State() != raft.Leader {
 		return
 	}
-	for topic, tm := range n.metadataStore.Topics {
+	topicsCopy := n.metadataStore.GetTopicsCopy()
+	for topic, tm := range topicsCopy {
 		if tm == nil || tm.LeaderNodeID != nodeID {
 			continue
 		}
@@ -211,7 +207,6 @@ func (n *Node) maybeReassignTopicLeaders(nodeID string) {
 			if rid == nodeID || rs == nil || !rs.IsISR {
 				continue
 			}
-			// Ensure we still have metadata for this node (not already removed).
 			if n.metadataStore.GetNodeMetadata(rid) == nil {
 				continue
 			}
@@ -299,7 +294,7 @@ func (n *Node) GetTopicReplicaClients(topic string) map[string]*client.RemoteCli
 	if tm == nil || tm.Replicas == nil {
 		return nil
 	}
-	clients := make(map[string]*client.RemoteClient)
+	clients := make(map[string]*client.RemoteClient, len(tm.Replicas))
 	for id, rs := range tm.Replicas {
 		clients[id] = rs.ReplicaClient
 	}
@@ -320,6 +315,11 @@ func (n *Node) GetTopicLeaderStreamClient(topic string) *client.ReplicationStrea
 		return nil
 	}
 	return tm.LeaderStreamClient
+}
+
+// UpdateTopicReplicaLEO updates LEO and IsISR for a topic replica in metadata under store lock.
+func (n *Node) UpdateTopicReplicaLEO(topic, replicaNodeID string, leo int64, isr bool) {
+	n.metadataStore.UpdateReplicaLEO(topic, replicaNodeID, leo, isr)
 }
 
 // GetTopicReplicaState returns LEO and IsISR for a topic replica from metadata (for restore).
