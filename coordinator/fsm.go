@@ -49,11 +49,12 @@ func (c *MetadataFSM) Restore(r io.ReadCloser) error {
 	if err != nil {
 		return err
 	}
-	var metadataStore raftmeta.MetadataStore
-	if err := json.Unmarshal(data, &metadataStore); err != nil {
+	var decoded raftmeta.MetadataStore
+	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	c.MetadataStore = &metadataStore
+	// Replace state in place so the same store (and its callbacks) is preserved.
+	c.MetadataStore.RestoreState(decoded.Topics, decoded.Nodes)
 	return nil
 }
 

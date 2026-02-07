@@ -38,6 +38,11 @@ func (c *ReplicationStreamClient) Recv() (*protocol.ReplicateResponse, error) {
 	return &rep, nil
 }
 
+// Close closes the underlying transport connection.
+func (c *ReplicationStreamClient) Close() error {
+	return c.tc.Close()
+}
+
 type RemoteClient struct {
 	tc *transport.TransportClient
 }

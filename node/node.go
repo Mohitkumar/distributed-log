@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
+	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/config"
 	"github.com/mohitkumar/mlog/coordinator"
@@ -283,6 +284,42 @@ func (n *Node) GetTopicReplicaNodeIDs(topic string) []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+func (n *Node) GetTopicReplicaStates(topic string) map[string]*raftmeta.ReplicaState {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.Replicas == nil {
+		return nil
+	}
+	return tm.Replicas
+}
+
+func (n *Node) GetTopicReplicaClients(topic string) map[string]*client.RemoteClient {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.Replicas == nil {
+		return nil
+	}
+	clients := make(map[string]*client.RemoteClient)
+	for id, rs := range tm.Replicas {
+		clients[id] = rs.ReplicaClient
+	}
+	return clients
+}
+
+func (n *Node) GetTopicLeaderClient(topic string) *client.RemoteClient {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.LeaderClient == nil {
+		return nil
+	}
+	return tm.LeaderClient
+}
+
+func (n *Node) GetTopicLeaderStreamClient(topic string) *client.ReplicationStreamClient {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.LeaderStreamClient == nil {
+		return nil
+	}
+	return tm.LeaderStreamClient
 }
 
 // GetTopicReplicaState returns LEO and IsISR for a topic replica from metadata (for restore).

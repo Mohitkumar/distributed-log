@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
 )
 
@@ -15,15 +16,18 @@ type NodeMetadata struct {
 	RpcAddr string `json:"rpc_addr"`
 }
 type TopicMetadata struct {
-	LeaderNodeID string                   `json:"leader_id"`
-	LeaderEpoch  int64                    `json:"leader_epoch"`
-	Replicas     map[string]*ReplicaState `json:"replicas"`
+	LeaderNodeID       string                   `json:"leader_id"`
+	LeaderEpoch        int64                    `json:"leader_epoch"`
+	Replicas           map[string]*ReplicaState `json:"replicas"`
+	LeaderClient       *client.RemoteClient
+	LeaderStreamClient *client.ReplicationStreamClient
 }
 
 type ReplicaState struct {
 	ReplicaNodeID string `json:"replica_id"`
 	LEO           int64  `json:"leo"`
 	IsISR         bool   `json:"is_isr"`
+	ReplicaClient *client.RemoteClient
 }
 
 const defaultLogInterval = 30 * time.Second
@@ -82,6 +86,12 @@ func (ms *MetadataStore) GetTopic(topic string) *TopicMetadata {
 	return ms.Topics[topic]
 }
 
+func (ms *MetadataStore) GetTopicReplicas(topic string) map[string]*ReplicaState {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	return ms.Topics[topic].Replicas
+}
+
 // ListTopicNames returns all topic names in the metadata (for restore after restart).
 func (ms *MetadataStore) ListTopicNames() []string {
 	ms.mu.RLock()
@@ -91,6 +101,17 @@ func (ms *MetadataStore) ListTopicNames() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// GetTopicsCopy returns a shallow copy of the topics map for iteration (e.g. leader reassignment).
+func (ms *MetadataStore) GetTopicsCopy() map[string]*TopicMetadata {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	out := make(map[string]*TopicMetadata, len(ms.Topics))
+	for k, v := range ms.Topics {
+		out[k] = v
+	}
+	return out
 }
 
 func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
@@ -107,12 +128,15 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 			LeaderEpoch:  e.LeaderEpoch,
 			Replicas:     make(map[string]*ReplicaState),
 		}
+		ms.GetOrCreateLeaderClient(e.Topic)
+		ms.GetOrCreateLeaderStreamClient(e.Topic)
 		for _, replica := range e.ReplicaNodeIds {
 			ms.Topics[e.Topic].Replicas[replica] = &ReplicaState{
 				ReplicaNodeID: replica,
 				LEO:           0,
 				IsISR:         true,
 			}
+			ms.GetOrCreateReplicaClient(e.Topic, replica)
 		}
 	case protocol.MetadataEventTypeLeaderChange:
 		e := protocol.LeaderChangeEvent{}
@@ -120,8 +144,16 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 			return err
 		}
 		if tm := ms.Topics[e.Topic]; tm != nil {
+			if tm.LeaderNodeID != e.LeaderNodeID {
+				tm.LeaderClient.Close()
+				tm.LeaderClient = nil
+				tm.LeaderStreamClient.Close()
+				tm.LeaderStreamClient = nil
+			}
 			tm.LeaderNodeID = e.LeaderNodeID
 			tm.LeaderEpoch = e.LeaderEpoch
+			ms.GetOrCreateLeaderClient(e.Topic)
+			ms.GetOrCreateLeaderStreamClient(e.Topic)
 		}
 	case protocol.MetadataEventTypeIsrUpdate:
 		e := protocol.IsrUpdateEvent{}
@@ -138,6 +170,14 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 		e := protocol.DeleteTopicEvent{}
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
+		}
+		ms.Topics[e.Topic].LeaderClient.Close()
+		ms.Topics[e.Topic].LeaderClient = nil
+		ms.Topics[e.Topic].LeaderStreamClient.Close()
+		ms.Topics[e.Topic].LeaderStreamClient = nil
+		for _, replica := range ms.Topics[e.Topic].Replicas {
+			replica.ReplicaClient.Close()
+			replica.ReplicaClient = nil
 		}
 		delete(ms.Topics, e.Topic)
 	case protocol.MetadataEventTypeAddNode:
@@ -174,6 +214,17 @@ func (ms *MetadataStore) GetNodeMetadata(nodeID string) *NodeMetadata {
 	return ms.Nodes[nodeID]
 }
 
+// ListNodeIDs returns all node IDs in the store (for cluster membership).
+func (ms *MetadataStore) ListNodeIDs() []string {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	ids := make([]string, 0, len(ms.Nodes))
+	for id := range ms.Nodes {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // TopicCountByLeader returns the number of topics each node is leader of.
 func (ms *MetadataStore) TopicCountByLeader() map[string]int {
 	ms.mu.RLock()
@@ -185,4 +236,80 @@ func (ms *MetadataStore) TopicCountByLeader() map[string]int {
 		}
 	}
 	return counts
+}
+
+// RestoreState replaces Topics and Nodes from a snapshot without replacing the store (keeps callbacks).
+func (ms *MetadataStore) RestoreState(topics map[string]*TopicMetadata, nodes map[string]*NodeMetadata) {
+	ms.mu.Lock()
+	ms.Topics = topics
+	ms.Nodes = nodes
+	ms.mu.Unlock()
+}
+
+func (ms *MetadataStore) GetOrCreateLeaderClient(topic string) *client.RemoteClient {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	if ms.Topics[topic].LeaderClient == nil {
+		leaderNodeID := ms.GetTopic(topic).LeaderNodeID
+		leaderNode := ms.GetNodeMetadata(leaderNodeID)
+		if leaderNode == nil {
+			return nil
+		}
+		leaderAddr := leaderNode.RpcAddr
+		if leaderAddr == "" {
+			return nil
+		}
+		cl, err := client.NewRemoteClient(leaderAddr)
+		if err != nil {
+			return nil
+		}
+		ms.Topics[topic].LeaderClient = cl
+	}
+	return ms.Topics[topic].LeaderClient
+}
+
+func (ms *MetadataStore) GetOrCreateReplicaClient(topic string, replicaNodeID string) *client.RemoteClient {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	if ms.Topics[topic].Replicas[replicaNodeID].ReplicaClient == nil {
+		replicaNode := ms.GetNodeMetadata(replicaNodeID)
+		if replicaNode == nil {
+			return nil
+		}
+		replicaAddr := replicaNode.RpcAddr
+		if replicaAddr == "" {
+			return nil
+		}
+		cl, err := client.NewRemoteClient(replicaAddr)
+		if err != nil {
+			return nil
+		}
+		ms.Topics[topic].Replicas[replicaNodeID].ReplicaClient = cl
+	}
+	return ms.Topics[topic].Replicas[replicaNodeID].ReplicaClient
+}
+
+func (ms *MetadataStore) GetOrCreateLeaderStreamClient(topic string) *client.ReplicationStreamClient {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	if ms.Topics[topic] == nil {
+		return nil
+	}
+	if ms.Topics[topic].LeaderStreamClient == nil {
+		leaderNodeID := ms.Topics[topic].LeaderNodeID
+		leaderNode := ms.GetNodeMetadata(leaderNodeID)
+		if leaderNode == nil {
+			return nil
+		}
+		leaderAddr := leaderNode.RpcAddr
+		if leaderAddr == "" {
+			return nil
+		}
+		streamClient, err := client.NewReplicationStreamClient(leaderAddr)
+		if err != nil {
+			return nil
+		}
+		ms.Topics[topic].LeaderStreamClient = streamClient
+	}
+	return ms.Topics[topic].LeaderStreamClient
 }
