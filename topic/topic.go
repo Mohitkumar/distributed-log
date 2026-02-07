@@ -25,11 +25,11 @@ type Topic struct {
 	// nodeID is set for replica topics so RecordLEO can identify this node to the leader.
 	nodeID string
 
-	streamClient      *client.ReplicationStreamClient // replication stream only (send request, Recv until EndOfStream)
-	rpcClient         *client.RemoteClient            // RecordLEO and other request-response RPCs to leader
-	stopChan          chan struct{}
-	stopOnce          sync.Once
-	replicationCancel context.CancelFunc
+	leaderStreamClient *client.ReplicationStreamClient // replication stream only (send request, Recv until EndOfStream)
+	leaderRpcClient    *client.RemoteClient            // RecordLEO and other request-response RPCs to leader
+	stopChan           chan struct{}
+	stopOnce           sync.Once
+	replicationCancel  context.CancelFunc
 }
 
 // ReplicaInfo holds metadata and client for a remote replica (leader's view).
@@ -75,18 +75,8 @@ func (tm *TopicManager) currentNodeAddr() string {
 	return tm.node.GetNodeAddr()
 }
 
-func (m *TopicManager) IsLeader(topic string) bool {
-	return m.node.GetTopicLeaderNodeID(topic) == m.currentNodeID()
-}
-
-// ApplyDeleteTopicEvent delegates to the node (used by RPC on Raft leader).
-func (tm *TopicManager) ApplyDeleteTopicEvent(topic string) error {
-	return tm.node.ApplyDeleteTopicEvent(topic)
-}
-
-// ApplyIsrUpdateEvent delegates to the node (used by RPC on Raft leader).
-func (tm *TopicManager) ApplyIsrUpdateEvent(topic, replicaNodeID string, isr bool, leo int64) error {
-	return tm.node.ApplyIsrUpdateEvent(topic, replicaNodeID, isr, leo)
+func (tm *TopicManager) IsLeader(topic string) bool {
+	return tm.node.GetTopicLeaderNodeID(topic) == tm.currentNodeID()
 }
 
 // applyDeleteTopicEventOnRaftLeader gets the Raft leader RPC address and calls ApplyDeleteTopicEvent there.
@@ -467,8 +457,8 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) err
 	}
 
 	topicObj.Log = logManager
-	topicObj.streamClient = streamClient
-	topicObj.rpcClient = rpcClient
+	topicObj.leaderStreamClient = streamClient
+	topicObj.leaderRpcClient = rpcClient
 
 	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_addr", leaderAddr))
 
@@ -509,7 +499,7 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 // StartReplication starts the replication loop (topic must be a replica). Fetches from leader and appends to log; reports LEO.
 func (t *Topic) StartReplication() error {
 
-	if t.streamClient == nil {
+	if t.leaderStreamClient == nil {
 		return ErrStreamClientNotSetf(t.Name)
 	}
 
@@ -570,7 +560,7 @@ func (t *Topic) runReplication(ctx context.Context) {
 			Offset:    currentOffset,
 			BatchSize: 1000,
 		}
-		if err := t.streamClient.ReplicateStream(ctx, req); err != nil {
+		if err := t.leaderStreamClient.ReplicateStream(ctx, req); err != nil {
 			if t.Logger != nil {
 				t.Logger.Warn("replicate stream error, reconnecting", zap.String("topic", t.Name), zap.Error(err))
 			}
@@ -598,7 +588,7 @@ func (t *Topic) replicateStream(ctx context.Context) {
 			return
 		}
 
-		resp, err := t.streamClient.Recv()
+		resp, err := t.leaderStreamClient.Recv()
 		if err != nil {
 			break
 		}
@@ -636,7 +626,7 @@ func (t *Topic) reportLEO(ctx context.Context, leo uint64) error {
 		Topic:  t.Name,
 		Leo:    int64(leo),
 	}
-	_, err := t.rpcClient.RecordLEO(ctx, req)
+	_, err := t.leaderRpcClient.RecordLEO(ctx, req)
 	return err
 }
 
@@ -758,7 +748,7 @@ func (t *Topic) maybeAdvanceHW() {
 	t.Log.SetHighWatermark(minOffset)
 }
 
-// RecordLEORemote records the LEO of a replica (leader only). Called by RPC when a replica reports its LEO.
+// RecordLEORemote records the LEO of a replica (topic leader only). Called by RPC when a replica reports its LEO.
 func (t *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64, leoTime time.Time) error {
 	if nodeId == "" {
 		return ErrNodeIDRequired
@@ -783,6 +773,8 @@ func (t *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64, 
 	} else if topicObj.Log.LEO() < 100 {
 		if leo >= topicObj.Log.LEO() {
 			repl.State.IsISR = true
+		} else {
+			repl.State.IsISR = false
 		}
 	} else {
 		repl.State.IsISR = false
