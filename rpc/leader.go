@@ -57,18 +57,18 @@ func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEOReques
 // until caught up, then sends EndOfStream.
 func (s *RpcServer) handleReplicateStream(ctx context.Context, msg any, conn net.Conn, codec *protocol.Codec) error {
 	req := msg.(protocol.ReplicateRequest)
-	leaderView, err := s.topicManager.GetLeader(req.Topic)
+	leaderLog, err := s.topicManager.GetLeader(req.Topic)
 	// If metadata says we're not leader but we have the topic locally (e.g. we just created it and metadata not applied yet), use local log.
 	if err != nil {
 		if topicObj, e := s.topicManager.GetTopic(req.Topic); e == nil && topicObj != nil && topicObj.Log != nil {
-			leaderView = topicObj.Log
+			leaderLog = topicObj.Log
 			err = nil
 		}
 	}
 	if err != nil {
 		return err
 	}
-	reader, err := leaderView.ReaderFrom(req.Offset)
+	reader, err := leaderLog.ReaderFrom(req.Offset)
 	if err != nil {
 		return err
 	}

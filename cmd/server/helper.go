@@ -83,7 +83,7 @@ func (cmdHelper *CommandHelper) setupTopicManager() error {
 	}
 	cmdHelper.topicMgr = topicMgr
 	// Raft may still be replaying log/snapshot after restart; wait for a leader so metadata and RPC addrs are usable.
-	if err := cmdHelper.node.WaitForRaftReady(RaftReadyTimeout); err != nil {
+	if err := cmdHelper.node.WaitforRaftReadyWithRetryBackoff(RaftReadyTimeout, 2); err != nil {
 		cmdHelper.node.Logger.Warn("Raft not ready before restore (continuing anyway)", zap.Error(err))
 	}
 	if err := topicMgr.RestoreFromMetadata(); err != nil {

@@ -35,6 +35,10 @@ func ErrCreateReplicationClient(addr string, err error) error {
 	return fmt.Errorf("failed to create replication client to %s: %w", addr, err)
 }
 
+func ErrGetRpcClient(nodeID string, err error) error {
+	return fmt.Errorf("failed to get RPC client for node %s: %w", nodeID, err)
+}
+
 func ErrCreateReplicaOnNode(nodeID string, err error) error {
 	return fmt.Errorf("failed to create replica on node %s: %w", nodeID, err)
 }

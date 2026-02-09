@@ -7,29 +7,29 @@ import (
 	"github.com/mohitkumar/mlog/transport"
 )
 
-// ReplicationStreamClient is a dedicated client for the replication stream only.
+// RemoteStreamClient is a dedicated client for the replication stream only.
 // It sends one ReplicateRequest and then reads ReplicateResponse frames until EndOfStream.
 // Use this for replication;
-type ReplicationStreamClient struct {
+type RemoteStreamClient struct {
 	tc *transport.TransportClient
 }
 
-func NewReplicationStreamClient(addr string) (*ReplicationStreamClient, error) {
+func NewRemoteStreamClient(addr string) (*RemoteStreamClient, error) {
 	tc, err := transport.Dial(addr)
 	if err != nil {
 		return nil, err
 	}
-	return &ReplicationStreamClient{tc: tc}, nil
+	return &RemoteStreamClient{tc: tc}, nil
 }
 
 // ReplicateStream sends one ReplicateRequest on the connection; the leader then streams raw bytes until EndOfStream.
 // Call Recv() in a loop to read each ReplicateResponse (RawChunk + EndOfStream).
-func (c *ReplicationStreamClient) ReplicateStream(ctx context.Context, req *protocol.ReplicateRequest) error {
+func (c *RemoteStreamClient) ReplicateStream(ctx context.Context, req *protocol.ReplicateRequest) error {
 	return c.tc.Write(*req)
 }
 
 // Recv reads the next ReplicateResponse from the stream. Call after ReplicateStream; loop until resp.EndOfStream.
-func (c *ReplicationStreamClient) Recv() (*protocol.ReplicateResponse, error) {
+func (c *RemoteStreamClient) Recv() (*protocol.ReplicateResponse, error) {
 	resp, err := c.tc.ReadResponse()
 	if err != nil {
 		return nil, err
@@ -39,7 +39,7 @@ func (c *ReplicationStreamClient) Recv() (*protocol.ReplicateResponse, error) {
 }
 
 // Close closes the underlying transport connection.
-func (c *ReplicationStreamClient) Close() error {
+func (c *RemoteStreamClient) Close() error {
 	return c.tc.Close()
 }
 

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
 )
 
@@ -16,18 +15,15 @@ type NodeMetadata struct {
 	RpcAddr string `json:"rpc_addr"`
 }
 type TopicMetadata struct {
-	LeaderNodeID       string                   `json:"leader_id"`
-	LeaderEpoch        int64                    `json:"leader_epoch"`
-	Replicas           map[string]*ReplicaState `json:"replicas"`
-	LeaderClient       *client.RemoteClient
-	LeaderStreamClient *client.ReplicationStreamClient
+	LeaderNodeID string                   `json:"leader_id"`
+	LeaderEpoch  int64                    `json:"leader_epoch"`
+	Replicas     map[string]*ReplicaState `json:"replicas"`
 }
 
 type ReplicaState struct {
 	ReplicaNodeID string `json:"replica_id"`
 	LEO           int64  `json:"leo"`
 	IsISR         bool   `json:"is_isr"`
-	ReplicaClient *client.RemoteClient
 }
 
 const defaultLogInterval = 30 * time.Second
@@ -131,14 +127,12 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 			LeaderEpoch:  e.LeaderEpoch,
 			Replicas:     make(map[string]*ReplicaState),
 		}
-		ms.setLeaderClients(e.Topic)
 		for _, replica := range e.ReplicaNodeIds {
 			ms.Topics[e.Topic].Replicas[replica] = &ReplicaState{
 				ReplicaNodeID: replica,
 				LEO:           0,
 				IsISR:         true,
 			}
-			ms.setReplicaClient(e.Topic, replica)
 		}
 	case protocol.MetadataEventTypeLeaderChange:
 		e := protocol.LeaderChangeEvent{}
@@ -146,19 +140,8 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 			return err
 		}
 		if tm := ms.Topics[e.Topic]; tm != nil {
-			if tm.LeaderNodeID != e.LeaderNodeID {
-				if tm.LeaderClient != nil {
-					tm.LeaderClient.Close()
-					tm.LeaderClient = nil
-				}
-				if tm.LeaderStreamClient != nil {
-					tm.LeaderStreamClient.Close()
-					tm.LeaderStreamClient = nil
-				}
-			}
 			tm.LeaderNodeID = e.LeaderNodeID
 			tm.LeaderEpoch = e.LeaderEpoch
-			ms.setLeaderClients(e.Topic)
 		}
 	case protocol.MetadataEventTypeIsrUpdate:
 		e := protocol.IsrUpdateEvent{}
@@ -175,22 +158,6 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 		e := protocol.DeleteTopicEvent{}
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
-		}
-		if tm := ms.Topics[e.Topic]; tm != nil {
-			if tm.LeaderClient != nil {
-				tm.LeaderClient.Close()
-				tm.LeaderClient = nil
-			}
-			if tm.LeaderStreamClient != nil {
-				tm.LeaderStreamClient.Close()
-				tm.LeaderStreamClient = nil
-			}
-			for _, replica := range tm.Replicas {
-				if replica != nil && replica.ReplicaClient != nil {
-					replica.ReplicaClient.Close()
-					replica.ReplicaClient = nil
-				}
-			}
 		}
 		delete(ms.Topics, e.Topic)
 	case protocol.MetadataEventTypeAddNode:
@@ -269,36 +236,4 @@ func (ms *MetadataStore) UpdateReplicaLEO(topic, replicaNodeID string, leo int64
 			rs.IsISR = isr
 		}
 	}
-}
-
-func (ms *MetadataStore) setLeaderClients(topic string) error {
-	leaderNodeID := ms.Topics[topic].LeaderNodeID
-	leaderNode := ms.Nodes[leaderNodeID]
-	if leaderNode == nil || leaderNode.RpcAddr == "" {
-		return fmt.Errorf("leader node %s not found", leaderNodeID)
-	}
-	cl, err := client.NewRemoteClient(leaderNode.RpcAddr)
-	if err != nil {
-		return err
-	}
-	leaderStreamClient, err := client.NewReplicationStreamClient(leaderNode.RpcAddr)
-	if err != nil {
-		return err
-	}
-	ms.Topics[topic].LeaderClient = cl
-	ms.Topics[topic].LeaderStreamClient = leaderStreamClient
-	return nil
-}
-
-func (ms *MetadataStore) setReplicaClient(topic string, replicaNodeID string) error {
-	replicaNode := ms.Nodes[replicaNodeID]
-	if replicaNode == nil || replicaNode.RpcAddr == "" {
-		return fmt.Errorf("replica node %s not found", replicaNodeID)
-	}
-	cl, err := client.NewRemoteClient(replicaNode.RpcAddr)
-	if err != nil {
-		return err
-	}
-	ms.Topics[topic].Replicas[replicaNodeID].ReplicaClient = cl
-	return nil
 }

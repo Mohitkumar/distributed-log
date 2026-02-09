@@ -18,13 +18,15 @@ var _ discovery.Handler = (*Node)(nil)
 
 // Node represents a cluster node
 type Node struct {
-	NodeID        string
-	NodeRPCAddr   string
-	NodeRaftAddr  string
-	Logger        *zap.Logger
-	raft          *raft.Raft
-	cfg           config.Config
-	metadataStore *raftmeta.MetadataStore
+	NodeID            string
+	NodeRPCAddr       string
+	NodeRaftAddr      string
+	Logger            *zap.Logger
+	raft              *raft.Raft
+	cfg               config.Config
+	metadataStore     *raftmeta.MetadataStore
+	nodeClients       map[string]*client.RemoteClient
+	nodeStreamClients map[string]*client.RemoteStreamClient
 }
 
 func NewNodeFromConfig(config config.Config, logger *zap.Logger) (*Node, error) {
@@ -48,13 +50,15 @@ func NewNodeFromConfig(config config.Config, logger *zap.Logger) (*Node, error) 
 		return nil, err
 	}
 	n := &Node{
-		NodeID:        config.NodeConfig.ID,
-		NodeRPCAddr:   rpcAddr,
-		NodeRaftAddr:  config.RaftConfig.Address,
-		Logger:        logger,
-		raft:          raftNode,
-		cfg:           config,
-		metadataStore: fsm.MetadataStore,
+		NodeID:            config.NodeConfig.ID,
+		NodeRPCAddr:       rpcAddr,
+		NodeRaftAddr:      config.RaftConfig.Address,
+		Logger:            logger,
+		raft:              raftNode,
+		cfg:               config,
+		metadataStore:     fsm.MetadataStore,
+		nodeClients:       make(map[string]*client.RemoteClient),
+		nodeStreamClients: make(map[string]*client.RemoteStreamClient),
 	}
 	n.Logger.Info("node started", zap.String("raft_addr", config.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
 	return n, nil
@@ -70,24 +74,20 @@ func (n *Node) EnsureSelfInMetadata() error {
 	return n.ApplyNodeAddEvent(n.NodeID, n.NodeRaftAddr, n.NodeRPCAddr)
 }
 
-func (n *Node) GetRaftLeaderRpcAddr() (string, error) {
-	if n.raft.State() == raft.Leader {
-		return n.NodeRPCAddr, nil
+func (n *Node) GetRpcClient(nodeId string) (*client.RemoteClient, error) {
+	cl, ok := n.nodeClients[nodeId]
+	if !ok {
+		return nil, ErrNodeNotFound
 	}
-	leaderAddr := n.raft.Leader()
-	if leaderAddr == "" {
-		return "", ErrRaftNoLeader
+	return cl, nil
+}
+
+func (n *Node) GetRpcStreamClient(nodeId string) (*client.RemoteStreamClient, error) {
+	cl, ok := n.nodeStreamClients[nodeId]
+	if !ok {
+		return nil, ErrNodeNotFound
 	}
-	configFuture := n.raft.GetConfiguration()
-	if err := configFuture.Error(); err != nil {
-		return "", err
-	}
-	for _, srv := range configFuture.Configuration().Servers {
-		if srv.Address == leaderAddr {
-			return n.GetRpcAddrForNodeID(string(srv.ID))
-		}
-	}
-	return "", ErrRaftNoLeader
+	return cl, nil
 }
 
 func (n *Node) GetRpcAddrForNodeID(nodeID string) (string, error) {
@@ -98,12 +98,32 @@ func (n *Node) GetRpcAddrForNodeID(nodeID string) (string, error) {
 	return meta.RpcAddr, nil
 }
 
-func (n *Node) GetTopicLeaderRpcAddr(topic string) (string, error) {
+func (n *Node) GetRaftLeaderId() (string, error) {
+	if n.raft.State() == raft.Leader {
+		return n.NodeID, nil
+	}
+	_, leaderId := n.raft.LeaderWithID()
+	if leaderId == "" {
+		return "", ErrRaftNoLeader
+	}
+	configFuture := n.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		return "", err
+	}
+	for _, srv := range configFuture.Configuration().Servers {
+		if srv.ID == leaderId {
+			return string(leaderId), nil
+		}
+	}
+	return "", fmt.Errorf("leader not found")
+}
+
+func (n *Node) GetTopicLeaderId(topic string) (string, error) {
 	tm := n.metadataStore.GetTopic(topic)
 	if tm == nil {
-		return "", ErrTopicNotFound
+		return "", fmt.Errorf("topic %s not found", topic)
 	}
-	return n.GetRpcAddrForNodeID(tm.LeaderNodeID)
+	return tm.LeaderNodeID, nil
 }
 
 func (n *Node) GetClusterNodeIDs() []string {
@@ -151,8 +171,7 @@ func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 	for _, srv := range configFuture.Configuration().Servers {
 		if srv.ID == serverID || srv.Address == serverAddr {
 			if srv.ID == serverID && srv.Address == serverAddr {
-				// server has already joined (still ensure metadata is updated)
-				return n.ApplyNodeAddEvent(id, raftAddr, rpcAddr)
+				return nil
 			}
 			// remove the existing server
 			removeFuture := n.raft.RemoveServer(serverID, 0, 0)
@@ -166,6 +185,16 @@ func (n *Node) Join(id, raftAddr, rpcAddr string) error {
 		n.Logger.Error("raft add voter failed", zap.Error(err))
 		return err
 	}
+	cl, err := client.NewRemoteClient(rpcAddr)
+	if err != nil {
+		return err
+	}
+	n.nodeClients[id] = cl
+	streamCl, err := client.NewRemoteStreamClient(rpcAddr)
+	if err != nil {
+		return err
+	}
+	n.nodeStreamClients[id] = streamCl
 	n.ApplyNodeAddEvent(id, raftAddr, rpcAddr)
 
 	n.Logger.Info("node joined cluster", zap.String("joined_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
@@ -184,6 +213,16 @@ func (n *Node) Leave(id string) error {
 		n.Logger.Error("raft remove server failed", zap.Error(err))
 		return err
 	}
+	cl, ok := n.nodeClients[id]
+	if ok {
+		cl.Close()
+	}
+	streamCl, ok := n.nodeStreamClients[id]
+	if ok {
+		streamCl.Close()
+	}
+	delete(n.nodeClients, id)
+	delete(n.nodeStreamClients, id)
 	n.ApplyNodeRemoveEvent(id)
 	// If the leaving node was topic leader for any topics, shift leadership to an ISR replica.
 	n.maybeReassignTopicLeaders(id)
@@ -289,34 +328,6 @@ func (n *Node) GetTopicReplicaStates(topic string) map[string]*raftmeta.ReplicaS
 	return tm.Replicas
 }
 
-func (n *Node) GetTopicReplicaClients(topic string) map[string]*client.RemoteClient {
-	tm := n.metadataStore.GetTopic(topic)
-	if tm == nil || tm.Replicas == nil {
-		return nil
-	}
-	clients := make(map[string]*client.RemoteClient, len(tm.Replicas))
-	for id, rs := range tm.Replicas {
-		clients[id] = rs.ReplicaClient
-	}
-	return clients
-}
-
-func (n *Node) GetTopicLeaderClient(topic string) *client.RemoteClient {
-	tm := n.metadataStore.GetTopic(topic)
-	if tm == nil || tm.LeaderClient == nil {
-		return nil
-	}
-	return tm.LeaderClient
-}
-
-func (n *Node) GetTopicLeaderStreamClient(topic string) *client.ReplicationStreamClient {
-	tm := n.metadataStore.GetTopic(topic)
-	if tm == nil || tm.LeaderStreamClient == nil {
-		return nil
-	}
-	return tm.LeaderStreamClient
-}
-
 // UpdateTopicReplicaLEO updates LEO and IsISR for a topic replica in metadata under store lock.
 func (n *Node) UpdateTopicReplicaLEO(topic, replicaNodeID string, leo int64, isr bool) {
 	n.metadataStore.UpdateReplicaLEO(topic, replicaNodeID, leo, isr)
@@ -338,6 +349,37 @@ func (n *Node) GetTopicReplicaState(topic, replicaNodeID string) (leo uint64, is
 	return uint64(rs.LEO), rs.IsISR
 }
 
+func (n *Node) GetTopicReplicaClients(topic string) map[string]*client.RemoteClient {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.Replicas == nil {
+		return nil
+	}
+	clients := make(map[string]*client.RemoteClient, len(tm.Replicas))
+	for id := range tm.Replicas {
+		cl, _ := n.GetRpcClient(id)
+		clients[id] = cl
+	}
+	return clients
+}
+
+func (n *Node) GetTopicLeaderClient(topic string) *client.RemoteClient {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.LeaderNodeID == "" {
+		return nil
+	}
+	cl, _ := n.GetRpcClient(tm.LeaderNodeID)
+	return cl
+}
+
+func (n *Node) GetTopicLeaderStreamClient(topic string) *client.RemoteStreamClient {
+	tm := n.metadataStore.GetTopic(topic)
+	if tm == nil || tm.LeaderNodeID == "" {
+		return nil
+	}
+	cl, _ := n.GetRpcStreamClient(tm.LeaderNodeID)
+	return cl
+}
+
 // WaitForLeader waits until this node is the Raft leader (for bootstrap).
 func (n *Node) WaitForLeader(timeout time.Duration) error {
 	timeoutc := time.After(timeout)
@@ -349,24 +391,6 @@ func (n *Node) WaitForLeader(timeout time.Duration) error {
 			return fmt.Errorf("timed out waiting for leader")
 		case <-ticker.C:
 			if n.IsLeader() {
-				return nil
-			}
-		}
-	}
-}
-
-// WaitForRaftReady waits until the cluster has a Raft leader (any node), so metadata and RPC resolution are usable.
-// Use after restart before restoring topic manager.
-func (n *Node) WaitForRaftReady(timeout time.Duration) error {
-	timeoutc := time.After(timeout)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-timeoutc:
-			return fmt.Errorf("timed out waiting for Raft leader")
-		case <-ticker.C:
-			if n.raft.Leader() != "" {
 				return nil
 			}
 		}

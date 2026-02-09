@@ -60,30 +60,28 @@ func (tm *TopicManager) IsLeader(topic string) bool {
 
 // applyDeleteTopicEventOnRaftLeader gets the Raft leader RPC address and calls ApplyDeleteTopicEvent there.
 func (tm *TopicManager) applyDeleteTopicEventOnRaftLeader(ctx context.Context, topic string) error {
-	raftLeaderAddr, err := tm.node.GetRaftLeaderRpcAddr()
+	raftLeaderId, err := tm.node.GetRaftLeaderId()
 	if err != nil {
 		return err
 	}
-	cl, err := client.NewRemoteClient(raftLeaderAddr)
+	cl, err := tm.node.GetRpcClient(raftLeaderId)
 	if err != nil {
 		return err
 	}
-	defer cl.Close()
 	_, err = cl.ApplyDeleteTopicEvent(ctx, &protocol.ApplyDeleteTopicEventRequest{Topic: topic})
 	return err
 }
 
 // applyIsrUpdateEventOnRaftLeader gets the Raft leader RPC address and calls ApplyIsrUpdateEvent there.
 func (tm *TopicManager) applyIsrUpdateEventOnRaftLeader(ctx context.Context, topic, replicaNodeID string, isr bool, leo int64) error {
-	raftLeaderAddr, err := tm.node.GetRaftLeaderRpcAddr()
+	raftLeaderId, err := tm.node.GetRaftLeaderId()
 	if err != nil {
 		return err
 	}
-	cl, err := client.NewRemoteClient(raftLeaderAddr)
+	cl, err := tm.node.GetRpcClient(raftLeaderId)
 	if err != nil {
 		return err
 	}
-	defer cl.Close()
 	_, err = cl.ApplyIsrUpdateEvent(ctx, &protocol.ApplyIsrUpdateEventRequest{Topic: topic, ReplicaNodeID: replicaNodeID, Isr: isr, Leo: leo})
 	return err
 }
@@ -124,14 +122,13 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) (replicaNode
 	for i := 0; i < replicaCount; i++ {
 		node := otherNodes[i]
 
-		replClient, err := client.NewRemoteClient(node.RpcAddr)
-		tm.Logger.Info("creating replica on node", zap.String("topic", topic), zap.String("node_id", node.NodeID), zap.String("node_addr", node.RpcAddr), zap.Error(err))
+		replClient, err := tm.node.GetRpcClient(node.NodeID)
 		if err != nil {
 			delete(tm.topics, topic)
 			logManager.Close()
-			return nil, ErrCreateReplicationClient(node.RpcAddr, err)
+			return nil, ErrGetRpcClient(node.NodeID, err)
 		}
-
+		tm.Logger.Info("creating replica on node", zap.String("topic", topic), zap.String("node_id", node.NodeID), zap.String("node_addr", node.RpcAddr), zap.Error(err))
 		_, err = replClient.CreateReplica(context.Background(), &protocol.CreateReplicaRequest{
 			Topic:      topic,
 			LeaderAddr: tm.currentNodeAddr(),
@@ -164,16 +161,15 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	// Not the designated leader: if we're not Raft leader, forward to Raft leader.
 	if !n.IsLeader() {
 		tm.Logger.Debug("forwarding create topic to Raft leader", zap.String("topic", req.Topic))
-		leaderAddr, err := n.GetRaftLeaderRpcAddr()
+		raftLeaderId, err := n.GetRaftLeaderId()
 		if err != nil {
 			return nil, ErrCannotReachLeader
 		}
-		remote, err := client.NewRemoteClient(leaderAddr)
+		cl, err := n.GetRpcClient(raftLeaderId)
 		if err != nil {
-			return nil, ErrForwardToLeader(err)
+			return nil, ErrGetRpcClient(raftLeaderId, err)
 		}
-		defer remote.Close()
-		return remote.CreateTopic(ctx, req)
+		return cl.CreateTopic(ctx, req)
 	}
 
 	// We are the Raft leader: decide topic leader from metadata, set designated leader, forward to that node.
@@ -198,7 +194,6 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	if err != nil {
 		return nil, ErrForwardToTopicLeader(err)
 	}
-	defer remote.Close()
 	resp, err := remote.CreateTopic(ctx, &forwardReq)
 	if err != nil {
 		return nil, ErrForwardToTopicLeader(err)
@@ -268,15 +263,14 @@ func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *prot
 		}
 	}
 	// Forward to topic leader.
-	leaderAddr, err := tm.node.GetTopicLeaderRpcAddr(req.Topic)
+	leaderId, err := tm.node.GetTopicLeaderId(req.Topic)
 	if err != nil {
 		return nil, ErrTopicNotFoundf(req.Topic)
 	}
-	remote, err := client.NewRemoteClient(leaderAddr)
+	remote, err := tm.node.GetRpcClient(leaderId)
 	if err != nil {
 		return nil, ErrForwardToTopicLeader(err)
 	}
-	defer remote.Close()
 	return remote.DeleteTopic(ctx, req)
 }
 
@@ -322,12 +316,12 @@ func (tm *TopicManager) RestoreFromMetadata() error {
 				continue
 			}
 		} else {
-			leaderAddr, err := tm.node.GetTopicLeaderRpcAddr(topic)
+			leaderId, err := tm.node.GetTopicLeaderId(topic)
 			if err != nil {
 				tm.Logger.Warn("restore replica: cannot get leader addr", zap.String("topic", topic), zap.Error(err))
 				continue
 			}
-			if err := tm.CreateReplicaRemote(topic, leaderAddr); err != nil {
+			if err := tm.CreateReplicaRemote(topic, leaderId); err != nil {
 				tm.Logger.Warn("restore replica topic failed", zap.String("topic", topic), zap.Error(err))
 				continue
 			}
@@ -362,7 +356,7 @@ func (tm *TopicManager) restoreLeaderTopic(topic string) error {
 }
 
 // CreateReplicaRemote creates a replica for the topic on this node (called by leader via RPC).
-func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) error {
+func (tm *TopicManager) CreateReplicaRemote(topic string, leaderId string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -384,7 +378,7 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderAddr string) err
 		return ErrCreateLogReplica(err)
 	}
 	topicObj.Log = logManager
-	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_addr", leaderAddr))
+	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_id", leaderId))
 
 	if err := tm.StartReplication(topicObj); err != nil {
 		return ErrStartReplication(err)
@@ -442,7 +436,6 @@ func (tm *TopicManager) StartReplication(t *Topic) error {
 	return nil
 }
 
-// StopReplication stops the replication loop. Do not hold tm.mu when calling (e.g. from DeleteTopic).
 func (tm *TopicManager) StopReplication(t *Topic) {
 	t.stopOnce.Do(func() {
 		if t.Logger != nil {
@@ -505,7 +498,7 @@ func (tm *TopicManager) runReplication(t *Topic, ctx context.Context) {
 	}
 }
 
-func (tm *TopicManager) replicateStream(t *Topic, leaderStreamClient *client.ReplicationStreamClient, ctx context.Context) {
+func (tm *TopicManager) replicateStream(t *Topic, leaderStreamClient *client.RemoteStreamClient, ctx context.Context) {
 	for {
 		select {
 		case <-t.stopChan:
