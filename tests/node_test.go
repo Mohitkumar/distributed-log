@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/node"
+	"github.com/mohitkumar/mlog/coordinator"
 )
 
 // TestNode_TwoNodeCluster starts a 2-node cluster and tests node methods related to Raft.
@@ -13,16 +13,15 @@ func TestNode_TwoNodeCluster(t *testing.T) {
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
-	node1 := server1.Node()
-	node2 := server2.Node()
-	if node1 == nil || node2 == nil {
-		t.Fatal("expected non-nil nodes")
+	coord1 := server1.Coordinator()
+	coord2 := server2.Coordinator()
+	if coord1 == nil || coord2 == nil {
+		t.Fatal("expected non-nil coordinators")
 	}
 
-	// Wait for one node to become Raft leader (bootstrap node may take a moment)
 	var ok bool
 	for i := 0; i < 100; i++ {
-		if node1.IsLeader() || node2.IsLeader() {
+		if coord1.IsLeader() || coord2.IsLeader() {
 			ok = true
 			break
 		}
@@ -32,29 +31,26 @@ func TestNode_TwoNodeCluster(t *testing.T) {
 		t.Fatal("expected one node to become Raft leader within timeout")
 	}
 
-	// Exactly one node should be leader
-	node1IsLeader := node1.IsLeader()
-	node2IsLeader := node2.IsLeader()
-	if node1IsLeader == node2IsLeader {
+	coord1IsLeader := coord1.IsLeader()
+	coord2IsLeader := coord2.IsLeader()
+	if coord1IsLeader == coord2IsLeader {
 		t.Fatal("exactly one node should be Raft leader")
 	}
 
-	// Node IDs and addresses (node-1 / node-2 are fixed in StartTwoNodes)
-	if got := node1.GetNodeID(); got != "node-1" {
-		t.Errorf("node1 GetNodeID() = %q, want node-1", got)
+	if got := coord1.GetNodeID(); got != "node-1" {
+		t.Errorf("coord1 GetNodeID() = %q, want node-1", got)
 	}
-	if got := node2.GetNodeID(); got != "node-2" {
-		t.Errorf("node2 GetNodeID() = %q, want node-2", got)
+	if got := coord2.GetNodeID(); got != "node-2" {
+		t.Errorf("coord2 GetNodeID() = %q, want node-2", got)
 	}
-	if node1.GetNodeAddr() != server1.Addr {
-		t.Errorf("node1 GetNodeAddr() = %q, want %q", node1.GetNodeAddr(), server1.Addr)
+	if coord1.GetNodeAddr() != server1.Addr {
+		t.Errorf("coord1 GetNodeAddr() = %q, want %q", coord1.GetNodeAddr(), server1.Addr)
 	}
-	if node2.GetNodeAddr() != server2.Addr {
-		t.Errorf("node2 GetNodeAddr() = %q, want %q", node2.GetNodeAddr(), server2.Addr)
+	if coord2.GetNodeAddr() != server2.Addr {
+		t.Errorf("coord2 GetNodeAddr() = %q, want %q", coord2.GetNodeAddr(), server2.Addr)
 	}
 
-	// GetOtherNodes: if Join succeeded in StartTwoNodes, node1 should see node-2
-	otherNodes := node1.GetOtherNodes()
+	otherNodes := coord1.GetOtherNodes()
 	if len(otherNodes) >= 1 {
 		found := false
 		for _, n := range otherNodes {
@@ -68,8 +64,7 @@ func TestNode_TwoNodeCluster(t *testing.T) {
 		}
 	}
 
-	// TopicExists: no topic yet
-	if node1.TopicExists("no-such-topic") {
+	if coord1.TopicExists("no-such-topic") {
 		t.Error("TopicExists(no-such-topic) should be false")
 	}
 }
@@ -80,9 +75,9 @@ func TestNode_ApplyCreateTopicEvent(t *testing.T) {
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
-	waitForLeader(t, server1.Node(), server2.Node())
+	waitForLeader(t, server1.Coordinator(), server2.Coordinator())
 
-	raftLeader := getRaftLeaderNode(server1, server2)
+	raftLeader := getRaftLeaderCoordinator(server1, server2)
 	if raftLeader == nil {
 		t.Fatal("no Raft leader")
 	}
@@ -94,11 +89,11 @@ func TestNode_ApplyCreateTopicEvent(t *testing.T) {
 	}
 
 	waitForReplication(t, 200*time.Millisecond)
-	for _, n := range []*node.Node{server1.Node(), server2.Node()} {
-		if !n.TopicExists(topicName) {
-			t.Errorf("TopicExists(%q) = false on node %s, want true", topicName, n.GetNodeID())
+	for _, c := range []*coordinator.Coordinator{server1.Coordinator(), server2.Coordinator()} {
+		if !c.TopicExists(topicName) {
+			t.Errorf("TopicExists(%q) = false on node %s, want true", topicName, c.GetNodeID())
 		}
-		if got := n.GetTopicLeaderNodeID(topicName); got != raftLeader.GetNodeID() {
+		if got := c.GetTopicLeaderNodeID(topicName); got != raftLeader.GetNodeID() {
 			t.Errorf("GetTopicLeaderNodeID(%q) = %q, want %q", topicName, got, raftLeader.GetNodeID())
 		}
 	}
@@ -110,9 +105,9 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
-	waitForLeader(t, server1.Node(), server2.Node())
+	waitForLeader(t, server1.Coordinator(), server2.Coordinator())
 
-	raftLeader := getRaftLeaderNode(server1, server2)
+	raftLeader := getRaftLeaderCoordinator(server1, server2)
 	if raftLeader == nil {
 		t.Fatal("no Raft leader")
 	}
@@ -123,7 +118,7 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 		t.Fatalf("ApplyCreateTopicEvent: %v", err)
 	}
 	waitForReplication(t, 200*time.Millisecond)
-	if !server1.Node().TopicExists(topicName) || !server2.Node().TopicExists(topicName) {
+	if !server1.Coordinator().TopicExists(topicName) || !server2.Coordinator().TopicExists(topicName) {
 		t.Fatal("topic should exist after create")
 	}
 
@@ -131,9 +126,9 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 		t.Fatalf("ApplyDeleteTopicEvent: %v", err)
 	}
 	waitForReplication(t, 200*time.Millisecond)
-	for _, n := range []*node.Node{server1.Node(), server2.Node()} {
-		if n.TopicExists(topicName) {
-			t.Errorf("TopicExists(%q) = true on node %s after delete, want false", topicName, n.GetNodeID())
+	for _, c := range []*coordinator.Coordinator{server1.Coordinator(), server2.Coordinator()} {
+		if c.TopicExists(topicName) {
+			t.Errorf("TopicExists(%q) = true on node %s after delete, want false", topicName, c.GetNodeID())
 		}
 	}
 }
@@ -144,8 +139,8 @@ func TestNode_ApplyNodeAddEvent(t *testing.T) {
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
-	waitForLeader(t, server1.Node(), server2.Node())
-	raftLeader := getRaftLeaderNode(server1, server2)
+	waitForLeader(t, server1.Coordinator(), server2.Coordinator())
+	raftLeader := getRaftLeaderCoordinator(server1, server2)
 	if raftLeader == nil {
 		t.Fatal("no Raft leader")
 	}
@@ -158,12 +153,12 @@ func TestNode_ApplyNodeAddEvent(t *testing.T) {
 	}
 
 	waitForReplication(t, 200*time.Millisecond)
-	for _, n := range []*node.Node{server1.Node(), server2.Node()} {
-		got, err := n.GetRpcAddrForNodeID(newNodeID)
+	for _, c := range []*coordinator.Coordinator{server1.Coordinator(), server2.Coordinator()} {
+		got, err := c.GetRpcAddrForNodeID(newNodeID)
 		if err != nil || got != newRpcAddr {
-			t.Errorf("GetRpcAddrForNodeID(%q) = %q, %v on node %s, want %q, nil", newNodeID, got, err, n.GetNodeID(), newRpcAddr)
+			t.Errorf("GetRpcAddrForNodeID(%q) = %q, %v on node %s, want %q, nil", newNodeID, got, err, c.GetNodeID(), newRpcAddr)
 		}
-		ids := n.GetClusterNodeIDs()
+		ids := c.GetClusterNodeIDs()
 		found := false
 		for _, id := range ids {
 			if id == newNodeID {
@@ -172,7 +167,7 @@ func TestNode_ApplyNodeAddEvent(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("GetClusterNodeIDs() on node %s should contain %q, got %v", n.GetNodeID(), newNodeID, ids)
+			t.Errorf("GetClusterNodeIDs() on node %s should contain %q, got %v", c.GetNodeID(), newNodeID, ids)
 		}
 	}
 }

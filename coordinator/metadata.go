@@ -1,4 +1,4 @@
-package raftmeta
+package coordinator
 
 import (
 	"encoding/json"
@@ -26,7 +26,7 @@ type ReplicaState struct {
 	IsISR         bool   `json:"is_isr"`
 }
 
-const defaultLogInterval = 30 * time.Second
+const defaultMetadataLogInterval = 30 * time.Second
 
 type MetadataStore struct {
 	mu           sync.RWMutex
@@ -41,7 +41,7 @@ func NewMetadataStore() *MetadataStore {
 		Topics:       make(map[string]*TopicMetadata),
 		stopPeriodic: make(chan struct{}),
 	}
-	go ms.periodicLog(defaultLogInterval)
+	go ms.periodicLog(defaultMetadataLogInterval)
 	return ms
 }
 
@@ -58,10 +58,10 @@ func (ms *MetadataStore) periodicLog(interval time.Duration) {
 			b, err := json.Marshal(ms)
 			ms.mu.RUnlock()
 			if err != nil {
-				fmt.Printf("[raftmeta] periodic log marshal error: %v\n", err)
+				fmt.Printf("[coordinator] metadata periodic log marshal error: %v\n", err)
 				continue
 			}
-			fmt.Printf("[raftmeta] metadata store (%s):\n%s\n", time.Now().Format(time.RFC3339), string(b))
+			fmt.Printf("[coordinator] metadata store (%s):\n%s\n", time.Now().Format(time.RFC3339), string(b))
 		}
 	}
 }

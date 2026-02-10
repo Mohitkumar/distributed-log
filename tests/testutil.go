@@ -10,7 +10,7 @@ import (
 
 	"github.com/mohitkumar/mlog/config"
 	consumermgr "github.com/mohitkumar/mlog/consumer"
-	"github.com/mohitkumar/mlog/node"
+	"github.com/mohitkumar/mlog/coordinator"
 	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
@@ -54,21 +54,21 @@ type TestServerComponents struct {
 // TestServer represents a test TCP transport server with its components.
 type TestServer struct {
 	*TestServerComponents
-	Addr string // bound address after Start (use for client dial)
-	srv  *rpc.RpcServer
-	node *node.Node
+	Addr  string // bound address after Start (use for client dial)
+	srv   *rpc.RpcServer
+	coord *coordinator.Coordinator
 }
 
-// Node returns the node for tests that need to call node methods (e.g. Raft-related).
-func (ts *TestServer) Node() *node.Node {
-	return ts.node
+// Coordinator returns the coordinator for tests that need to call coordinator methods (e.g. Raft-related).
+func (ts *TestServer) Coordinator() *coordinator.Coordinator {
+	return ts.coord
 }
 
 // Cleanup closes all resources associated with the test server.
 func (ts *TestServer) Cleanup() {
 	_ = ts.srv.Stop()
-	if ts.node != nil {
-		_ = ts.node.Shutdown()
+	if ts.coord != nil {
+		_ = ts.coord.Shutdown()
 	}
 }
 
@@ -100,23 +100,23 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	rpcAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(rpcPort))
 	cfg := buildTestConfigFromPorts(t, baseDir, "node-1", rpcPort, raftPort, serfPort, false)
 	logger := testLogger("node-1")
-	n, err := node.NewNodeFromConfig(cfg, logger)
+	coord, err := coordinator.NewCoordinatorFromConfig(cfg, logger)
 	if err != nil {
-		t.Fatalf("NewNodeFromConfig: %v", err)
+		t.Fatalf("NewCoordinatorFromConfig: %v", err)
 	}
-	topicMgr, err := topic.NewTopicManager(baseDir, n, n.Logger)
+	topicMgr, err := topic.NewTopicManager(baseDir, coord, coord.Logger)
 	if err != nil {
-		n.Shutdown()
+		coord.Shutdown()
 		t.Fatalf("NewTopicManager: %v", err)
 	}
 	consumerMgr, err := consumermgr.NewConsumerManager(baseDir)
 	if err != nil {
-		n.Shutdown()
+		coord.Shutdown()
 		t.Fatalf("NewConsumerManager: %v", err)
 	}
 	srv := rpc.NewRpcServer(rpcAddr, topicMgr, consumerMgr)
 	if err := srv.Start(); err != nil {
-		n.Shutdown()
+		coord.Shutdown()
 		t.Fatalf("Start: %v", err)
 	}
 	return &TestServer{
@@ -126,9 +126,9 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 			BaseDir:         baseDir,
 			Addr:            srv.Addr,
 		},
-		Addr: srv.Addr,
-		srv:  srv,
-		node: n,
+		Addr:  srv.Addr,
+		srv:   srv,
+		coord: coord,
 	}
 }
 
@@ -157,72 +157,71 @@ func setupTwoTestServersImpl(t testing.TB, server1BaseDirSuffix string, server2B
 
 	logger1 := testLogger("node-1")
 	logger2 := testLogger("node-2")
-	node1, err := node.NewNodeFromConfig(server1Cfg, logger1)
+	coord1, err := coordinator.NewCoordinatorFromConfig(server1Cfg, logger1)
 	if err != nil {
-		t.Fatalf("NewNodeFromConfig server1: %v", err)
+		t.Fatalf("NewCoordinatorFromConfig server1: %v", err)
 	}
-	node2, err := node.NewNodeFromConfig(server2Cfg, logger2)
+	coord2, err := coordinator.NewCoordinatorFromConfig(server2Cfg, logger2)
 	if err != nil {
-		node1.Shutdown()
-		t.Fatalf("NewNodeFromConfig server2: %v", err)
+		coord1.Shutdown()
+		t.Fatalf("NewCoordinatorFromConfig server2: %v", err)
 	}
 
-	server1TopicMgr, err := topic.NewTopicManager(server1BaseDir, node1, node1.Logger)
+	server1TopicMgr, err := topic.NewTopicManager(server1BaseDir, coord1, coord1.Logger)
 	if err != nil {
-		node1.Shutdown()
-		node2.Shutdown()
+		coord1.Shutdown()
+		coord2.Shutdown()
 		t.Fatalf("NewTopicManager server1: %v", err)
 	}
 	server1ConsumerMgr, err := consumermgr.NewConsumerManager(server1BaseDir)
 	if err != nil {
-		node1.Shutdown()
-		node2.Shutdown()
+		coord1.Shutdown()
+		coord2.Shutdown()
 		t.Fatalf("NewConsumerManager server1: %v", err)
 	}
-	server2TopicMgr, err := topic.NewTopicManager(server2BaseDir, node2, node2.Logger)
+	server2TopicMgr, err := topic.NewTopicManager(server2BaseDir, coord2, coord2.Logger)
 	if err != nil {
-		node1.Shutdown()
-		node2.Shutdown()
+		coord1.Shutdown()
+		coord2.Shutdown()
 		t.Fatalf("NewTopicManager server2: %v", err)
 	}
 	server2ConsumerMgr, err := consumermgr.NewConsumerManager(server2BaseDir)
 	if err != nil {
-		node1.Shutdown()
-		node2.Shutdown()
+		coord1.Shutdown()
+		coord2.Shutdown()
 		t.Fatalf("NewConsumerManager server2: %v", err)
 	}
 
 	server1RpcSrv := rpc.NewRpcServer(server1Addr, server1TopicMgr, server1ConsumerMgr)
 	server2RpcSrv := rpc.NewRpcServer(server2Addr, server2TopicMgr, server2ConsumerMgr)
 	if err := server1RpcSrv.Start(); err != nil {
-		node1.Shutdown()
-		node2.Shutdown()
+		coord1.Shutdown()
+		coord2.Shutdown()
 		t.Fatalf("server1 RPC Start: %v", err)
 	}
 	if err := server2RpcSrv.Start(); err != nil {
 		server1RpcSrv.Stop()
-		node1.Shutdown()
-		node2.Shutdown()
+		coord1.Shutdown()
+		coord2.Shutdown()
 		t.Fatalf("server2 RPC Start: %v", err)
 	}
 
-	// Wait for node1 (bootstrap) to become Raft leader, then add node2 so they form a cluster.
 	for i := 0; i < 150; i++ {
-		if node1.IsLeader() {
+		if coord1.IsLeader() {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	var joinErr error
 	for j := 0; j < 30; j++ {
-		joinErr = node1.Join("node-2", server2RaftAddr, server2RpcSrv.Addr)
+		joinErr = coord1.Join("node-2", server2RaftAddr, server2RpcSrv.Addr)
 		if joinErr == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if joinErr != nil {
-		t.Logf("node1.Join failed after retries (cluster may be single-node): %v", joinErr)
+		t.Logf("coord1.Join failed after retries (cluster may be single-node): %v", joinErr)
 	}
 
 	server1 := &TestServer{
@@ -232,9 +231,9 @@ func setupTwoTestServersImpl(t testing.TB, server1BaseDirSuffix string, server2B
 			BaseDir:         server1BaseDir,
 			Addr:            server1RpcSrv.Addr,
 		},
-		Addr: server1RpcSrv.Addr,
-		srv:  server1RpcSrv,
-		node: node1,
+		Addr:  server1RpcSrv.Addr,
+		srv:   server1RpcSrv,
+		coord: coord1,
 	}
 	server2 := &TestServer{
 		TestServerComponents: &TestServerComponents{
@@ -243,9 +242,9 @@ func setupTwoTestServersImpl(t testing.TB, server1BaseDirSuffix string, server2B
 			BaseDir:         server2BaseDir,
 			Addr:            server2RpcSrv.Addr,
 		},
-		Addr: server2RpcSrv.Addr,
-		srv:  server2RpcSrv,
-		node: node2,
+		Addr:  server2RpcSrv.Addr,
+		srv:   server2RpcSrv,
+		coord: coord2,
 	}
 	return server1, server2
 }
@@ -254,19 +253,19 @@ func SetupTwoTestServers(t testing.TB, server1BaseDirSuffix string, server2BaseD
 	return StartTwoNodes(t, server1BaseDirSuffix, server2BaseDirSuffix)
 }
 
-// getRaftLeaderNode returns the node that is currently Raft leader; nil if neither is leader.
-func getRaftLeaderNode(server1, server2 *TestServer) *node.Node {
-	if server1.Node().IsLeader() {
-		return server1.Node()
+// getRaftLeaderCoordinator returns the coordinator that is currently Raft leader; nil if neither is leader.
+func getRaftLeaderCoordinator(server1, server2 *TestServer) *coordinator.Coordinator {
+	if server1.Coordinator().IsLeader() {
+		return server1.Coordinator()
 	}
-	if server2.Node().IsLeader() {
-		return server2.Node()
+	if server2.Coordinator().IsLeader() {
+		return server2.Coordinator()
 	}
 	return nil
 }
 
-// waitForLeader blocks until one of the two nodes is Raft leader or times out (then calls tb.Fatal).
-func waitForLeader(tb testing.TB, a, b *node.Node) {
+// waitForLeader blocks until one of the two coordinators is Raft leader or times out (then calls tb.Fatal).
+func waitForLeader(tb testing.TB, a, b *coordinator.Coordinator) {
 	tb.Helper()
 	for i := 0; i < 100; i++ {
 		if a.IsLeader() || b.IsLeader() {
@@ -297,11 +296,11 @@ func (h *TwoNodeTestHelper) Cleanup() {
 
 // GetLeaderAddr returns the RPC address of the current Raft leader.
 func (h *TwoNodeTestHelper) GetLeaderAddr() string {
-	raftLeader := getRaftLeaderNode(h.server1, h.server2)
+	raftLeader := getRaftLeaderCoordinator(h.server1, h.server2)
 	if raftLeader == nil {
 		return h.server1.Addr
 	}
-	if h.server1.Node() == raftLeader {
+	if h.server1.Coordinator() == raftLeader {
 		return h.server1.Addr
 	}
 	return h.server2.Addr
@@ -309,11 +308,11 @@ func (h *TwoNodeTestHelper) GetLeaderAddr() string {
 
 // GetLeaderTopicMgr returns the TopicManager of the current Raft leader.
 func (h *TwoNodeTestHelper) GetLeaderTopicMgr() *topic.TopicManager {
-	raftLeader := getRaftLeaderNode(h.server1, h.server2)
+	raftLeader := getRaftLeaderCoordinator(h.server1, h.server2)
 	if raftLeader == nil {
 		return h.server1.TopicManager
 	}
-	if h.server1.Node() == raftLeader {
+	if h.server1.Coordinator() == raftLeader {
 		return h.server1.TopicManager
 	}
 	return h.server2.TopicManager
@@ -321,8 +320,8 @@ func (h *TwoNodeTestHelper) GetLeaderTopicMgr() *topic.TopicManager {
 
 // GetFollowerTopicMgr returns the TopicManager of the non-leader node.
 func (h *TwoNodeTestHelper) GetFollowerTopicMgr() *topic.TopicManager {
-	raftLeader := getRaftLeaderNode(h.server1, h.server2)
-	if h.server1.Node() == raftLeader {
+	raftLeader := getRaftLeaderCoordinator(h.server1, h.server2)
+	if h.server1.Coordinator() == raftLeader {
 		return h.server2.TopicManager
 	}
 	return h.server1.TopicManager
@@ -356,6 +355,6 @@ func (h *TwoNodeTestHelper) WaitReplicaCatchUp(topicName string, targetLEO uint6
 // StartTwoNodesForTests starts two nodes (server1, server2), waits for a Raft leader, and returns a helper. Caller must call Cleanup().
 func StartTwoNodesForTests(tb testing.TB, server1Suffix, server2Suffix string) *TwoNodeTestHelper {
 	server1, server2 := StartTwoNodes(tb, server1Suffix, server2Suffix)
-	waitForLeader(tb, server1.Node(), server2.Node())
+	waitForLeader(tb, server1.Coordinator(), server2.Coordinator())
 	return &TwoNodeTestHelper{server1: server1, server2: server2}
 }

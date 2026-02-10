@@ -7,20 +7,19 @@ import (
 
 	"github.com/hashicorp/raft"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/raftmeta"
 )
 
 var _ raft.FSM = (*MetadataFSM)(nil)
 
 type MetadataFSM struct {
 	mu            sync.RWMutex
-	MetadataStore *raftmeta.MetadataStore
+	metadataStore *MetadataStore
 	BaseDir       string
 }
 
-func NewCoordinatorFSM(baseDir string) (*MetadataFSM, error) {
+func NewCoordinatorFSM(baseDir string, metadataStore *MetadataStore) (*MetadataFSM, error) {
 	return &MetadataFSM{
-		MetadataStore: raftmeta.NewMetadataStore(),
+		metadataStore: metadataStore,
 		BaseDir:       baseDir,
 	}, nil
 }
@@ -32,14 +31,14 @@ func (c *MetadataFSM) Apply(l *raft.Log) interface{} {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.MetadataStore.Apply(&metadataEvent)
+	return c.metadataStore.Apply(&metadataEvent)
 }
 
 func (c *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return &metadataSnapshot{
-		metadataStore: c.MetadataStore,
+		metadataStore: c.metadataStore,
 	}, nil
 }
 
@@ -49,19 +48,19 @@ func (c *MetadataFSM) Restore(r io.ReadCloser) error {
 	if err != nil {
 		return err
 	}
-	var decoded raftmeta.MetadataStore
+	var decoded MetadataStore
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
 	// Replace state in place so the same store (and its callbacks) is preserved.
-	c.MetadataStore.RestoreState(decoded.Topics, decoded.Nodes)
+	c.metadataStore.RestoreState(decoded.Topics, decoded.Nodes)
 	return nil
 }
 
 var _ raft.FSMSnapshot = (*metadataSnapshot)(nil)
 
 type metadataSnapshot struct {
-	metadataStore *raftmeta.MetadataStore
+	metadataStore *MetadataStore
 }
 
 func (c *metadataSnapshot) Persist(sink raft.SnapshotSink) error {

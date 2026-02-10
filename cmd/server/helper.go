@@ -7,8 +7,8 @@ import (
 
 	"github.com/mohitkumar/mlog/config"
 	"github.com/mohitkumar/mlog/consumer"
+	"github.com/mohitkumar/mlog/coordinator"
 	"github.com/mohitkumar/mlog/discovery"
-	"github.com/mohitkumar/mlog/node"
 	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
@@ -20,7 +20,7 @@ const RaftReadyTimeout = 15 * time.Second
 type CommandHelper struct {
 	config.Config
 	membership   *discovery.Membership
-	node         *node.Node
+	coord        *coordinator.Coordinator
 	topicMgr     *topic.TopicManager
 	rpcServer    *rpc.RpcServer
 	shutdown     bool
@@ -33,7 +33,7 @@ func NewCommandHelper(config config.Config) (*CommandHelper, error) {
 		Config:    config,
 		shutdowns: make(chan struct{}),
 	}
-	if err := cmdHelper.setupNode(); err != nil {
+	if err := cmdHelper.setupCoordinator(); err != nil {
 		return nil, err
 	}
 	if err := cmdHelper.setupTopicManager(); err != nil {
@@ -48,28 +48,26 @@ func NewCommandHelper(config config.Config) (*CommandHelper, error) {
 	return cmdHelper, nil
 }
 
-func (cmdHelper *CommandHelper) setupNode() error {
+func (cmdHelper *CommandHelper) setupCoordinator() error {
 	logger, err := zap.NewProduction()
 	if err != nil {
 		return fmt.Errorf("create logger: %w", err)
 	}
 	logger = logger.With(zap.String("node_id", cmdHelper.NodeConfig.ID))
-	// discovery.Membership uses zap.L(); ensure it logs through this node's logger.
 	zap.ReplaceGlobals(logger)
-	n, err := node.NewNodeFromConfig(cmdHelper.Config, logger)
+	coord, err := coordinator.NewCoordinatorFromConfig(cmdHelper.Config, logger)
 	if err != nil {
 		logger.Sync()
 		return err
 	}
-	cmdHelper.node = n
+	cmdHelper.coord = coord
 	if cmdHelper.RaftConfig.Boostatrap {
-		if err := cmdHelper.node.WaitForLeader(30 * time.Second); err != nil {
+		if err := cmdHelper.coord.WaitForLeader(30 * time.Second); err != nil {
 			return fmt.Errorf("wait for leader: %w", err)
 		}
 	}
-	// So this node appears in metadata (bootstrap node never joins, so never gets AddNodeEvent otherwise).
-	if cmdHelper.node.IsLeader() {
-		if err := cmdHelper.node.EnsureSelfInMetadata(); err != nil {
+	if cmdHelper.coord.IsLeader() {
+		if err := cmdHelper.coord.EnsureSelfInMetadata(); err != nil {
 			return fmt.Errorf("ensure self in metadata: %w", err)
 		}
 	}
@@ -77,14 +75,13 @@ func (cmdHelper *CommandHelper) setupNode() error {
 }
 
 func (cmdHelper *CommandHelper) setupTopicManager() error {
-	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, cmdHelper.node, cmdHelper.node.Logger)
+	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, cmdHelper.coord, cmdHelper.coord.Logger)
 	if err != nil {
 		return fmt.Errorf("create topic manager: %w", err)
 	}
 	cmdHelper.topicMgr = topicMgr
-	// Raft may still be replaying log/snapshot after restart; wait for a leader so metadata and RPC addrs are usable.
-	if err := cmdHelper.node.WaitforRaftReadyWithRetryBackoff(RaftReadyTimeout, 2); err != nil {
-		cmdHelper.node.Logger.Warn("Raft not ready before restore (continuing anyway)", zap.Error(err))
+	if err := cmdHelper.coord.WaitforRaftReadyWithRetryBackoff(RaftReadyTimeout, 2); err != nil {
+		cmdHelper.coord.Logger.Warn("Raft not ready before restore (continuing anyway)", zap.Error(err))
 	}
 	if err := topicMgr.RestoreFromMetadata(); err != nil {
 		return fmt.Errorf("restore topic manager from metadata: %w", err)
@@ -106,7 +103,7 @@ func (cmdHelper *CommandHelper) setupRpcServer() error {
 }
 
 func (cmdHelper *CommandHelper) setupMembership() error {
-	membership, err := discovery.New(cmdHelper.node, cmdHelper.Config)
+	membership, err := discovery.New(cmdHelper.coord, cmdHelper.Config)
 	if err != nil {
 		return err
 	}
@@ -132,5 +129,5 @@ func (cmdHelper *CommandHelper) Shutdown() error {
 	if cmdHelper.rpcServer != nil {
 		_ = cmdHelper.rpcServer.Stop()
 	}
-	return cmdHelper.node.Shutdown()
+	return cmdHelper.coord.Shutdown()
 }

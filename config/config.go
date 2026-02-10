@@ -19,6 +19,7 @@ type RaftConfig struct {
 	BindAddress string // optional; listen address (e.g. 0.0.0.0:9093). When empty, listen on Address.
 	Dir         string
 	Boostatrap  bool
+	LogLevel    string
 }
 
 type NodeConfig struct {
