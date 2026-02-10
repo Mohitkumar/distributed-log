@@ -7,7 +7,6 @@ import (
 	"github.com/mohitkumar/mlog/topic"
 )
 
-// TestTopicManager_WithFakeCoordinator_CreateTopic uses FakeTopicCoordinator (no Raft) to test TopicManager.CreateTopic.
 func TestTopicManager_WithFakeCoordinator_CreateTopic(t *testing.T) {
 	baseDir := path.Join(t.TempDir(), "topic-fake")
 	fake := NewFakeTopicCoordinator("node-1", "127.0.0.1:19001")
@@ -40,15 +39,12 @@ func TestTopicManager_WithFakeCoordinator_CreateTopic(t *testing.T) {
 	}
 }
 
-// TestTopicManager_WithFakeCoordinator_TopicExists uses FakeTopicCoordinator to test coordinator.TopicExists after ApplyCreateTopicEvent.
 func TestTopicManager_WithFakeCoordinator_TopicExists(t *testing.T) {
 	fake := NewFakeTopicCoordinator("node-1", "127.0.0.1:19002")
 	if fake.TopicExists("t1") {
 		t.Error("TopicExists(t1) should be false initially")
 	}
-	if err := fake.ApplyCreateTopicEvent("t1", 1, "node-1", []string{"node-1"}); err != nil {
-		t.Fatalf("ApplyCreateTopicEvent: %v", err)
-	}
+	fake.ApplyEvent(topic.NewCreateTopicApplyEvent("t1", 1, "node-1", []string{"node-1"}))
 	if !fake.TopicExists("t1") {
 		t.Error("TopicExists(t1) should be true after apply")
 	}

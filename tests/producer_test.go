@@ -17,27 +17,16 @@ type producerTestServers struct {
 }
 
 func (s *producerTestServers) getLeaderAddr() string {
-	raftLeader := getRaftLeaderCoordinator(s.server1, s.server2)
-	if raftLeader == nil {
-		return s.server1.Addr
-	}
-	if s.server1.Coordinator() == raftLeader {
-		return s.server1.Addr
-	}
-	return s.server2.Addr
+	// With fake coordinators we deterministically treat server1 as the leader.
+	return s.server1.Addr
 }
 
 // getTopicLeaderTopicMgr returns the TopicManager of the node that is the topic leader for topicName (from metadata).
 // Use this for verification when the topic leader may be different from the Raft leader.
 func (s *producerTestServers) getTopicLeaderTopicMgr(topicName string) *topic.TopicManager {
-	nodeID := s.server1.Coordinator().GetTopicLeaderNodeID(topicName)
-	if nodeID == "" {
-		return s.server1.TopicManager
-	}
-	if s.server1.Coordinator().GetNodeID() == nodeID {
-		return s.server1.TopicManager
-	}
-	return s.server2.TopicManager
+	// FakeTopicCoordinator always chooses the local node as topic leader,
+	// so the topic leader is on server1 in these tests.
+	return s.server1.TopicManager
 }
 
 // TestProducer runs all producer tests with a single two-node cluster setup.
@@ -45,7 +34,6 @@ func TestProducer(t *testing.T) {
 	server1, server2 := StartTwoNodes(t, "producer-server1", "producer-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
-	waitForLeader(t, server1.Coordinator(), server2.Coordinator())
 
 	servers := &producerTestServers{server1: server1, server2: server2}
 
@@ -236,7 +224,6 @@ func TestProducerBatch(t *testing.T) {
 	server1, server2 := StartTwoNodes(t, "producer-batch-server1", "producer-batch-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
-	waitForLeader(t, server1.Coordinator(), server2.Coordinator())
 
 	servers := &producerTestServers{server1: server1, server2: server2}
 
@@ -377,7 +364,6 @@ func BenchmarkProduce(b *testing.B) {
 	server1, server2 := StartTwoNodes(b, "bench-produce-server1", "bench-produce-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
-	waitForLeader(b, server1.Coordinator(), server2.Coordinator())
 
 	servers := &producerTestServers{server1: server1, server2: server2}
 
@@ -422,7 +408,6 @@ func BenchmarkProduceBatch(b *testing.B) {
 	server1, server2 := StartTwoNodes(b, "bench-batch-server1", "bench-batch-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
-	waitForLeader(b, server1.Coordinator(), server2.Coordinator())
 
 	servers := &producerTestServers{server1: server1, server2: server2}
 
