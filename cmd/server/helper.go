@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // RaftReadyTimeout is how long to wait for a Raft leader before restoring topic manager (restart/replay can take time).
@@ -49,10 +51,9 @@ func NewCommandHelper(config config.Config) (*CommandHelper, error) {
 }
 
 func (cmdHelper *CommandHelper) setupCoordinator() error {
-	logger, err := zap.NewProduction()
-	if err != nil {
-		return fmt.Errorf("create logger: %w", err)
-	}
+	enc := zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
+	core := zapcore.NewCore(enc, zapcore.AddSync(os.Stdout), zapcore.InfoLevel)
+	logger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(0))
 	logger = logger.With(zap.String("node_id", cmdHelper.NodeConfig.ID))
 	zap.ReplaceGlobals(logger)
 	coord, err := coordinator.NewCoordinatorFromConfig(cmdHelper.Config, logger)

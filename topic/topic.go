@@ -19,6 +19,7 @@ import (
 type Topic struct {
 	mu                sync.RWMutex
 	Name              string
+	LeaderNodeID      string
 	Log               *log.LogManager
 	Logger            *zap.Logger
 	stopChan          chan struct{}
@@ -105,9 +106,10 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) (replicaNode
 	}
 
 	topicObj := &Topic{
-		Name:   topic,
-		Log:    logManager,
-		Logger: tm.Logger,
+		Name:         topic,
+		Log:          logManager,
+		Logger:       tm.Logger,
+		LeaderNodeID: tm.currentNodeID(),
 	}
 	tm.topics[topic] = topicObj
 
@@ -178,6 +180,15 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	topicLeaderNode, err := c.GetNodeIDWithLeastTopics()
 	if err != nil {
 		return nil, err
+	}
+
+	if topicLeaderNode.NodeID == tm.currentNodeID() {
+		tm.Logger.Info("selected node is current node, creating topic locally", zap.String("topic", req.Topic))
+		replicaNodeIds, err := tm.CreateTopic(req.Topic, int(req.ReplicaCount))
+		if err != nil {
+			return nil, ErrCreateTopic(err)
+		}
+		return &protocol.CreateTopicResponse{Topic: req.Topic, ReplicaNodeIds: replicaNodeIds}, nil
 	}
 	tm.Logger.Info("forwarding create topic to topic leader", zap.String("topic", req.Topic), zap.String("topic_leader_id", topicLeaderNode.NodeID), zap.String("topic_leader_addr", topicLeaderNode.RPCAddr))
 
@@ -401,12 +412,7 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 
 // StartReplication starts the replication loop (topic must be a replica). Fetches from leader and appends to log; reports LEO.
 func (tm *TopicManager) StartReplication(t *Topic) error {
-	leaderNode, err := tm.coordinator.GetTopicLeaderNode(t.Name)
-	if err != nil {
-		return err
-	}
-	leaderID := leaderNode.NodeID
-	if leaderID == tm.currentNodeID() {
+	if t.LeaderNodeID == tm.currentNodeID() {
 		return fmt.Errorf("topic %s is leader, cannot start replication", t.Name)
 	}
 	t.mu.Lock()
@@ -421,6 +427,10 @@ func (tm *TopicManager) StartReplication(t *Topic) error {
 
 	if t.Logger != nil {
 		t.Logger.Info("replication started for topic", zap.String("topic", t.Name))
+	}
+	leaderNode, err := tm.coordinator.GetNode(t.LeaderNodeID)
+	if err != nil {
+		return err
 	}
 	go tm.runReplication(t, leaderNode, ctx)
 	return nil

@@ -169,11 +169,23 @@ func (c *Coordinator) GetTopicLeaderRemoteStreamClient(topic string) (*client.Re
 }
 
 func (c *Coordinator) GetClusterNodes() []*Node {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	nodes := make([]*Node, 0)
 	for _, node := range c.nodes {
 		nodes = append(nodes, node)
 	}
 	return nodes
+}
+
+func (c *Coordinator) GetNode(nodeID string) (*Node, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	node, ok := c.nodes[nodeID]
+	if !ok {
+		return nil, fmt.Errorf("node %s not found", nodeID)
+	}
+	return node, nil
 }
 
 func (c *Coordinator) GetNodeIDWithLeastTopics() (*Node, error) {

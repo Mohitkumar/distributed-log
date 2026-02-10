@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
@@ -125,10 +126,16 @@ type TransportClient struct {
 	codec *protocol.Codec
 }
 
+// Dial opens a single TCP connection to addr and enables keepalive so the connection
+// stays alive for node-to-node RPC/stream use (one connection per peer).
 func Dial(addr string) (*TransportClient, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
+	}
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(30 * time.Second)
 	}
 	return &TransportClient{conn: conn, codec: &protocol.Codec{}}, nil
 }

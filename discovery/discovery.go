@@ -127,7 +127,7 @@ func (m *Membership) Leave() error {
 func (m *Membership) logError(err error, msg string, member serf.Member) {
 	log := m.logger.Error
 	if err == raft.ErrNotLeader {
-		log = m.logger.Debug
+		log = m.logger.Info
 	}
 	log(
 		msg,
