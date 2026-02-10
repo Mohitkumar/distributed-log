@@ -54,10 +54,10 @@ func (tm *TopicManager) currentNodeID() string {
 func (tm *TopicManager) IsLeader(topic string) bool {
 	leaderNode, err := tm.coordinator.GetTopicLeaderNode(topic)
 	if err != nil {
+		tm.Logger.Error("failed to get topic leader node", zap.String("topic", topic), zap.Error(err))
 		return false
 	}
-	leaderID := leaderNode.NodeID
-	return leaderID == tm.currentNodeID()
+	return leaderNode.NodeID == tm.currentNodeID()
 }
 
 // applyDeleteTopicEventOnRaftLeader gets the Raft leader RPC address and calls ApplyDeleteTopicEvent there.
@@ -183,6 +183,9 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		replicaNodeIds, err := tm.CreateTopic(req.Topic, int(req.ReplicaCount))
 		if err != nil {
 			return nil, ErrCreateTopic(err)
+		}
+		if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds); err != nil {
+			return nil, ErrApplyCreateTopic(err)
 		}
 		return &protocol.CreateTopicResponse{Topic: req.Topic, ReplicaNodeIds: replicaNodeIds}, nil
 	}
