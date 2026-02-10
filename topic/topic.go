@@ -51,10 +51,6 @@ func (tm *TopicManager) currentNodeID() string {
 	return tm.coordinator.GetCurrentNode().NodeID
 }
 
-func (tm *TopicManager) currentNodeAddr() string {
-	return tm.coordinator.GetCurrentNode().RPCAddr
-}
-
 func (tm *TopicManager) IsLeader(topic string) bool {
 	leaderNode, err := tm.coordinator.GetTopicLeaderNode(topic)
 	if err != nil {
@@ -135,8 +131,8 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) (replicaNode
 		}
 		tm.Logger.Info("creating replica on node", zap.String("topic", topic), zap.String("node_id", node.NodeID), zap.String("node_addr", node.RPCAddr), zap.Error(err))
 		_, err = replClient.CreateReplica(context.Background(), &protocol.CreateReplicaRequest{
-			Topic:      topic,
-			LeaderAddr: tm.currentNodeAddr(),
+			Topic:    topic,
+			LeaderId: tm.currentNodeID(),
 		})
 		if err != nil {
 			delete(tm.topics, topic)
@@ -359,8 +355,9 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderId string) error
 	topicObj, ok := tm.topics[topic]
 	if !ok {
 		topicObj = &Topic{
-			Name:   topic,
-			Logger: tm.Logger,
+			Name:         topic,
+			Logger:       tm.Logger,
+			LeaderNodeID: leaderId,
 		}
 		tm.topics[topic] = topicObj
 	}

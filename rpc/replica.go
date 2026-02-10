@@ -12,11 +12,11 @@ func (s *RpcServer) CreateReplica(ctx context.Context, req *protocol.CreateRepli
 		return nil, ErrTopicRequired
 	}
 
-	if req.LeaderAddr == "" {
+	if req.LeaderId == "" {
 		return nil, ErrLeaderAddrRequired
 	}
 
-	err := s.topicManager.CreateReplicaRemote(req.Topic, req.LeaderAddr)
+	err := s.topicManager.CreateReplicaRemote(req.Topic, req.LeaderId)
 	if err != nil {
 		return nil, ErrCreateReplica(err)
 	}
