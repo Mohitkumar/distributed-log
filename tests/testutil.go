@@ -104,6 +104,10 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	if err != nil {
 		t.Fatalf("NewCoordinatorFromConfig: %v", err)
 	}
+	if err := coord.Start(); err != nil {
+		coord.Shutdown()
+		t.Fatalf("coord.Start: %v", err)
+	}
 	topicMgr, err := topic.NewTopicManager(baseDir, coord, coord.Logger)
 	if err != nil {
 		coord.Shutdown()
@@ -165,6 +169,16 @@ func setupTwoTestServersImpl(t testing.TB, server1BaseDirSuffix string, server2B
 	if err != nil {
 		coord1.Shutdown()
 		t.Fatalf("NewCoordinatorFromConfig server2: %v", err)
+	}
+	if err := coord1.Start(); err != nil {
+		coord1.Shutdown()
+		coord2.Shutdown()
+		t.Fatalf("coord1.Start: %v", err)
+	}
+	if err := coord2.Start(); err != nil {
+		coord1.Shutdown()
+		coord2.Shutdown()
+		t.Fatalf("coord2.Start: %v", err)
 	}
 
 	server1TopicMgr, err := topic.NewTopicManager(server1BaseDir, coord1, coord1.Logger)

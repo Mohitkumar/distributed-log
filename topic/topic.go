@@ -54,13 +54,6 @@ func (tm *TopicManager) currentNodeID() string {
 	return ""
 }
 
-func (tm *TopicManager) currentNodeAddr() string {
-	if n := tm.coordinator.GetCurrentNode(); n != nil {
-		return n.RPCAddr
-	}
-	return ""
-}
-
 func (tm *TopicManager) IsLeader(topic string) bool {
 	leaderNode, err := tm.coordinator.GetTopicLeaderNode(topic)
 	if err != nil {
@@ -194,9 +187,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		if err != nil {
 			return nil, ErrCreateTopic(err)
 		}
-		if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds); err != nil {
-			return nil, ErrApplyCreateTopic(err)
-		}
+		c.ApplyEvent(NewCreateTopicApplyEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds))
 		return &protocol.CreateTopicResponse{Topic: req.Topic, ReplicaNodeIds: replicaNodeIds}, nil
 	}
 	tm.Logger.Info("forwarding create topic to topic leader", zap.String("topic", req.Topic), zap.String("topic_leader_id", topicLeaderNode.NodeID), zap.String("topic_leader_addr", topicLeaderNode.RPCAddr))
@@ -213,9 +204,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		return nil, ErrForwardToTopicLeader(err)
 	}
 	replicaNodeIds := resp.ReplicaNodeIds
-	if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds); err != nil {
-		return nil, ErrApplyCreateTopic(err)
-	}
+	c.ApplyEvent(NewCreateTopicApplyEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds))
 	return resp, nil
 }
 
@@ -727,7 +716,6 @@ func (tm *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64,
 			isr = leo >= leaderLEO
 		}
 	}
-	tm.coordinator.UpdateTopicReplicaLEO(topic, nodeId, int64(leo), isr)
 
 	tm.maybeAdvanceHW(topicObj)
 	if err := tm.applyIsrUpdateEventOnRaftLeader(context.Background(), topic, nodeId, isr, int64(leo)); err != nil {

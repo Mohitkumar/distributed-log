@@ -9,17 +9,19 @@ import (
 	"github.com/mohitkumar/mlog/topic"
 )
 
+var _ topic.TopicCoordinator = (*FakeTopicCoordinator)(nil)
+
 // FakeTopicCoordinator implements topic.TopicCoordinator in memory without Raft.
 // Use for unit testing TopicManager in isolation.
 type FakeTopicCoordinator struct {
 	mu sync.RWMutex
 
-	NodeID  string
-	RPCAddr string
+	NodeID       string
+	RPCAddr      string
 	IsRaftLeader bool
 
-	Nodes   map[string]*common.Node          // nodeID -> node
-	Topics  map[string]*fakeTopicMeta        // topic -> meta
+	Nodes    map[string]*common.Node                    // nodeID -> node
+	Topics   map[string]*fakeTopicMeta                  // topic -> meta
 	Replicas map[string]map[string]*common.ReplicaState // topic -> replicaNodeID -> state
 }
 
@@ -183,7 +185,7 @@ func (f *FakeTopicCoordinator) GetNodeIDWithLeastTopics() (*common.Node, error) 
 	return f.Nodes[f.NodeID], nil
 }
 
-func (f *FakeTopicCoordinator) ApplyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
+func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Topics[topicName] = &fakeTopicMeta{
@@ -201,7 +203,7 @@ func (f *FakeTopicCoordinator) ApplyCreateTopicEvent(topicName string, replicaCo
 	return nil
 }
 
-func (f *FakeTopicCoordinator) ApplyDeleteTopicEvent(topicName string) error {
+func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.Topics, topicName)
@@ -209,7 +211,7 @@ func (f *FakeTopicCoordinator) ApplyDeleteTopicEvent(topicName string) error {
 	return nil
 }
 
-func (f *FakeTopicCoordinator) ApplyIsrUpdateEvent(topicName, replicaNodeID string, isr bool, leo int64) error {
+func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool, leo int64) error {
 	f.UpdateTopicReplicaLEO(topicName, replicaNodeID, leo, isr)
 	return nil
 }
@@ -219,4 +221,17 @@ func (f *FakeTopicCoordinator) AddNode(nodeID, rpcAddr string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Nodes[nodeID] = &common.Node{NodeID: nodeID, RPCAddr: rpcAddr}
+}
+
+func (f *FakeTopicCoordinator) ApplyEvent(ev topic.ApplyEvent) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch ev.Type {
+	case topic.ApplyEventCreateTopic:
+		f.applyCreateTopicEvent(ev.CreateTopic.Topic, ev.CreateTopic.ReplicaCount, ev.CreateTopic.LeaderNodeID, ev.CreateTopic.ReplicaNodeIds)
+	case topic.ApplyEventDeleteTopic:
+		f.applyDeleteTopicEvent(ev.DeleteTopic.Topic)
+	case topic.ApplyEventIsrUpdate:
+		f.applyIsrUpdateEvent(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr, ev.IsrUpdate.Leo)
+	}
 }

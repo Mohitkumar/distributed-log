@@ -5,6 +5,74 @@ import (
 	"github.com/mohitkumar/mlog/common"
 )
 
+// ApplyEventType identifies the kind of topic metadata change to apply via the coordinator.
+type ApplyEventType int
+
+const (
+	ApplyEventCreateTopic ApplyEventType = iota
+	ApplyEventDeleteTopic
+	ApplyEventIsrUpdate
+)
+
+type CreateTopicApplyEvent struct {
+	Topic          string
+	ReplicaCount   uint32
+	LeaderNodeID   string
+	ReplicaNodeIds []string
+}
+
+type DeleteTopicApplyEvent struct {
+	Topic string
+}
+
+type IsrUpdateApplyEvent struct {
+	Topic         string
+	ReplicaNodeID string
+	Isr           bool
+	Leo           int64
+}
+
+// ApplyEvent is a tagged union of possible apply events. Exactly one payload should be set
+// corresponding to Type.
+type ApplyEvent struct {
+	Type ApplyEventType
+
+	CreateTopic *CreateTopicApplyEvent
+	DeleteTopic *DeleteTopicApplyEvent
+	IsrUpdate   *IsrUpdateApplyEvent
+}
+
+func NewCreateTopicApplyEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) ApplyEvent {
+	return ApplyEvent{
+		Type: ApplyEventCreateTopic,
+		CreateTopic: &CreateTopicApplyEvent{
+			Topic:          topic,
+			ReplicaCount:   replicaCount,
+			LeaderNodeID:   leaderNodeID,
+			ReplicaNodeIds: replicaNodeIds,
+		},
+	}
+}
+
+func NewDeleteTopicApplyEvent(topic string) ApplyEvent {
+	return ApplyEvent{
+		Type:        ApplyEventDeleteTopic,
+		DeleteTopic: &DeleteTopicApplyEvent{Topic: topic},
+	}
+}
+
+func NewIsrUpdateApplyEvent(topic, replicaNodeID string, isr bool, leo int64) ApplyEvent {
+	return ApplyEvent{
+		Type: ApplyEventIsrUpdate,
+		IsrUpdate: &IsrUpdateApplyEvent{
+			Topic:         topic,
+			ReplicaNodeID: replicaNodeID,
+			Isr:           isr,
+			Leo:           leo,
+		},
+	}
+}
+
 // TopicCoordinator is the interface used by TopicManager for cluster metadata, node lookup, and Raft/apply events.
 // Coordinator implements this interface; tests can use a fake implementation without Raft.
 type TopicCoordinator interface {
@@ -25,11 +93,8 @@ type TopicCoordinator interface {
 	GetTopicLeaderNode(topic string) (*common.Node, error)
 	GetTopicReplicaNodes(topic string) ([]*common.Node, error)
 	GetTopicReplicaStates(topic string) map[string]*common.ReplicaState
-	UpdateTopicReplicaLEO(topic, replicaNodeID string, leo int64, isr bool)
 	GetNodeIDWithLeastTopics() (*common.Node, error)
 
-	// Apply events (Raft leader applies to log)
-	ApplyCreateTopicEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error
-	ApplyDeleteTopicEvent(topic string) error
-	ApplyIsrUpdateEvent(topic, replicaNodeID string, isr bool, leo int64) error
+	// ApplyEvent enqueues an apply request to the coordinator implementation.
+	ApplyEvent(ev ApplyEvent)
 }

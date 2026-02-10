@@ -38,6 +38,8 @@ type Coordinator struct {
 	metadataStore *MetadataStore
 	nodes         map[string]*Node
 	stopReconcile chan struct{}
+	applyCh       chan topic.ApplyEvent
+	stopApply     chan struct{}
 }
 
 // NewCoordinatorFromConfig creates a Coordinator from full config (replaces NewNodeFromConfig).
@@ -65,6 +67,8 @@ func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinat
 		metadataStore: metadataStore,
 		nodes:         make(map[string]*Node),
 		stopReconcile: make(chan struct{}),
+		applyCh:       make(chan topic.ApplyEvent, 1024),
+		stopApply:     make(chan struct{}),
 	}
 	c.nodes[cfg.NodeConfig.ID] = newNode(cfg.NodeConfig.ID, rpcAddr)
 	c.Logger.Info("coordinator started", zap.String("raft_addr", cfg.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
@@ -440,10 +444,6 @@ func (c *Coordinator) GetTopicReplicaStates(topic string) map[string]*common.Rep
 	return out
 }
 
-func (c *Coordinator) UpdateTopicReplicaLEO(topic, replicaNodeID string, leo int64, isr bool) {
-	c.metadataStore.UpdateReplicaLEO(topic, replicaNodeID, leo, isr)
-}
-
 func (c *Coordinator) GetTopicReplicaState(topic, replicaNodeID string) (leo uint64, isISR bool) {
 	tm := c.metadataStore.GetTopic(topic)
 	if tm == nil || tm.Replicas == nil {
@@ -515,6 +515,43 @@ func (c *Coordinator) stopReconcileNodes() {
 	}
 }
 
+func (c *Coordinator) startApplyLoop() {
+	for {
+		select {
+		case <-c.stopApply:
+			return
+		case ev := <-c.applyCh:
+			var err error
+			switch ev.Type {
+			case topic.ApplyEventCreateTopic:
+				p := ev.CreateTopic
+				if p != nil {
+					err = c.applyCreateTopicEventInternal(p.Topic, p.ReplicaCount, p.LeaderNodeID, p.ReplicaNodeIds)
+				}
+			case topic.ApplyEventDeleteTopic:
+				err = c.applyDeleteTopicEventInternal(ev.DeleteTopic.Topic)
+			case topic.ApplyEventIsrUpdate:
+				p := ev.IsrUpdate
+				if p != nil {
+					err = c.applyIsrUpdateEventInternal(p.Topic, p.ReplicaNodeID, p.Isr, p.Leo)
+				}
+			}
+			if err != nil {
+				c.Logger.Error("apply event failed", zap.Error(err), zap.Any("event", ev))
+			}
+		}
+	}
+}
+
+func (c *Coordinator) stopApplyLoop() {
+	select {
+	case <-c.stopApply:
+		return
+	default:
+		close(c.stopApply)
+	}
+}
+
 func (c *Coordinator) reconcileNodes() {
 	metaIDs := c.metadataStore.ListNodeIDs()
 	c.mu.RLock()
@@ -562,6 +599,7 @@ func (c *Coordinator) reconcileNodes() {
 
 func (c *Coordinator) Start() error {
 	go c.startReconcileNodes()
+	go c.startApplyLoop()
 	return nil
 }
 
@@ -569,6 +607,7 @@ func (c *Coordinator) Shutdown() error {
 	c.Logger.Info("node shutting down")
 	c.metadataStore.StopPeriodicLog()
 	c.stopReconcileNodes()
+	c.stopApplyLoop()
 	f := c.raft.Shutdown()
 	return f.Error()
 }

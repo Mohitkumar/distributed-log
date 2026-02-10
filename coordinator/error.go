@@ -12,6 +12,7 @@ var (
 	ErrNodeNotFound     = errors.New("node not found in metadata")
 	ErrTopicNotFound    = errors.New("topic not found in metadata")
 	ErrNoNodesInCluster = errors.New("no nodes in cluster")
+	ErrCoordinatorStopped = errors.New("coordinator stopped")
 )
 
 // ErrRaftApply wraps Raft Apply failure.
