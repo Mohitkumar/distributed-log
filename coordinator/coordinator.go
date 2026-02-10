@@ -12,12 +12,15 @@ import (
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 	"github.com/mohitkumar/mlog/client"
+	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/config"
 	"github.com/mohitkumar/mlog/discovery"
+	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
 )
 
 var _ discovery.Handler = (*Coordinator)(nil)
+var _ topic.TopicCoordinator = (*Coordinator)(nil)
 
 const (
 	SnapshotThreshold   = 10000
@@ -47,7 +50,7 @@ func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinat
 	if err != nil {
 		return nil, err
 	}
-	raftNode, err := SetupRaft(fsm, cfg.RaftConfig)
+	raftNode, err := setupRaft(fsm, cfg.RaftConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +72,7 @@ func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinat
 }
 
 // SetupRaft creates a Raft node. BindAddress is the listen address (e.g. 0.0.0.0:9093); Address is what others use to reach this node.
-func SetupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, error) {
+func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, error) {
 	raftBindAddr := cfg.Address
 	if cfg.BindAddress != "" {
 		raftBindAddr = cfg.BindAddress
@@ -133,12 +136,31 @@ func (c *Coordinator) EnsureSelfInMetadata() error {
 	return c.ApplyNodeAddEvent(c.cfg.NodeConfig.ID, c.cfg.RaftConfig.Address, rpcAddr)
 }
 
+func nodeToCommon(n *Node) *common.Node {
+	if n == nil {
+		return nil
+	}
+	return &common.Node{NodeID: n.NodeID, RPCAddr: n.RPCAddr}
+}
+
 func (c *Coordinator) GetRpcClient(nodeID string) (*client.RemoteClient, error) {
-	return c.nodes[nodeID].GetRpcClient()
+	c.mu.RLock()
+	n := c.nodes[nodeID]
+	c.mu.RUnlock()
+	if n == nil {
+		return nil, ErrNodeNotFound
+	}
+	return n.GetRpcClient()
 }
 
 func (c *Coordinator) GetRpcStreamClient(nodeID string) (*client.RemoteStreamClient, error) {
-	return c.nodes[nodeID].GetRpcStreamClient()
+	c.mu.RLock()
+	n := c.nodes[nodeID]
+	c.mu.RUnlock()
+	if n == nil {
+		return nil, ErrNodeNotFound
+	}
+	return n.GetRpcStreamClient()
 }
 
 func (c *Coordinator) GetRaftLeaderRemoteClient() (*client.RemoteClient, error) {
@@ -178,17 +200,17 @@ func (c *Coordinator) GetClusterNodes() []*Node {
 	return nodes
 }
 
-func (c *Coordinator) GetNode(nodeID string) (*Node, error) {
+func (c *Coordinator) GetNode(nodeID string) (*common.Node, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	node, ok := c.nodes[nodeID]
 	if !ok {
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
-	return node, nil
+	return nodeToCommon(node), nil
 }
 
-func (c *Coordinator) GetNodeIDWithLeastTopics() (*Node, error) {
+func (c *Coordinator) GetNodeIDWithLeastTopics() (*common.Node, error) {
 	nodes := c.GetClusterNodes()
 	if len(nodes) == 0 {
 		return nil, ErrNoNodesInCluster
@@ -203,7 +225,7 @@ func (c *Coordinator) GetNodeIDWithLeastTopics() (*Node, error) {
 			best = node
 		}
 	}
-	return best, nil
+	return nodeToCommon(best), nil
 }
 
 func (c *Coordinator) TopicExists(topic string) bool {
@@ -304,19 +326,64 @@ func (c *Coordinator) RemoveNode(nodeID string) {
 	delete(c.nodes, nodeID)
 }
 
-func (c *Coordinator) GetCurrentNode() *Node {
-	return c.nodes[c.cfg.NodeConfig.ID]
+func (c *Coordinator) GetCurrentNode() *common.Node {
+	n := c.nodes[c.cfg.NodeConfig.ID]
+	if n == nil {
+		return nil
+	}
+	return nodeToCommon(n)
 }
 
-func (c *Coordinator) GetOtherNodes() []*Node {
+// GetNodeID returns this node's ID (for discovery and tests).
+func (c *Coordinator) GetNodeID() string {
+	if n := c.GetCurrentNode(); n != nil {
+		return n.NodeID
+	}
+	return c.cfg.NodeConfig.ID
+}
+
+// GetNodeAddr returns this node's RPC address (for discovery and tests).
+func (c *Coordinator) GetNodeAddr() string {
+	if n := c.GetCurrentNode(); n != nil {
+		return n.RPCAddr
+	}
+	return ""
+}
+
+// GetTopicLeaderNodeID returns the topic leader node ID (for tests and RPC).
+func (c *Coordinator) GetTopicLeaderNodeID(topic string) string {
+	tm := c.metadataStore.GetTopic(topic)
+	if tm == nil {
+		return ""
+	}
+	return tm.LeaderNodeID
+}
+
+// GetRpcAddrForNodeID returns the RPC address for the given node ID (for discovery and tests).
+func (c *Coordinator) GetRpcAddrForNodeID(nodeID string) (string, error) {
+	meta := c.metadataStore.GetNodeMetadata(nodeID)
+	if meta == nil {
+		return "", ErrNodeNotFound
+	}
+	return meta.RpcAddr, nil
+}
+
+// GetClusterNodeIDs returns all node IDs in the cluster (for tests).
+func (c *Coordinator) GetClusterNodeIDs() []string {
+	return c.metadataStore.ListNodeIDs()
+}
+
+func (c *Coordinator) GetOtherNodes() []*common.Node {
 	servers := c.raft.GetConfiguration().Configuration().Servers
-	out := make([]*Node, 0)
+	out := make([]*common.Node, 0)
 	for _, srv := range servers {
 		if srv.ID == raft.ServerID(c.cfg.NodeConfig.ID) {
 			continue
 		}
 		nodeID := string(srv.ID)
-		out = append(out, c.nodes[nodeID])
+		if n := c.nodes[nodeID]; n != nil {
+			out = append(out, nodeToCommon(n))
+		}
 	}
 	return out
 }
@@ -329,32 +396,48 @@ func (c *Coordinator) ListTopicNames() []string {
 	return c.metadataStore.ListTopicNames()
 }
 
-func (c *Coordinator) GetTopicLeaderNode(topic string) (*Node, error) {
+func (c *Coordinator) GetTopicLeaderNode(topic string) (*common.Node, error) {
 	tm := c.metadataStore.GetTopic(topic)
 	if tm == nil {
 		return nil, fmt.Errorf("topic %s not found", topic)
 	}
-	return c.nodes[tm.LeaderNodeID], nil
+	n := c.nodes[tm.LeaderNodeID]
+	if n == nil {
+		return nil, fmt.Errorf("topic %s not found", topic)
+	}
+	return nodeToCommon(n), nil
 }
 
-func (c *Coordinator) GetTopicReplicaNodes(topic string) ([]*Node, error) {
+func (c *Coordinator) GetTopicReplicaNodes(topic string) ([]*common.Node, error) {
 	tm := c.metadataStore.GetTopic(topic)
 	if tm == nil || tm.Replicas == nil {
 		return nil, fmt.Errorf("topic %s not found", topic)
 	}
-	out := make([]*Node, 0, len(tm.Replicas))
+	out := make([]*common.Node, 0, len(tm.Replicas))
 	for id := range tm.Replicas {
-		out = append(out, c.nodes[id])
+		if n := c.nodes[id]; n != nil {
+			out = append(out, nodeToCommon(n))
+		}
 	}
 	return out, nil
 }
 
-func (c *Coordinator) GetTopicReplicaStates(topic string) map[string]*ReplicaState {
+func (c *Coordinator) GetTopicReplicaStates(topic string) map[string]*common.ReplicaState {
 	tm := c.metadataStore.GetTopic(topic)
 	if tm == nil || tm.Replicas == nil {
 		return nil
 	}
-	return tm.Replicas
+	out := make(map[string]*common.ReplicaState, len(tm.Replicas))
+	for id, rs := range tm.Replicas {
+		if rs != nil {
+			out[id] = &common.ReplicaState{
+				ReplicaNodeID: rs.ReplicaNodeID,
+				LEO:           rs.LEO,
+				IsISR:         rs.IsISR,
+			}
+		}
+	}
+	return out
 }
 
 func (c *Coordinator) UpdateTopicReplicaLEO(topic, replicaNodeID string, leo int64, isr bool) {
