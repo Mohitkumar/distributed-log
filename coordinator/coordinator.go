@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -27,11 +28,13 @@ const (
 // Coordinator handles cluster-wide responsibility: Raft, metadata store, and membership (Join/Leave, Apply* events).
 // Addresses and RPC clients to other nodes live in Node; Coordinator holds the local Node and delegates to it where appropriate.
 type Coordinator struct {
+	mu            sync.RWMutex
 	Logger        *zap.Logger
 	raft          *raft.Raft
 	cfg           config.Config
 	metadataStore *MetadataStore
 	nodes         map[string]*Node
+	stopReconcile chan struct{}
 }
 
 // NewCoordinatorFromConfig creates a Coordinator from full config (replaces NewNodeFromConfig).
@@ -58,6 +61,7 @@ func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinat
 		cfg:           cfg,
 		metadataStore: metadataStore,
 		nodes:         make(map[string]*Node),
+		stopReconcile: make(chan struct{}),
 	}
 	c.nodes[cfg.NodeConfig.ID] = newNode(cfg.NodeConfig.ID, rpcAddr)
 	c.Logger.Info("coordinator started", zap.String("raft_addr", cfg.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
@@ -276,6 +280,18 @@ func (c *Coordinator) maybeReassignTopicLeaders(nodeID string) {
 	}
 }
 
+func (c *Coordinator) AddNode(node *Node) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nodes[node.NodeID] = node
+}
+
+func (c *Coordinator) RemoveNode(nodeID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.nodes, nodeID)
+}
+
 func (c *Coordinator) GetCurrentNode() *Node {
 	return c.nodes[c.cfg.NodeConfig.ID]
 }
@@ -382,9 +398,82 @@ func (c *Coordinator) WaitforRaftReadyWithRetryBackoff(timeout time.Duration, re
 	return fmt.Errorf("timed out waiting for leader")
 }
 
+func (c *Coordinator) startReconcileNodes() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stopReconcile:
+			return
+		case <-ticker.C:
+			c.reconcileNodes()
+		}
+	}
+}
+
+func (c *Coordinator) stopReconcileNodes() {
+	select {
+	case <-c.stopReconcile:
+		return
+	default:
+		close(c.stopReconcile)
+	}
+}
+
+func (c *Coordinator) reconcileNodes() {
+	metaIDs := c.metadataStore.ListNodeIDs()
+	c.mu.RLock()
+	var toAdd []struct {
+		id      string
+		rpcAddr string
+	}
+	ourIDs := make(map[string]struct{}, len(c.nodes))
+	for id := range c.nodes {
+		ourIDs[id] = struct{}{}
+	}
+	for _, id := range metaIDs {
+		if _, ok := ourIDs[id]; !ok {
+			meta := c.metadataStore.GetNodeMetadata(id)
+			if meta != nil {
+				toAdd = append(toAdd, struct {
+					id      string
+					rpcAddr string
+				}{id, meta.RpcAddr})
+			}
+		}
+	}
+	var toRemove []string
+	for id := range c.nodes {
+		found := false
+		for _, mid := range metaIDs {
+			if mid == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			toRemove = append(toRemove, id)
+		}
+	}
+	c.mu.RUnlock()
+
+	for _, a := range toAdd {
+		c.AddNode(newNode(a.id, a.rpcAddr))
+	}
+	for _, id := range toRemove {
+		c.RemoveNode(id)
+	}
+}
+
+func (c *Coordinator) Start() error {
+	go c.startReconcileNodes()
+	return nil
+}
+
 func (c *Coordinator) Shutdown() error {
 	c.Logger.Info("node shutting down")
 	c.metadataStore.StopPeriodicLog()
+	c.stopReconcileNodes()
 	f := c.raft.Shutdown()
 	return f.Error()
 }

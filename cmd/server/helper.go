@@ -112,6 +112,9 @@ func (cmdHelper *CommandHelper) setupMembership() error {
 }
 
 func (cmdHelper *CommandHelper) Start() error {
+	if err := cmdHelper.coord.Start(); err != nil {
+		return fmt.Errorf("start coordinator: %w", err)
+	}
 	return cmdHelper.rpcServer.Start()
 }
 
