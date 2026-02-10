@@ -36,7 +36,7 @@ type Coordinator struct {
 	raft          *raft.Raft
 	cfg           config.Config
 	metadataStore *MetadataStore
-	nodes         map[string]*Node
+	nodes         map[string]*common.Node
 	stopReconcile chan struct{}
 	applyCh       chan topic.ApplyEvent
 	stopApply     chan struct{}
@@ -65,12 +65,12 @@ func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinat
 		raft:          raftNode,
 		cfg:           cfg,
 		metadataStore: metadataStore,
-		nodes:         make(map[string]*Node),
+		nodes:         make(map[string]*common.Node),
 		stopReconcile: make(chan struct{}),
 		applyCh:       make(chan topic.ApplyEvent, 1024),
 		stopApply:     make(chan struct{}),
 	}
-	c.nodes[cfg.NodeConfig.ID] = newNode(cfg.NodeConfig.ID, rpcAddr)
+	c.nodes[cfg.NodeConfig.ID] = common.NewNode(cfg.NodeConfig.ID, rpcAddr)
 	c.Logger.Info("coordinator started", zap.String("raft_addr", cfg.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
 	return c, nil
 }
@@ -140,13 +140,6 @@ func (c *Coordinator) EnsureSelfInMetadata() error {
 	return c.ApplyNodeAddEvent(c.cfg.NodeConfig.ID, c.cfg.RaftConfig.Address, rpcAddr)
 }
 
-func nodeToCommon(n *Node) *common.Node {
-	if n == nil {
-		return nil
-	}
-	return &common.Node{NodeID: n.NodeID, RPCAddr: n.RPCAddr}
-}
-
 func (c *Coordinator) GetRpcClient(nodeID string) (*client.RemoteClient, error) {
 	c.mu.RLock()
 	n := c.nodes[nodeID]
@@ -194,10 +187,10 @@ func (c *Coordinator) GetTopicLeaderRemoteStreamClient(topic string) (*client.Re
 	return c.GetRpcStreamClient(tm.LeaderNodeID)
 }
 
-func (c *Coordinator) GetClusterNodes() []*Node {
+func (c *Coordinator) GetClusterNodes() []*common.Node {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	nodes := make([]*Node, 0)
+	nodes := make([]*common.Node, 0)
 	for _, node := range c.nodes {
 		nodes = append(nodes, node)
 	}
@@ -211,7 +204,7 @@ func (c *Coordinator) GetNode(nodeID string) (*common.Node, error) {
 	if !ok {
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
-	return nodeToCommon(node), nil
+	return node, nil
 }
 
 func (c *Coordinator) GetNodeIDWithLeastTopics() (*common.Node, error) {
@@ -229,7 +222,7 @@ func (c *Coordinator) GetNodeIDWithLeastTopics() (*common.Node, error) {
 			best = node
 		}
 	}
-	return nodeToCommon(best), nil
+	return best, nil
 }
 
 func (c *Coordinator) TopicExists(topic string) bool {
@@ -318,7 +311,7 @@ func (c *Coordinator) maybeReassignTopicLeaders(nodeID string) {
 	}
 }
 
-func (c *Coordinator) AddNode(node *Node) {
+func (c *Coordinator) AddNode(node *common.Node) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.nodes[node.NodeID] = node
@@ -335,7 +328,7 @@ func (c *Coordinator) GetCurrentNode() *common.Node {
 	if n == nil {
 		return nil
 	}
-	return nodeToCommon(n)
+	return n
 }
 
 // GetNodeID returns this node's ID (for discovery and tests).
@@ -386,7 +379,7 @@ func (c *Coordinator) GetOtherNodes() []*common.Node {
 		}
 		nodeID := string(srv.ID)
 		if n := c.nodes[nodeID]; n != nil {
-			out = append(out, nodeToCommon(n))
+			out = append(out, n)
 		}
 	}
 	return out
@@ -409,7 +402,7 @@ func (c *Coordinator) GetTopicLeaderNode(topic string) (*common.Node, error) {
 	if n == nil {
 		return nil, fmt.Errorf("topic %s not found", topic)
 	}
-	return nodeToCommon(n), nil
+	return n, nil
 }
 
 func (c *Coordinator) GetTopicReplicaNodes(topic string) ([]*common.Node, error) {
@@ -420,7 +413,7 @@ func (c *Coordinator) GetTopicReplicaNodes(topic string) ([]*common.Node, error)
 	out := make([]*common.Node, 0, len(tm.Replicas))
 	for id := range tm.Replicas {
 		if n := c.nodes[id]; n != nil {
-			out = append(out, nodeToCommon(n))
+			out = append(out, n)
 		}
 	}
 	return out, nil
@@ -590,7 +583,7 @@ func (c *Coordinator) reconcileNodes() {
 	c.mu.RUnlock()
 
 	for _, a := range toAdd {
-		c.AddNode(newNode(a.id, a.rpcAddr))
+		c.AddNode(common.NewNode(a.id, a.rpcAddr))
 	}
 	for _, id := range toRemove {
 		c.RemoveNode(id)

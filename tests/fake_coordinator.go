@@ -186,8 +186,6 @@ func (f *FakeTopicCoordinator) GetNodeIDWithLeastTopics() (*common.Node, error) 
 }
 
 func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.Topics[topicName] = &fakeTopicMeta{
 		LeaderNodeID: leaderNodeID,
 		ReplicaIDs:   replicaNodeIds,
@@ -204,8 +202,6 @@ func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCo
 }
 
 func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	delete(f.Topics, topicName)
 	delete(f.Replicas, topicName)
 	return nil
@@ -224,14 +220,23 @@ func (f *FakeTopicCoordinator) AddNode(nodeID, rpcAddr string) {
 }
 
 func (f *FakeTopicCoordinator) ApplyEvent(ev topic.ApplyEvent) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	switch ev.Type {
 	case topic.ApplyEventCreateTopic:
-		f.applyCreateTopicEvent(ev.CreateTopic.Topic, ev.CreateTopic.ReplicaCount, ev.CreateTopic.LeaderNodeID, ev.CreateTopic.ReplicaNodeIds)
+		if ev.CreateTopic != nil {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			_ = f.applyCreateTopicEvent(ev.CreateTopic.Topic, ev.CreateTopic.ReplicaCount, ev.CreateTopic.LeaderNodeID, ev.CreateTopic.ReplicaNodeIds)
+		}
 	case topic.ApplyEventDeleteTopic:
-		f.applyDeleteTopicEvent(ev.DeleteTopic.Topic)
+		if ev.DeleteTopic != nil {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			_ = f.applyDeleteTopicEvent(ev.DeleteTopic.Topic)
+		}
 	case topic.ApplyEventIsrUpdate:
-		f.applyIsrUpdateEvent(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr, ev.IsrUpdate.Leo)
+		if ev.IsrUpdate != nil {
+			// UpdateTopicReplicaLEO already locks internally.
+			_ = f.applyIsrUpdateEvent(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr, ev.IsrUpdate.Leo)
+		}
 	}
 }
