@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/config"
 	"github.com/mohitkumar/mlog/discovery"
 	"go.uber.org/zap"
@@ -32,7 +31,7 @@ type Coordinator struct {
 	raft          *raft.Raft
 	cfg           config.Config
 	metadataStore *MetadataStore
-	node          *Node
+	nodes         map[string]*Node
 }
 
 // NewCoordinatorFromConfig creates a Coordinator from full config (replaces NewNodeFromConfig).
@@ -58,9 +57,9 @@ func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinat
 		raft:          raftNode,
 		cfg:           cfg,
 		metadataStore: metadataStore,
-		node:          nil,
+		nodes:         make(map[string]*Node),
 	}
-	c.node = newNode(c, cfg.NodeConfig.ID, rpcAddr, cfg.RaftConfig.Address)
+	c.nodes[cfg.NodeConfig.ID] = newNode(cfg.NodeConfig.ID, rpcAddr)
 	c.Logger.Info("coordinator started", zap.String("raft_addr", cfg.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
 	return c, nil
 }
@@ -123,75 +122,69 @@ func (c *Coordinator) EnsureSelfInMetadata() error {
 	if c.raft.State() != raft.Leader {
 		return nil
 	}
-	return c.ApplyNodeAddEvent(c.node.NodeID, c.node.NodeRaftAddr, c.node.NodeRPCAddr)
-}
-
-// Node returns the local node (addresses and clients). Use for RPC client lookups.
-func (c *Coordinator) Node() *Node {
-	return c.node
+	rpcAddr, err := c.cfg.RPCAddr()
+	if err != nil {
+		return err
+	}
+	return c.ApplyNodeAddEvent(c.cfg.NodeConfig.ID, c.cfg.RaftConfig.Address, rpcAddr)
 }
 
 func (c *Coordinator) GetRpcClient(nodeID string) (*client.RemoteClient, error) {
-	return c.node.GetRpcClient(nodeID)
+	return c.nodes[nodeID].GetRpcClient()
 }
 
 func (c *Coordinator) GetRpcStreamClient(nodeID string) (*client.RemoteStreamClient, error) {
-	return c.node.GetRpcStreamClient(nodeID)
+	return c.nodes[nodeID].GetRpcStreamClient()
 }
 
-func (c *Coordinator) GetRpcAddrForNodeID(nodeID string) (string, error) {
-	meta := c.metadataStore.GetNodeMetadata(nodeID)
-	if meta == nil {
-		return "", ErrNodeNotFound
-	}
-	return meta.RpcAddr, nil
-}
-
-func (c *Coordinator) GetRaftLeaderId() (string, error) {
+func (c *Coordinator) GetRaftLeaderRemoteClient() (*client.RemoteClient, error) {
 	if c.raft.State() == raft.Leader {
-		return c.node.NodeID, nil
+		return c.GetRpcClient(c.cfg.NodeConfig.ID)
 	}
 	_, leaderId := c.raft.LeaderWithID()
 	if leaderId == "" {
-		return "", ErrRaftNoLeader
+		return nil, ErrRaftNoLeader
 	}
-	configFuture := c.raft.GetConfiguration()
-	if err := configFuture.Error(); err != nil {
-		return "", err
-	}
-	for _, srv := range configFuture.Configuration().Servers {
-		if srv.ID == leaderId {
-			return string(leaderId), nil
-		}
-	}
-	return "", fmt.Errorf("leader not found")
+	return c.GetRpcClient(string(leaderId))
 }
 
-func (c *Coordinator) GetTopicLeaderId(topic string) (string, error) {
+func (c *Coordinator) GetTopicLeaderRemoteClient(topic string) (*client.RemoteClient, error) {
 	tm := c.metadataStore.GetTopic(topic)
 	if tm == nil {
-		return "", fmt.Errorf("topic %s not found", topic)
+		return nil, fmt.Errorf("topic %s not found", topic)
 	}
-	return tm.LeaderNodeID, nil
+	return c.GetRpcClient(tm.LeaderNodeID)
 }
 
-func (c *Coordinator) GetClusterNodeIDs() []string {
-	return c.metadataStore.ListNodeIDs()
+func (c *Coordinator) GetTopicLeaderRemoteStreamClient(topic string) (*client.RemoteStreamClient, error) {
+	tm := c.metadataStore.GetTopic(topic)
+	if tm == nil {
+		return nil, fmt.Errorf("topic %s not found", topic)
+	}
+	return c.GetRpcStreamClient(tm.LeaderNodeID)
 }
 
-func (c *Coordinator) GetNodeIDWithLeastTopics() (string, error) {
-	ids := c.GetClusterNodeIDs()
-	if len(ids) == 0 {
-		return "", ErrNoNodesInCluster
+func (c *Coordinator) GetClusterNodes() []*Node {
+	nodes := make([]*Node, 0)
+	for _, node := range c.nodes {
+		nodes = append(nodes, node)
+	}
+	return nodes
+}
+
+func (c *Coordinator) GetNodeIDWithLeastTopics() (*Node, error) {
+	nodes := c.GetClusterNodes()
+	if len(nodes) == 0 {
+		return nil, ErrNoNodesInCluster
 	}
 	counts := c.metadataStore.TopicCountByLeader()
-	best := ids[0]
-	minCount := counts[best]
-	for _, id := range ids[1:] {
-		cn := counts[id]
+	best := nodes[0]
+	minCount := counts[best.NodeID]
+	for _, node := range nodes[1:] {
+		cn := counts[node.NodeID]
 		if cn < minCount {
 			minCount = cn
-			best = id
+			best = node
 		}
 	}
 	return best, nil
@@ -230,15 +223,6 @@ func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 		c.Logger.Error("raft add voter failed", zap.Error(err))
 		return err
 	}
-	cl, err := client.NewRemoteClient(rpcAddr)
-	if err != nil {
-		return err
-	}
-	streamCl, err := client.NewRemoteStreamClient(rpcAddr)
-	if err != nil {
-		return err
-	}
-	c.node.addClient(id, cl, streamCl)
 	c.ApplyNodeAddEvent(id, raftAddr, rpcAddr)
 	c.Logger.Info("node joined cluster", zap.String("joined_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	return nil
@@ -256,7 +240,6 @@ func (c *Coordinator) Leave(id string) error {
 		c.Logger.Error("raft remove server failed", zap.Error(err))
 		return err
 	}
-	c.node.removeClient(id)
 	c.ApplyNodeRemoveEvent(id)
 	c.maybeReassignTopicLeaders(id)
 	return nil
@@ -293,27 +276,19 @@ func (c *Coordinator) maybeReassignTopicLeaders(nodeID string) {
 	}
 }
 
-func (c *Coordinator) GetNodeID() string {
-	return c.node.GetNodeID()
+func (c *Coordinator) GetCurrentNode() *Node {
+	return c.nodes[c.cfg.NodeConfig.ID]
 }
 
-func (c *Coordinator) GetNodeAddr() string {
-	return c.node.GetNodeAddr()
-}
-
-func (c *Coordinator) GetOtherNodes() []common.NodeInfo {
+func (c *Coordinator) GetOtherNodes() []*Node {
 	servers := c.raft.GetConfiguration().Configuration().Servers
-	out := make([]common.NodeInfo, 0)
+	out := make([]*Node, 0)
 	for _, srv := range servers {
-		if srv.ID == raft.ServerID(c.node.NodeID) {
+		if srv.ID == raft.ServerID(c.cfg.NodeConfig.ID) {
 			continue
 		}
 		nodeID := string(srv.ID)
-		rpcAddr, err := c.GetRpcAddrForNodeID(nodeID)
-		if err != nil {
-			rpcAddr = string(srv.Address)
-		}
-		out = append(out, common.NodeInfo{NodeID: nodeID, RpcAddr: rpcAddr})
+		out = append(out, c.nodes[nodeID])
 	}
 	return out
 }
@@ -322,28 +297,28 @@ func (c *Coordinator) IsLeader() bool {
 	return c.raft.State() == raft.Leader
 }
 
-func (c *Coordinator) GetTopicLeaderNodeID(topic string) string {
-	tm := c.metadataStore.GetTopic(topic)
-	if tm == nil {
-		return ""
-	}
-	return tm.LeaderNodeID
-}
-
 func (c *Coordinator) ListTopicNames() []string {
 	return c.metadataStore.ListTopicNames()
 }
 
-func (c *Coordinator) GetTopicReplicaNodeIDs(topic string) []string {
+func (c *Coordinator) GetTopicLeaderNode(topic string) (*Node, error) {
+	tm := c.metadataStore.GetTopic(topic)
+	if tm == nil {
+		return nil, fmt.Errorf("topic %s not found", topic)
+	}
+	return c.nodes[tm.LeaderNodeID], nil
+}
+
+func (c *Coordinator) GetTopicReplicaNodes(topic string) ([]*Node, error) {
 	tm := c.metadataStore.GetTopic(topic)
 	if tm == nil || tm.Replicas == nil {
-		return nil
+		return nil, fmt.Errorf("topic %s not found", topic)
 	}
-	ids := make([]string, 0, len(tm.Replicas))
+	out := make([]*Node, 0, len(tm.Replicas))
 	for id := range tm.Replicas {
-		ids = append(ids, id)
+		out = append(out, c.nodes[id])
 	}
-	return ids
+	return out, nil
 }
 
 func (c *Coordinator) GetTopicReplicaStates(topic string) map[string]*ReplicaState {
@@ -371,18 +346,6 @@ func (c *Coordinator) GetTopicReplicaState(topic, replicaNodeID string) (leo uin
 		return 0, rs.IsISR
 	}
 	return uint64(rs.LEO), rs.IsISR
-}
-
-func (c *Coordinator) GetTopicReplicaClients(topic string) map[string]*client.RemoteClient {
-	return c.node.GetTopicReplicaClients(topic)
-}
-
-func (c *Coordinator) GetTopicLeaderClient(topic string) *client.RemoteClient {
-	return c.node.GetTopicLeaderClient(topic)
-}
-
-func (c *Coordinator) GetTopicLeaderStreamClient(topic string) *client.RemoteStreamClient {
-	return c.node.GetTopicLeaderStreamClient(topic)
 }
 
 func (c *Coordinator) WaitForLeader(timeout time.Duration) error {
