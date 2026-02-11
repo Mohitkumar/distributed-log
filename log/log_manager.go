@@ -63,7 +63,6 @@ func (l *LogManager) Append(value []byte) (uint64, error) {
 	defer l.mu.Unlock()
 
 	offset, err := l.Log.Append(value)
-
 	if err != nil {
 		return 0, err
 	}

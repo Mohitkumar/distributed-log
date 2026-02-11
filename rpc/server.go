@@ -11,20 +11,18 @@ import (
 
 // RpcServer holds topic manager and consumer manager for TCP transport RPCs.
 type RpcServer struct {
-	Addr              string
-	topicManager      *topic.TopicManager
-	consumerManager   *consumermgr.ConsumerManager
-	transport         *transport.Transport
-	leaderReaderCache *LeaderReaderCache
+	Addr            string
+	topicManager    *topic.TopicManager
+	consumerManager *consumermgr.ConsumerManager
+	transport       *transport.Transport
 }
 
 func NewRpcServer(addr string, topicManager *topic.TopicManager, consumerManager *consumermgr.ConsumerManager) *RpcServer {
 	srv := &RpcServer{
-		Addr:              addr,
-		topicManager:      topicManager,
-		consumerManager:   consumerManager,
-		transport:         transport.NewTransport(),
-		leaderReaderCache: NewLeaderReaderCache(),
+		Addr:            addr,
+		topicManager:    topicManager,
+		consumerManager: consumerManager,
+		transport:       transport.NewTransport(),
 	}
 	srv.RegisterHandlers()
 	return srv

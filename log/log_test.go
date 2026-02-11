@@ -159,6 +159,50 @@ func TestLogReaderFrom(t *testing.T) {
 		require.Equal(t, string("log record "+strconv.Itoa(i)), string(payloadBuf))
 	}
 }
+
+func TestLogReaderFromTwice(t *testing.T) {
+	log, teardown := setupTestLog(t)
+	defer teardown()
+	for i := 0; i < 100000; i++ {
+		_, err := log.Append([]byte("log record " + strconv.Itoa(i)))
+		if err != nil {
+			t.Fatalf("failed to append record: %v", err)
+		}
+	}
+	reader, err := log.ReaderFrom(0)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+	for i := 0; i < 50000; i++ {
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
+		require.NoError(t, err)
+		require.Equal(t, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
+		payloadBuf := make([]byte, size)
+		n, err = reader.Read(payloadBuf)
+		require.NoError(t, err)
+		require.Equal(t, int(size), n)
+		require.Equal(t, string("log record "+strconv.Itoa(i)), string(payloadBuf))
+	}
+	reader, err = log.ReaderFrom(50000)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+	for i := 50000; i < 100000; i++ {
+		header := make([]byte, 8+4)
+		n, err := reader.Read(header)
+		require.NoError(t, err)
+		require.Equal(t, 12, n)
+		size := binary.BigEndian.Uint32(header[8:12])
+		payloadBuf := make([]byte, size)
+		n, err = reader.Read(payloadBuf)
+		require.NoError(t, err)
+		require.Equal(t, int(size), n)
+		require.Equal(t, string("log record "+strconv.Itoa(i)), string(payloadBuf))
+	}
+}
+
 func BenchmarkLogWrite(b *testing.B) {
 	log, teardown := setupTestLog(&testing.T{})
 	defer teardown()
