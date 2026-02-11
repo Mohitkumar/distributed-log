@@ -278,7 +278,7 @@ func (f *FakeTopicCoordinator) replicateAllTopics() {
 	}
 	ctx := context.Background()
 	for leaderID, topicNames := range leaderToTopics {
-		_ = coordinator.DoReplicateTopicsForLeader(ctx, target, f.GetReplicationClient, f.NodeID, leaderID, topicNames)
+		_ = coordinator.DoReplicateTopicsForLeader(ctx, target, f.GetReplicationClient, f.NodeID, leaderID, topicNames, 5000)
 	}
 }
 

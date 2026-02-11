@@ -9,7 +9,10 @@ import (
 	"github.com/mohitkumar/mlog/topic"
 )
 
-const replicateTopicsMaxRounds = 100
+const (
+	replicateTopicsMaxRounds    = 100
+	defaultReplicationBatchSize = 5000
+)
 
 func (c *Coordinator) startReplicationThread() {
 	ticker := time.NewTicker(1 * time.Second)
@@ -55,7 +58,11 @@ func (c *Coordinator) ReplicateTopicsForLeader(ctx context.Context, leaderNodeID
 	if n := c.GetCurrentNode(); n != nil {
 		currentNodeID = n.NodeID
 	}
-	return DoReplicateTopicsForLeader(ctx, target, c.GetReplicationClient, currentNodeID, leaderNodeID, topicNames)
+	batchSize := c.cfg.Replication.BatchSize
+	if batchSize == 0 {
+		batchSize = defaultReplicationBatchSize
+	}
+	return DoReplicateTopicsForLeader(ctx, target, c.GetReplicationClient, currentNodeID, leaderNodeID, topicNames, batchSize)
 }
 
 func DoReplicateTopicsForLeader(
@@ -65,9 +72,13 @@ func DoReplicateTopicsForLeader(
 	currentNodeID string,
 	leaderNodeID string,
 	topicNames []string,
+	batchSize uint32,
 ) error {
 	if len(topicNames) == 0 {
 		return nil
+	}
+	if batchSize == 0 {
+		batchSize = defaultReplicationBatchSize
 	}
 	replClient, err := getClient(leaderNodeID)
 	if err != nil {
@@ -85,7 +96,7 @@ func DoReplicateTopicsForLeader(
 			requests = append(requests, protocol.ReplicateRequest{
 				Topic:         name,
 				Offset:        leo,
-				BatchSize:     5000,
+				BatchSize:     batchSize,
 				ReplicaNodeID: currentNodeID,
 			})
 		}
