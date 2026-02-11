@@ -54,6 +54,9 @@ func (s *RpcServer) handleReplicate(req *protocol.ReplicateRequest) (any, error)
 			err = nil
 		}
 	}
+	if leaderLog.LEO() <= req.Offset {
+		return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: nil, EndOfStream: true}, nil
+	}
 	reader, err := leaderLog.ReaderFrom(req.Offset)
 
 	if err != nil {

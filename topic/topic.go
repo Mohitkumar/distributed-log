@@ -481,6 +481,10 @@ func (tm *TopicManager) reportLEO(ctx context.Context, t *Topic, leaderNode *com
 	if log == nil {
 		return nil
 	}
+	err := log.Flush()
+	if err != nil {
+		return err
+	}
 	req := &protocol.RecordLEORequest{
 		NodeID: tm.currentNodeID(),
 		Topic:  t.Name,
