@@ -189,9 +189,6 @@ func (l *Log) Reader() io.Reader {
 
 func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	l.mu.RLock()
-	if l.activeSegment != nil {
-		_ = l.activeSegment.Flush()
-	}
 	endOffset := uint64(0)
 	if l.activeSegment != nil {
 		endOffset = l.activeSegment.NextOffset
@@ -228,12 +225,6 @@ func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	}
 	l.mu.RUnlock()
 	return io.MultiReader(readers...), nil
-}
-
-func (l *Log) Flush() error {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.activeSegment.Flush()
 }
 
 func (l *Log) Delete() error {
