@@ -95,8 +95,7 @@ func (c *replicateReaderCache) get(key string, offset uint64, create func() (io.
 
 // handleReplicate handles one ReplicateRequest: returns one batch (or empty) and EndOfStream.
 // Leader caches reader per (topic, replica); if request offset matches cached reader offset we reuse it, else reinit reader at request offset.
-func (s *RpcServer) handleReplicate(ctx context.Context, msg any) (any, error) {
-	req := msg.(protocol.ReplicateRequest)
+func (s *RpcServer) handleReplicate(ctx context.Context, req *protocol.ReplicateRequest) (any, error) {
 	leaderLog, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
 		if topicObj, e := s.topicManager.GetTopic(req.Topic); e == nil && topicObj != nil && topicObj.Log != nil {
@@ -143,5 +142,5 @@ func (s *RpcServer) handleReplicate(ctx context.Context, msg any) (any, error) {
 			return nil, encErr
 		}
 	}
-	return protocol.ReplicateResponse{RawChunk: rawChunk, EndOfStream: endOfStream}, nil
+	return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: rawChunk, EndOfStream: endOfStream}, nil
 }

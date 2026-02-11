@@ -59,7 +59,8 @@ func (c *Coordinator) ReplicateTopicsForLeader(ctx context.Context, leaderNodeID
 }
 
 // DoReplicateTopicsForLeader runs one leader's pipelined replication (used by Coordinator and by test fakes).
-// It sends one ReplicateRequest per topic on the same connection, reads responses in order, applies chunks via target.
+// It sends one ReplicateRequest per topic on the same connection, reads responses, and matches by topic name
+// (response includes Topic) so order of responses does not have to match order of requests.
 // Repeats until all topics report EndOfStream or max rounds.
 func DoReplicateTopicsForLeader(
 	ctx context.Context,
@@ -80,7 +81,6 @@ func DoReplicateTopicsForLeader(
 	names := append([]string(nil), topicNames...)
 	for round := 0; round < replicateTopicsMaxRounds && len(names) > 0; round++ {
 		var requests []protocol.ReplicateRequest
-		var topicOrder []string
 		for _, name := range names {
 			leo, ok := target.GetLEO(name)
 			if !ok {
@@ -92,7 +92,6 @@ func DoReplicateTopicsForLeader(
 				BatchSize:     5000,
 				ReplicaNodeID: currentNodeID,
 			})
-			topicOrder = append(topicOrder, name)
 		}
 		if len(requests) == 0 {
 			break
@@ -104,11 +103,11 @@ func DoReplicateTopicsForLeader(
 		}
 
 		names = names[:0]
-		for i, resp := range responses {
-			if i >= len(topicOrder) {
-				break
+		for _, resp := range responses {
+			topicName := resp.Topic
+			if topicName == "" {
+				continue
 			}
-			topicName := topicOrder[i]
 			if len(resp.RawChunk) > 0 {
 				_ = target.ApplyChunk(topicName, resp.RawChunk)
 			}

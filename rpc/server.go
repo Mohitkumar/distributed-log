@@ -45,7 +45,8 @@ func (s *RpcServer) RegisterHandlers() {
 		return s.RecordLEO(ctx, &r)
 	})
 	s.transport.RegisterHandler(protocol.MsgReplicateStream, func(ctx context.Context, req any) (any, error) {
-		return s.handleReplicate(ctx, req)
+		r := req.(protocol.ReplicateRequest)
+		return s.handleReplicate(ctx, &r)
 	})
 	// Producer
 	s.transport.RegisterHandler(protocol.MsgProduce, func(ctx context.Context, req any) (any, error) {

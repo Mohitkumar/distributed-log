@@ -65,6 +65,7 @@ type ReplicateRequest struct {
 	ReplicaNodeID string // leader caches reader per (topic, replica)
 }
 type ReplicateResponse struct {
+	Topic       string
 	RawChunk    []byte // raw segment-format records: [Offset 8][Len 4][Value]...
 	EndOfStream bool   // when true, leader has sent all data for this round; replica can send RecordLEO and next ReplicateRequest
 }
