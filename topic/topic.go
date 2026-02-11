@@ -58,6 +58,15 @@ func (tm *TopicManager) IsLeader(topic string) bool {
 	return leaderNode.NodeID == tm.currentNodeID()
 }
 
+// GetTopicLeaderRPCAddr returns the RPC address of the current leader for the given topic.
+func (tm *TopicManager) GetTopicLeaderRPCAddr(topic string) (string, error) {
+	leaderNode, err := tm.coordinator.GetTopicLeaderNode(topic)
+	if err != nil {
+		return "", err
+	}
+	return leaderNode.RPCAddr, nil
+}
+
 // applyDeleteTopicEventOnRaftLeader gets the Raft leader RPC address and calls ApplyDeleteTopicEvent there.
 func (tm *TopicManager) applyDeleteTopicEventOnRaftLeader(ctx context.Context, topic string) error {
 	client, err := tm.coordinator.GetRaftLeaderRemoteClient()

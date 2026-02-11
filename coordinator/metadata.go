@@ -139,10 +139,12 @@ func (ms *MetadataStore) Apply(ev *protocol.MetadataEvent) error {
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
 		}
-		if tm := ms.Topics[e.Topic]; tm != nil {
+		tm := ms.Topics[e.Topic]
+		if tm != nil {
 			tm.LeaderNodeID = e.LeaderNodeID
 			tm.LeaderEpoch = e.LeaderEpoch
 		}
+		delete(tm.Replicas, e.LeaderNodeID)
 	case protocol.MetadataEventTypeIsrUpdate:
 		e := protocol.IsrUpdateEvent{}
 		if err := json.Unmarshal(ev.Data, &e); err != nil {

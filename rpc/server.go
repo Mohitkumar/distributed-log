@@ -86,6 +86,11 @@ func (s *RpcServer) RegisterHandlers() {
 		r := req.(protocol.ApplyIsrUpdateEventRequest)
 		return s.ApplyIsrUpdateEvent(ctx, &r)
 	})
+	// Discovery
+	s.transport.RegisterHandler(protocol.MsgFindLeader, func(ctx context.Context, req any) (any, error) {
+		r := req.(protocol.FindLeaderRequest)
+		return s.FindLeader(ctx, &r)
+	})
 }
 
 func (s *RpcServer) Start() error {
