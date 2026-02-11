@@ -2,14 +2,12 @@ package topic
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/coordinator"
+	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/log"
 	"github.com/mohitkumar/mlog/protocol"
 	"go.uber.org/zap"
@@ -17,24 +15,21 @@ import (
 
 // In memory representation of a topic
 type Topic struct {
-	mu                sync.RWMutex
-	Name              string
-	LeaderNodeID      string
-	Log               *log.LogManager
-	Logger            *zap.Logger
-	stopChan          chan struct{}
-	stopOnce          sync.Once
-	replicationCancel context.CancelFunc
+	mu           sync.RWMutex
+	Name         string
+	LeaderNodeID string
+	Log          *log.LogManager
+	Logger       *zap.Logger
 }
 type TopicManager struct {
 	mu          sync.RWMutex
 	topics      map[string]*Topic
 	BaseDir     string
 	Logger      *zap.Logger
-	coordinator *coordinator.Coordinator
+	coordinator TopicCoordinator
 }
 
-func NewTopicManager(baseDir string, c *coordinator.Coordinator, logger *zap.Logger) (*TopicManager, error) {
+func NewTopicManager(baseDir string, c TopicCoordinator, logger *zap.Logger) (*TopicManager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -48,7 +43,10 @@ func NewTopicManager(baseDir string, c *coordinator.Coordinator, logger *zap.Log
 }
 
 func (tm *TopicManager) currentNodeID() string {
-	return tm.coordinator.GetCurrentNode().NodeID
+	if n := tm.coordinator.GetCurrentNode(); n != nil {
+		return n.NodeID
+	}
+	return ""
 }
 
 func (tm *TopicManager) IsLeader(topic string) bool {
@@ -150,7 +148,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	c := tm.coordinator
 
 	// We are the designated topic leader: create locally and return replica set for Raft leader to apply.
-	if req.DesignatedLeaderNodeID != "" && req.DesignatedLeaderNodeID == c.GetCurrentNode().NodeID {
+	if req.DesignatedLeaderNodeID != "" && c.GetCurrentNode() != nil && req.DesignatedLeaderNodeID == c.GetCurrentNode().NodeID {
 		tm.Logger.Info("creating topic as designated leader", zap.String("topic", req.Topic))
 		replicaNodeIds, err := tm.CreateTopic(req.Topic, int(req.ReplicaCount))
 		if err != nil {
@@ -184,15 +182,13 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		if err != nil {
 			return nil, ErrCreateTopic(err)
 		}
-		if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds); err != nil {
-			return nil, ErrApplyCreateTopic(err)
-		}
+		c.ApplyEvent(NewCreateTopicApplyEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds))
 		return &protocol.CreateTopicResponse{Topic: req.Topic, ReplicaNodeIds: replicaNodeIds}, nil
 	}
 	tm.Logger.Info("forwarding create topic to topic leader", zap.String("topic", req.Topic), zap.String("topic_leader_id", topicLeaderNode.NodeID), zap.String("topic_leader_addr", topicLeaderNode.RPCAddr))
 
 	// Forward to topic leader with DesignatedLeaderNodeID so it creates locally instead of forwarding back.
-	topicLeaderClient, err := topicLeaderNode.GetRpcClient()
+	topicLeaderClient, err := c.GetRpcClient(topicLeaderNode.NodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -203,9 +199,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 		return nil, ErrForwardToTopicLeader(err)
 	}
 	replicaNodeIds := resp.ReplicaNodeIds
-	if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds); err != nil {
-		return nil, ErrApplyCreateTopic(err)
-	}
+	c.ApplyEvent(NewCreateTopicApplyEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds))
 	return resp, nil
 }
 
@@ -232,7 +226,7 @@ func (tm *TopicManager) DeleteTopic(topic string) error {
 		return err
 	}
 	for _, replica := range replicaNodes {
-		replicaClient, err := replica.GetRpcClient()
+		replicaClient, err := tm.coordinator.GetRpcClient(replica.NodeID)
 		if err != nil {
 			continue
 		}
@@ -266,7 +260,7 @@ func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *prot
 	if err != nil {
 		return nil, ErrTopicNotFoundf(req.Topic)
 	}
-	leaderClient, err := leaderNode.GetRpcClient()
+	leaderClient, err := tm.coordinator.GetRpcClient(leaderNode.NodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -376,10 +370,7 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderId string) error
 	topicObj.Log = logManager
 	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_id", leaderId))
 
-	if err := tm.StartReplication(topicObj); err != nil {
-		return ErrStartReplication(err)
-	}
-
+	// Replication is driven by the coordinator replication thread (connection pipelining per leader).
 	return nil
 }
 
@@ -395,7 +386,6 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 
 	tm.Logger.Info("deleting replica for topic", zap.String("topic", topic))
 
-	tm.StopReplication(topicObj)
 	if topicObj.Log != nil {
 		topicObj.Log.Delete()
 		topicObj.Log = nil
@@ -410,139 +400,81 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 	return nil
 }
 
-// StartReplication starts the replication loop (topic must be a replica). Fetches from leader and appends to log; reports LEO.
-func (tm *TopicManager) StartReplication(t *Topic) error {
-	if t.LeaderNodeID == tm.currentNodeID() {
-		return fmt.Errorf("topic %s is leader, cannot start replication", t.Name)
-	}
-	t.mu.Lock()
-	if t.stopChan != nil {
-		t.mu.Unlock()
-		return ErrReplicationStartedf(t.Name)
-	}
-	t.stopChan = make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.replicationCancel = cancel
-	t.mu.Unlock()
+// ReplicationTarget implementation (coordinator calls these from its replication thread).
 
-	if t.Logger != nil {
-		t.Logger.Info("replication started for topic", zap.String("topic", t.Name))
+func (tm *TopicManager) ListReplicaTopics() []ReplicaTopicInfo {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	currentNodeID := tm.currentNodeID()
+	var out []ReplicaTopicInfo
+	for name, t := range tm.topics {
+		if t == nil || t.Log == nil || t.LeaderNodeID == currentNodeID {
+			continue
+		}
+		out = append(out, ReplicaTopicInfo{TopicName: name, LeaderNodeID: t.LeaderNodeID})
 	}
-	leaderNode, err := tm.coordinator.GetNode(t.LeaderNodeID)
+	return out
+}
+
+func (tm *TopicManager) GetLEO(topicName string) (uint64, bool) {
+	tm.mu.RLock()
+	t := tm.topics[topicName]
+	tm.mu.RUnlock()
+	if t == nil {
+		return 0, false
+	}
+	t.mu.RLock()
+	log := t.Log
+	t.mu.RUnlock()
+	if log == nil {
+		return 0, false
+	}
+	return log.LEO(), true
+}
+
+func (tm *TopicManager) ApplyChunk(topicName string, rawChunk []byte) error {
+	if len(rawChunk) == 0 {
+		return nil
+	}
+	records, err := protocol.DecodeReplicationBatch(rawChunk)
 	if err != nil {
 		return err
 	}
-	go tm.runReplication(t, leaderNode, ctx)
+	tm.mu.RLock()
+	t := tm.topics[topicName]
+	tm.mu.RUnlock()
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	log := t.Log
+	t.mu.RUnlock()
+	if log == nil {
+		return nil
+	}
+	for _, rec := range records {
+		if _, appendErr := log.Append(rec.Value); appendErr != nil {
+			return appendErr
+		}
+	}
 	return nil
 }
 
-func (tm *TopicManager) StopReplication(t *Topic) {
-	t.stopOnce.Do(func() {
-		if t.Logger != nil {
-			t.Logger.Info("stopping replication for topic", zap.String("topic", t.Name))
-		}
-		t.mu.Lock()
-		if t.replicationCancel != nil {
-			t.replicationCancel()
-			t.replicationCancel = nil
-		}
-		ch := t.stopChan
-		t.stopChan = nil
-		t.mu.Unlock()
-		if ch != nil {
-			close(ch)
-		}
-	})
-}
-
-func (tm *TopicManager) runReplication(t *Topic, leaderNode *coordinator.Node, ctx context.Context) {
-	backoff := 50 * time.Millisecond
-	maxBackoff := 1 * time.Second
-
-	for {
-		select {
-		case <-t.stopChan:
-			return
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		// Send one request to leader (non-blocking). Then block in apply loop until stream is done.
-		currentOffset := t.Log.LEO()
-		req := &protocol.ReplicateRequest{
-			Topic:     t.Name,
-			Offset:    currentOffset,
-			BatchSize: 1000,
-		}
-
-		leaderStreamClient, err := leaderNode.GetRpcStreamClient()
-		if err != nil {
-			if t.Logger != nil {
-				t.Logger.Warn("leader stream client not found, reconnecting", zap.String("topic", t.Name))
-			}
-			time.Sleep(backoff)
-			continue
-		}
-		if err := leaderStreamClient.ReplicateStream(ctx, req); err != nil {
-			if t.Logger != nil {
-				t.Logger.Warn("replicate stream error, reconnecting", zap.String("topic", t.Name), zap.Error(err))
-			}
-			time.Sleep(backoff)
-			if backoff < maxBackoff {
-				backoff *= 2
-			}
-			continue
-		}
-		backoff = 50 * time.Millisecond
-		tm.replicateStream(t, leaderStreamClient, leaderNode, ctx)
+func (tm *TopicManager) ReportLEO(ctx context.Context, topicName string, leaderNodeID string) error {
+	leaderNode, err := tm.coordinator.GetNode(leaderNodeID)
+	if err != nil || leaderNode == nil {
+		return err
 	}
-}
-
-func (tm *TopicManager) replicateStream(t *Topic, leaderStreamClient *client.RemoteStreamClient, leaderNode *coordinator.Node, ctx context.Context) {
-	for {
-		select {
-		case <-t.stopChan:
-			return
-		case <-ctx.Done():
-			return
-		default:
-		}
-		t.mu.RLock()
-		log := t.Log
-		t.mu.RUnlock()
-		if log == nil {
-			return
-		}
-
-		resp, err := leaderStreamClient.Recv()
-		if err != nil {
-			break
-		}
-		if len(resp.RawChunk) > 0 {
-			records, decodeErr := protocol.DecodeReplicationBatch(resp.RawChunk)
-			if decodeErr != nil {
-				break
-			}
-			var appendErr error
-			for _, rec := range records {
-				_, appendErr = log.Append(rec.Value)
-				if appendErr != nil {
-					break
-				}
-			}
-			if appendErr != nil {
-				break
-			}
-		}
-		if resp.EndOfStream {
-			_ = tm.reportLEO(ctx, t, leaderNode)
-			break
-		}
+	tm.mu.RLock()
+	t := tm.topics[topicName]
+	tm.mu.RUnlock()
+	if t == nil {
+		return nil
 	}
+	return tm.reportLEO(ctx, t, leaderNode)
 }
 
-func (tm *TopicManager) reportLEO(ctx context.Context, t *Topic, leaderNode *coordinator.Node) error {
+func (tm *TopicManager) reportLEO(ctx context.Context, t *Topic, leaderNode *common.Node) error {
 	t.mu.RLock()
 	log := t.Log
 	t.mu.RUnlock()
@@ -554,7 +486,7 @@ func (tm *TopicManager) reportLEO(ctx context.Context, t *Topic, leaderNode *coo
 		Topic:  t.Name,
 		Leo:    int64(log.LEO()),
 	}
-	leaderClient, err := leaderNode.GetRpcClient()
+	leaderClient, err := tm.coordinator.GetRpcClient(leaderNode.NodeID)
 	if err != nil {
 		return err
 	}
@@ -717,7 +649,6 @@ func (tm *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64,
 			isr = leo >= leaderLEO
 		}
 	}
-	tm.coordinator.UpdateTopicReplicaLEO(topic, nodeId, int64(leo), isr)
 
 	tm.maybeAdvanceHW(topicObj)
 	if err := tm.applyIsrUpdateEventOnRaftLeader(context.Background(), topic, nodeId, isr, int64(leo)); err != nil {

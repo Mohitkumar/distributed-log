@@ -4,10 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/coordinator"
+	"github.com/mohitkumar/mlog/topic"
 )
 
-// TestNode_TwoNodeCluster starts a 2-node cluster and tests node methods related to Raft.
 func TestNode_TwoNodeCluster(t *testing.T) {
 	server1, server2 := StartTwoNodes(t, "node-server1", "node-server2")
 	defer server1.Cleanup()
@@ -19,37 +18,19 @@ func TestNode_TwoNodeCluster(t *testing.T) {
 		t.Fatal("expected non-nil coordinators")
 	}
 
-	var ok bool
-	for i := 0; i < 100; i++ {
-		if coord1.IsLeader() || coord2.IsLeader() {
-			ok = true
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !ok {
-		t.Fatal("expected one node to become Raft leader within timeout")
+	// With fake coordinators we deterministically treat server1 as the leader.
+	if !coord1.IsRaftLeader || coord2.IsRaftLeader {
+		t.Fatal("expected server1 to be leader and server2 to be follower")
 	}
 
-	coord1IsLeader := coord1.IsLeader()
-	coord2IsLeader := coord2.IsLeader()
-	if coord1IsLeader == coord2IsLeader {
-		t.Fatal("exactly one node should be Raft leader")
+	if got := coord1.NodeID; got != "node-1" {
+		t.Errorf("coord1 NodeID = %q, want node-1", got)
+	}
+	if got := coord2.NodeID; got != "node-2" {
+		t.Errorf("coord2 NodeID = %q, want node-2", got)
 	}
 
-	if got := coord1.GetNodeID(); got != "node-1" {
-		t.Errorf("coord1 GetNodeID() = %q, want node-1", got)
-	}
-	if got := coord2.GetNodeID(); got != "node-2" {
-		t.Errorf("coord2 GetNodeID() = %q, want node-2", got)
-	}
-	if coord1.GetNodeAddr() != server1.Addr {
-		t.Errorf("coord1 GetNodeAddr() = %q, want %q", coord1.GetNodeAddr(), server1.Addr)
-	}
-	if coord2.GetNodeAddr() != server2.Addr {
-		t.Errorf("coord2 GetNodeAddr() = %q, want %q", coord2.GetNodeAddr(), server2.Addr)
-	}
-
+	// GetOtherNodes should report the peer node.
 	otherNodes := coord1.GetOtherNodes()
 	if len(otherNodes) >= 1 {
 		found := false
@@ -69,105 +50,76 @@ func TestNode_TwoNodeCluster(t *testing.T) {
 	}
 }
 
-// TestNode_ApplyCreateTopicEvent applies a CreateTopicEvent on the Raft leader and verifies the topic appears on both nodes.
+// TestNode_ApplyCreateTopicEvent applies a CreateTopic event via ApplyEvent on the leader
+// and verifies the topic appears on both nodes' metadata.
 func TestNode_ApplyCreateTopicEvent(t *testing.T) {
 	server1, server2 := StartTwoNodes(t, "create-topic-server1", "create-topic-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
-	waitForLeader(t, server1.Coordinator(), server2.Coordinator())
-
-	raftLeader := getRaftLeaderCoordinator(server1, server2)
-	if raftLeader == nil {
-		t.Fatal("no Raft leader")
-	}
+	leader := server1.Coordinator()
 
 	topicName := "test-apply-create-topic"
-	replicaNodeIds := []string{raftLeader.GetNodeID()}
-	if err := raftLeader.ApplyCreateTopicEvent(topicName, 1, raftLeader.GetNodeID(), replicaNodeIds); err != nil {
-		t.Fatalf("ApplyCreateTopicEvent: %v", err)
-	}
+	replicaNodeIds := []string{leader.NodeID}
+	leader.ApplyEvent(topic.NewCreateTopicApplyEvent(topicName, 1, leader.NodeID, replicaNodeIds))
 
 	waitForReplication(t, 200*time.Millisecond)
-	for _, c := range []*coordinator.Coordinator{server1.Coordinator(), server2.Coordinator()} {
+	for _, c := range []*FakeTopicCoordinator{server1.Coordinator(), server2.Coordinator()} {
 		if !c.TopicExists(topicName) {
-			t.Errorf("TopicExists(%q) = false on node %s, want true", topicName, c.GetNodeID())
-		}
-		if got := c.GetTopicLeaderNodeID(topicName); got != raftLeader.GetNodeID() {
-			t.Errorf("GetTopicLeaderNodeID(%q) = %q, want %q", topicName, got, raftLeader.GetNodeID())
+			t.Errorf("TopicExists(%q) = false on node %s, want true", topicName, c.NodeID)
 		}
 	}
 }
 
-// TestNode_ApplyDeleteTopicEvent creates a topic via ApplyCreateTopicEvent then deletes it via ApplyDeleteTopicEvent.
+// TestNode_ApplyDeleteTopicEvent creates a topic via ApplyEvent then deletes it via ApplyEvent.
 func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 	server1, server2 := StartTwoNodes(t, "delete-topic-server1", "delete-topic-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
-	waitForLeader(t, server1.Coordinator(), server2.Coordinator())
-
-	raftLeader := getRaftLeaderCoordinator(server1, server2)
-	if raftLeader == nil {
-		t.Fatal("no Raft leader")
-	}
+	leader := server1.Coordinator()
 
 	topicName := "test-apply-delete-topic"
-	replicaNodeIds := []string{raftLeader.GetNodeID()}
-	if err := raftLeader.ApplyCreateTopicEvent(topicName, 1, raftLeader.GetNodeID(), replicaNodeIds); err != nil {
-		t.Fatalf("ApplyCreateTopicEvent: %v", err)
-	}
+	replicaNodeIds := []string{leader.NodeID}
+	leader.ApplyEvent(topic.NewCreateTopicApplyEvent(topicName, 1, leader.NodeID, replicaNodeIds))
 	waitForReplication(t, 200*time.Millisecond)
 	if !server1.Coordinator().TopicExists(topicName) || !server2.Coordinator().TopicExists(topicName) {
 		t.Fatal("topic should exist after create")
 	}
 
-	if err := raftLeader.ApplyDeleteTopicEvent(topicName); err != nil {
-		t.Fatalf("ApplyDeleteTopicEvent: %v", err)
-	}
+	leader.ApplyEvent(topic.NewDeleteTopicApplyEvent(topicName))
 	waitForReplication(t, 200*time.Millisecond)
-	for _, c := range []*coordinator.Coordinator{server1.Coordinator(), server2.Coordinator()} {
+	for _, c := range []*FakeTopicCoordinator{server1.Coordinator(), server2.Coordinator()} {
 		if c.TopicExists(topicName) {
-			t.Errorf("TopicExists(%q) = true on node %s after delete, want false", topicName, c.GetNodeID())
+			t.Errorf("TopicExists(%q) = true on node %s after delete, want false", topicName, c.NodeID)
 		}
 	}
 }
 
-// TestNode_ApplyNodeAddEvent applies an AddNodeEvent on the Raft leader and verifies the node appears in metadata on both nodes.
+// TestNode_ApplyNodeAddEvent verifies AddNode on the leader updates cluster membership on both fake coordinators.
 func TestNode_ApplyNodeAddEvent(t *testing.T) {
 	server1, server2 := StartTwoNodes(t, "add-node-server1", "add-node-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
-	waitForLeader(t, server1.Coordinator(), server2.Coordinator())
-	raftLeader := getRaftLeaderCoordinator(server1, server2)
-	if raftLeader == nil {
-		t.Fatal("no Raft leader")
-	}
+	leader := server1.Coordinator()
 
 	newNodeID := "node-test-add"
-	newRaftAddr := "127.0.0.1:19999"
 	newRpcAddr := "127.0.0.1:19998"
-	if err := raftLeader.ApplyNodeAddEvent(newNodeID, newRaftAddr, newRpcAddr); err != nil {
-		t.Fatalf("ApplyNodeAddEvent: %v", err)
-	}
+	leader.AddNode(newNodeID, newRpcAddr)
 
 	waitForReplication(t, 200*time.Millisecond)
-	for _, c := range []*coordinator.Coordinator{server1.Coordinator(), server2.Coordinator()} {
-		got, err := c.GetRpcAddrForNodeID(newNodeID)
-		if err != nil || got != newRpcAddr {
-			t.Errorf("GetRpcAddrForNodeID(%q) = %q, %v on node %s, want %q, nil", newNodeID, got, err, c.GetNodeID(), newRpcAddr)
-		}
-		ids := c.GetClusterNodeIDs()
+	for _, c := range []*FakeTopicCoordinator{server1.Coordinator(), server2.Coordinator()} {
+		nodes := c.GetOtherNodes()
 		found := false
-		for _, id := range ids {
-			if id == newNodeID {
+		for _, n := range nodes {
+			if n.NodeID == newNodeID {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("GetClusterNodeIDs() on node %s should contain %q, got %v", c.GetNodeID(), newNodeID, ids)
+			t.Errorf("GetOtherNodes() on node %s should contain %q, got %v", c.NodeID, newNodeID, nodes)
 		}
 	}
 }

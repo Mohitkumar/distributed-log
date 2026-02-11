@@ -76,6 +76,10 @@ func (l *Log) Append(value []byte) (uint64, error) {
 		return 0, err
 	}
 	if l.activeSegment.IsFull() {
+		err := l.activeSegment.Close()
+		if err != nil {
+			return 0, err
+		}
 		l.activeSegment, err = segment.NewSegment(l.activeSegment.NextOffset, l.Dir)
 		if err != nil {
 			return 0, err
@@ -224,6 +228,12 @@ func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	}
 	l.mu.RUnlock()
 	return io.MultiReader(readers...), nil
+}
+
+func (l *Log) Flush() error {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.activeSegment.Flush()
 }
 
 func (l *Log) Delete() error {

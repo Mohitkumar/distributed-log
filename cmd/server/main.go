@@ -15,14 +15,15 @@ import (
 
 func main() {
 	var (
-		bindAddr      string
-		advertiseAddr string
-		rpcPort       int
-		dataDir       string
-		nodeID        string
-		peers         []string
-		raftAddr      string
-		bootstrap     bool
+		bindAddr            string
+		advertiseAddr       string
+		rpcPort             int
+		dataDir             string
+		nodeID              string
+		peers               []string
+		raftAddr            string
+		bootstrap           bool
+		replicationBatchSize uint32
 	)
 
 	rootCmd := &cobra.Command{
@@ -36,9 +37,10 @@ func main() {
 			raftAddr = viper.GetString("raft_addr")
 			bootstrap = viper.GetBool("bootstrap")
 			rpcPort = viper.GetInt("rpc-port")
+			replicationBatchSize = uint32(viper.GetInt("replication-batch-size"))
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := buildConfig(bindAddr, advertiseAddr, rpcPort, dataDir, nodeID, peers, raftAddr, bootstrap)
+			cfg, err := buildConfig(bindAddr, advertiseAddr, rpcPort, dataDir, nodeID, peers, raftAddr, bootstrap, replicationBatchSize)
 			if err != nil {
 				return err
 			}
@@ -65,6 +67,7 @@ func main() {
 	rootCmd.Flags().StringSliceVar(&peers, "peer", nil, "peer nodes (nodeID=addr) for discovery join, repeatable")
 	rootCmd.Flags().StringVar(&raftAddr, "raft-addr", "127.0.0.1:9093", "Raft transport address")
 	rootCmd.Flags().BoolVar(&bootstrap, "bootstrap", false, "Bootstrap the Raft cluster")
+	rootCmd.Flags().Uint32Var(&replicationBatchSize, "replication-batch-size", 5000, "Max records per topic per replication request")
 
 	viper.SetEnvPrefix("mlog")
 	viper.AutomaticEnv()
@@ -75,13 +78,14 @@ func main() {
 	viper.BindPFlag("raft_addr", rootCmd.Flags().Lookup("raft-addr"))
 	viper.BindPFlag("bootstrap", rootCmd.Flags().Lookup("bootstrap"))
 	viper.BindPFlag("rpc-port", rootCmd.Flags().Lookup("rpc-port"))
+	viper.BindPFlag("replication-batch-size", rootCmd.Flags().Lookup("replication-batch-size"))
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func buildConfig(bindAddr, advertiseAddr string, rpcPort int, dataDir, nodeID string, peers []string, raftAddr string, bootstrap bool) (config.Config, error) {
+func buildConfig(bindAddr, advertiseAddr string, rpcPort int, dataDir, nodeID string, peers []string, raftAddr string, bootstrap bool, replicationBatchSize uint32) (config.Config, error) {
 	startJoinAddrs := make([]string, 0, len(peers))
 	for _, p := range peers {
 		parts := strings.SplitN(p, "=", 2)
@@ -118,5 +122,8 @@ func buildConfig(bindAddr, advertiseAddr string, rpcPort int, dataDir, nodeID st
 			DataDir: dataDir,
 		},
 		RaftConfig: raftConfig,
+		Replication: config.ReplicationConfig{
+			BatchSize: replicationBatchSize,
+		},
 	}, nil
 }

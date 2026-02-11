@@ -10,7 +10,14 @@ type Config struct {
 	AdvertiseAddr  string // optional; hostname others use to reach us (e.g. node1). When set, Serf/Raft/RPC advertise this; bind with 0.0.0.0 in Docker.
 	NodeConfig     NodeConfig
 	RaftConfig     RaftConfig
+	Replication   ReplicationConfig
 	StartJoinAddrs []string
+}
+
+// ReplicationConfig holds replication thread settings.
+type ReplicationConfig struct {
+	// BatchSize is the max number of records to fetch per topic per replication request (0 = use default).
+	BatchSize uint32
 }
 
 type RaftConfig struct {
