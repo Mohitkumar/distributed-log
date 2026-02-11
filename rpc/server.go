@@ -11,19 +11,20 @@ import (
 
 // RpcServer holds topic manager and consumer manager for TCP transport RPCs.
 type RpcServer struct {
-	Addr                 string
-	topicManager         *topic.TopicManager
-	consumerManager      *consumermgr.ConsumerManager
-	transport            *transport.Transport
-	replicateReaderCache replicateReaderCache
+	Addr              string
+	topicManager      *topic.TopicManager
+	consumerManager   *consumermgr.ConsumerManager
+	transport         *transport.Transport
+	leaderReaderCache *LeaderReaderCache
 }
 
 func NewRpcServer(addr string, topicManager *topic.TopicManager, consumerManager *consumermgr.ConsumerManager) *RpcServer {
 	srv := &RpcServer{
-		Addr:            addr,
-		topicManager:    topicManager,
-		consumerManager: consumerManager,
-		transport:       transport.NewTransport(),
+		Addr:              addr,
+		topicManager:      topicManager,
+		consumerManager:   consumerManager,
+		transport:         transport.NewTransport(),
+		leaderReaderCache: NewLeaderReaderCache(),
 	}
 	srv.RegisterHandlers()
 	return srv
@@ -46,7 +47,7 @@ func (s *RpcServer) RegisterHandlers() {
 	})
 	s.transport.RegisterHandler(protocol.MsgReplicateStream, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.ReplicateRequest)
-		return s.handleReplicate(ctx, &r)
+		return s.handleReplicate(&r)
 	})
 	// Producer
 	s.transport.RegisterHandler(protocol.MsgProduce, func(ctx context.Context, req any) (any, error) {

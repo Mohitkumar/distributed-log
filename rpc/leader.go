@@ -2,10 +2,12 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"time"
 
+	"github.com/mohitkumar/mlog/log"
 	"github.com/mohitkumar/mlog/protocol"
 )
 
@@ -47,55 +49,56 @@ func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEOReques
 	return &protocol.RecordLEOResponse{}, nil
 }
 
-// replicateReaderCache caches a log reader per (topic, replica). nextOffset is the offset of the next record to read.
-// If req.Offset == nextOffset we reuse the reader; else we create a new reader at req.Offset.
-type replicateReaderCache struct {
-	mu      sync.Mutex
-	entries map[string]*cachedReplicateReader
+type LeaderReaderCache struct {
+	mu        sync.RWMutex
+	readerMap map[string]*LeaderCacheEntry
 }
 
-type cachedReplicateReader struct {
+func NewLeaderReaderCache() *LeaderReaderCache {
+	return &LeaderReaderCache{
+		readerMap: make(map[string]*LeaderCacheEntry),
+	}
+}
+
+type LeaderCacheEntry struct {
 	reader     io.Reader
-	nextOffset uint64 // offset of next record to read; updated after each batch
+	lastOffset uint64
 }
 
-// get returns a reader for the given key and request offset. If cached reader's nextOffset matches, reuse it; else create at offset.
-// Caller must call setNextOffset(lastReadOffset+1) after reading a batch so the next request can reuse.
-func (c *replicateReaderCache) get(key string, offset uint64, create func() (io.Reader, error)) (reader io.Reader, setNextOffset func(uint64), err error) {
+func (c *LeaderReaderCache) Get(topic string, offset uint64, leaderLog *log.LogManager) (io.Reader, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if entry, ok := c.readerMap[topic]; ok {
+		if offset != entry.lastOffset {
+			reader, err := leaderLog.ReaderFrom(offset)
+			if err != nil {
+				return nil, err
+			}
+			entry.reader = reader
+			entry.lastOffset = offset
+		}
+		return entry.reader, nil
+	}
+	reader, err := leaderLog.ReaderFrom(offset)
+	if err != nil {
+		return nil, err
+	}
+	c.readerMap[topic] = &LeaderCacheEntry{
+		reader:     reader,
+		lastOffset: offset,
+	}
+	return reader, nil
+}
+
+func (c *LeaderReaderCache) UpdateLastOffset(topic string, offset uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.entries == nil {
-		c.entries = make(map[string]*cachedReplicateReader)
+	if entry, ok := c.readerMap[topic]; ok {
+		entry.lastOffset = offset
 	}
-	entry := c.entries[key]
-	if entry != nil && entry.nextOffset == offset {
-		setNext := func(next uint64) {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			if e := c.entries[key]; e != nil {
-				e.nextOffset = next
-			}
-		}
-		return entry.reader, setNext, nil
-	}
-	reader, err = create()
-	if err != nil {
-		return nil, nil, err
-	}
-	c.entries[key] = &cachedReplicateReader{reader: reader, nextOffset: offset}
-	setNext := func(next uint64) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if e := c.entries[key]; e != nil {
-			e.nextOffset = next
-		}
-	}
-	return reader, setNext, nil
 }
 
-// handleReplicate handles one ReplicateRequest: returns one batch (or empty) and EndOfStream.
-// Leader caches reader per (topic, replica); if request offset matches cached reader offset we reuse it, else reinit reader at request offset.
-func (s *RpcServer) handleReplicate(ctx context.Context, req *protocol.ReplicateRequest) (any, error) {
+func (s *RpcServer) handleReplicate(req *protocol.ReplicateRequest) (any, error) {
 	leaderLog, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
 		if topicObj, e := s.topicManager.GetTopic(req.Topic); e == nil && topicObj != nil && topicObj.Log != nil {
@@ -106,34 +109,34 @@ func (s *RpcServer) handleReplicate(ctx context.Context, req *protocol.Replicate
 	if err != nil {
 		return nil, err
 	}
-	cacheKey := req.Topic + "\x00" + req.ReplicaNodeID
-	reader, setNextOffset, err := s.replicateReaderCache.get(cacheKey, req.Offset, func() (io.Reader, error) {
-		return leaderLog.ReaderFrom(req.Offset)
-	})
+
+	reader, err := s.leaderReaderCache.Get(req.Topic, req.Offset, leaderLog)
+
 	if err != nil {
 		return nil, err
 	}
-	batchSize := req.BatchSize
-	if batchSize == 0 {
-		batchSize = 1000
-	}
+
 	var batch []protocol.ReplicationRecord
+
+	var hitEOF bool
 	var lastOffset uint64
-	for len(batch) < int(batchSize) {
+	for len(batch) < int(req.BatchSize) {
 		offset, value, err := protocol.ReadRecordFromStream(reader)
+		fmt.Printf("handleReplicate: offset: %+v, value: %+v, err: %+v\n", offset, string(value), err)
 		if err == io.EOF {
+			hitEOF = true
 			break
 		}
 		if err != nil {
 			return nil, err
 		}
+
 		lastOffset = offset
 		batch = append(batch, protocol.ReplicationRecord{Offset: int64(offset), Value: value})
 	}
-	if len(batch) > 0 {
-		setNextOffset(lastOffset + 1)
-	}
-	endOfStream := len(batch) == 0
+	s.leaderReaderCache.UpdateLastOffset(req.Topic, lastOffset)
+	// EndOfStream when we reached end of log (EOF) or log was empty
+	endOfStream := hitEOF || len(batch) == 0
 	var rawChunk []byte
 	if len(batch) > 0 {
 		var encErr error

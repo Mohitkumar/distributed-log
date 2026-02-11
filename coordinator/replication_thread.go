@@ -58,10 +58,6 @@ func (c *Coordinator) ReplicateTopicsForLeader(ctx context.Context, leaderNodeID
 	return DoReplicateTopicsForLeader(ctx, target, c.GetReplicationClient, currentNodeID, leaderNodeID, topicNames)
 }
 
-// DoReplicateTopicsForLeader runs one leader's pipelined replication (used by Coordinator and by test fakes).
-// It sends one ReplicateRequest per topic on the same connection, reads responses, and matches by topic name
-// (response includes Topic) so order of responses does not have to match order of requests.
-// Repeats until all topics report EndOfStream or max rounds.
 func DoReplicateTopicsForLeader(
 	ctx context.Context,
 	target topic.ReplicationTarget,
