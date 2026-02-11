@@ -31,15 +31,17 @@ const (
 // Coordinator handles cluster-wide responsibility: Raft, metadata store, and membership (Join/Leave, Apply* events).
 // Addresses and RPC clients to other nodes live in Node; Coordinator holds the local Node and delegates to it where appropriate.
 type Coordinator struct {
-	mu            sync.RWMutex
-	Logger        *zap.Logger
-	raft          *raft.Raft
-	cfg           config.Config
-	metadataStore *MetadataStore
-	nodes         map[string]*common.Node
-	stopReconcile chan struct{}
-	applyCh       chan topic.ApplyEvent
-	stopApply     chan struct{}
+	mu              sync.RWMutex
+	Logger          *zap.Logger
+	raft            *raft.Raft
+	cfg             config.Config
+	metadataStore   *MetadataStore
+	nodes           map[string]*common.Node
+	stopReconcile   chan struct{}
+	applyCh         chan topic.ApplyEvent
+	stopApply       chan struct{}
+	stopReplication    chan struct{}
+	replicationTarget  topic.ReplicationTarget
 }
 
 // NewCoordinatorFromConfig creates a Coordinator from full config (replaces NewNodeFromConfig).
@@ -61,14 +63,15 @@ func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinat
 		return nil, err
 	}
 	c := &Coordinator{
-		Logger:        logger,
-		raft:          raftNode,
-		cfg:           cfg,
-		metadataStore: metadataStore,
-		nodes:         make(map[string]*common.Node),
-		stopReconcile: make(chan struct{}),
-		applyCh:       make(chan topic.ApplyEvent, 1024),
-		stopApply:     make(chan struct{}),
+		Logger:          logger,
+		raft:            raftNode,
+		cfg:             cfg,
+		metadataStore:   metadataStore,
+		nodes:           make(map[string]*common.Node),
+		stopReconcile:   make(chan struct{}),
+		applyCh:         make(chan topic.ApplyEvent, 1024),
+		stopApply:       make(chan struct{}),
+		stopReplication: make(chan struct{}),
 	}
 	c.nodes[cfg.NodeConfig.ID] = common.NewNode(cfg.NodeConfig.ID, rpcAddr)
 	c.Logger.Info("coordinator started", zap.String("raft_addr", cfg.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
@@ -150,14 +153,14 @@ func (c *Coordinator) GetRpcClient(nodeID string) (*client.RemoteClient, error) 
 	return n.GetRpcClient()
 }
 
-func (c *Coordinator) GetRpcStreamClient(nodeID string) (*client.RemoteStreamClient, error) {
+func (c *Coordinator) GetReplicationClient(nodeID string) (*client.RemoteClient, error) {
 	c.mu.RLock()
 	n := c.nodes[nodeID]
 	c.mu.RUnlock()
 	if n == nil {
 		return nil, ErrNodeNotFound
 	}
-	return n.GetRpcStreamClient()
+	return n.GetReplicationClient()
 }
 
 func (c *Coordinator) GetRaftLeaderRemoteClient() (*client.RemoteClient, error) {
@@ -177,14 +180,6 @@ func (c *Coordinator) GetTopicLeaderRemoteClient(topic string) (*client.RemoteCl
 		return nil, fmt.Errorf("topic %s not found", topic)
 	}
 	return c.GetRpcClient(tm.LeaderNodeID)
-}
-
-func (c *Coordinator) GetTopicLeaderRemoteStreamClient(topic string) (*client.RemoteStreamClient, error) {
-	tm := c.metadataStore.GetTopic(topic)
-	if tm == nil {
-		return nil, fmt.Errorf("topic %s not found", topic)
-	}
-	return c.GetRpcStreamClient(tm.LeaderNodeID)
 }
 
 func (c *Coordinator) GetClusterNodes() []*common.Node {
@@ -593,7 +588,14 @@ func (c *Coordinator) reconcileNodes() {
 func (c *Coordinator) Start() error {
 	go c.startReconcileNodes()
 	go c.startApplyLoop()
+	go c.startReplicationThread()
 	return nil
+}
+
+func (c *Coordinator) SetReplicationTarget(t topic.ReplicationTarget) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.replicationTarget = t
 }
 
 func (c *Coordinator) Shutdown() error {
@@ -601,6 +603,9 @@ func (c *Coordinator) Shutdown() error {
 	c.metadataStore.StopPeriodicLog()
 	c.stopReconcileNodes()
 	c.stopApplyLoop()
+	if c.stopReplication != nil {
+		close(c.stopReplication)
+	}
 	f := c.raft.Shutdown()
 	return f.Error()
 }

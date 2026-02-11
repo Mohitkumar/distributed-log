@@ -9,11 +9,11 @@ import (
 // Node holds this process's identity (addresses) and RPC clients to other nodes.
 // Cluster and Raft responsibility stays in Coordinator; Node is only addresses + client connections.
 type Node struct {
-	mu           sync.RWMutex
-	NodeID       string
-	RPCAddr      string
-	remoteClient *client.RemoteClient
-	streamClient *client.RemoteStreamClient
+	mu                sync.RWMutex
+	NodeID            string
+	RPCAddr           string
+	remoteClient      *client.RemoteClient
+	replicationClient *client.RemoteClient // dedicated connection for replication; multiplexed for all topics
 }
 
 func NewNode(nodeID, nodeRPCAddr string) *Node {
@@ -44,15 +44,15 @@ func (n *Node) GetRpcClient() (*client.RemoteClient, error) {
 	return n.remoteClient, nil
 }
 
-func (n *Node) GetRpcStreamClient() (*client.RemoteStreamClient, error) {
+func (n *Node) GetReplicationClient() (*client.RemoteClient, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.streamClient == nil {
-		streamClient, err := client.NewRemoteStreamClient(n.RPCAddr)
+	if n.replicationClient == nil {
+		replClient, err := client.NewRemoteClient(n.RPCAddr)
 		if err != nil {
 			return nil, err
 		}
-		n.streamClient = streamClient
+		n.replicationClient = replClient
 	}
-	return n.streamClient, nil
+	return n.replicationClient, nil
 }

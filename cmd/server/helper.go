@@ -87,6 +87,7 @@ func (cmdHelper *CommandHelper) setupTopicManager() error {
 	if err := topicMgr.RestoreFromMetadata(); err != nil {
 		return fmt.Errorf("restore topic manager from metadata: %w", err)
 	}
+	cmdHelper.coord.SetReplicationTarget(topicMgr)
 	return nil
 }
 

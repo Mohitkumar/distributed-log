@@ -1,11 +1,14 @@
 package tests
 
 import (
+	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
+	"github.com/mohitkumar/mlog/coordinator"
 	"github.com/mohitkumar/mlog/topic"
 )
 
@@ -23,6 +26,9 @@ type FakeTopicCoordinator struct {
 	Nodes    map[string]*common.Node                    // nodeID -> node
 	Topics   map[string]*fakeTopicMeta                  // topic -> meta
 	Replicas map[string]map[string]*common.ReplicaState // topic -> replicaNodeID -> state
+
+	replicationTarget topic.ReplicationTarget
+	stopReplication   chan struct{}
 }
 
 type fakeTopicMeta struct {
@@ -84,14 +90,14 @@ func (f *FakeTopicCoordinator) GetRpcClient(nodeID string) (*client.RemoteClient
 	return client.NewRemoteClient(n.RPCAddr)
 }
 
-func (f *FakeTopicCoordinator) GetRpcStreamClient(nodeID string) (*client.RemoteStreamClient, error) {
+func (f *FakeTopicCoordinator) GetReplicationClient(nodeID string) (*client.RemoteClient, error) {
 	f.mu.RLock()
 	n, ok := f.Nodes[nodeID]
 	f.mu.RUnlock()
 	if !ok || n == nil {
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
-	return client.NewRemoteStreamClient(n.RPCAddr)
+	return client.NewRemoteClient(n.RPCAddr)
 }
 
 func (f *FakeTopicCoordinator) IsLeader() bool {
@@ -217,6 +223,63 @@ func (f *FakeTopicCoordinator) AddNode(nodeID, rpcAddr string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Nodes[nodeID] = &common.Node{NodeID: nodeID, RPCAddr: rpcAddr}
+}
+
+func (f *FakeTopicCoordinator) SetReplicationTarget(t topic.ReplicationTarget) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replicationTarget = t
+}
+
+func (f *FakeTopicCoordinator) StartReplicationThread() {
+	f.mu.Lock()
+	if f.stopReplication != nil {
+		f.mu.Unlock()
+		return
+	}
+	f.stopReplication = make(chan struct{})
+	f.mu.Unlock()
+	go f.runReplicationThread()
+}
+
+func (f *FakeTopicCoordinator) StopReplicationThread() {
+	f.mu.Lock()
+	ch := f.stopReplication
+	f.stopReplication = nil
+	f.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+func (f *FakeTopicCoordinator) runReplicationThread() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-f.stopReplication:
+			return
+		case <-ticker.C:
+			f.replicateAllTopics()
+		}
+	}
+}
+
+func (f *FakeTopicCoordinator) replicateAllTopics() {
+	f.mu.RLock()
+	target := f.replicationTarget
+	f.mu.RUnlock()
+	if target == nil {
+		return
+	}
+	leaderToTopics := make(map[string][]string)
+	for _, info := range target.ListReplicaTopics() {
+		leaderToTopics[info.LeaderNodeID] = append(leaderToTopics[info.LeaderNodeID], info.TopicName)
+	}
+	ctx := context.Background()
+	for leaderID, topicNames := range leaderToTopics {
+		_ = coordinator.DoReplicateTopicsForLeader(ctx, target, f.GetReplicationClient, f.NodeID, leaderID, topicNames)
+	}
 }
 
 func (f *FakeTopicCoordinator) ApplyEvent(ev topic.ApplyEvent) {

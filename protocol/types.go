@@ -59,9 +59,10 @@ type RecordLEORequest struct {
 }
 type RecordLEOResponse struct{}
 type ReplicateRequest struct {
-	Topic     string
-	Offset    uint64
-	BatchSize uint32
+	Topic         string
+	Offset        uint64 // replica LEO; leader streams from this offset
+	BatchSize     uint32
+	ReplicaNodeID string // leader caches reader per (topic, replica)
 }
 type ReplicateResponse struct {
 	RawChunk    []byte // raw segment-format records: [Offset 8][Len 4][Value]...

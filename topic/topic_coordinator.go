@@ -1,6 +1,8 @@
 package topic
 
 import (
+	"context"
+
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
 )
@@ -81,7 +83,7 @@ type TopicCoordinator interface {
 	GetNode(nodeID string) (*common.Node, error)
 	GetOtherNodes() []*common.Node
 	GetRpcClient(nodeID string) (*client.RemoteClient, error)
-	GetRpcStreamClient(nodeID string) (*client.RemoteStreamClient, error)
+	GetReplicationClient(nodeID string) (*client.RemoteClient, error)
 
 	// Raft leader
 	IsLeader() bool
@@ -97,4 +99,20 @@ type TopicCoordinator interface {
 
 	// ApplyEvent enqueues an apply request to the coordinator implementation.
 	ApplyEvent(ev ApplyEvent)
+}
+
+// ReplicaTopicInfo identifies a topic this node replicates from a given leader.
+type ReplicaTopicInfo struct {
+	TopicName    string
+	LeaderNodeID string
+}
+
+// ReplicationTarget is used by the coordinator to drive replication.
+// TopicManager implements this; the coordinator holds a reference and calls it from its replication thread.
+type ReplicationTarget interface {
+	// ListReplicaTopics returns all topics this node replicates (topic name + leader node ID).
+	ListReplicaTopics() []ReplicaTopicInfo
+	GetLEO(topicName string) (leo uint64, ok bool)
+	ApplyChunk(topicName string, rawChunk []byte) error
+	ReportLEO(ctx context.Context, topicName string, leaderNodeID string) error
 }

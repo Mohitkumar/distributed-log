@@ -7,42 +7,6 @@ import (
 	"github.com/mohitkumar/mlog/transport"
 )
 
-// RemoteStreamClient is a dedicated client for the replication stream only.
-// It sends one ReplicateRequest and then reads ReplicateResponse frames until EndOfStream.
-// Use this for replication;
-type RemoteStreamClient struct {
-	tc *transport.TransportClient
-}
-
-func NewRemoteStreamClient(addr string) (*RemoteStreamClient, error) {
-	tc, err := transport.Dial(addr)
-	if err != nil {
-		return nil, err
-	}
-	return &RemoteStreamClient{tc: tc}, nil
-}
-
-// ReplicateStream sends one ReplicateRequest on the connection; the leader then streams raw bytes until EndOfStream.
-// Call Recv() in a loop to read each ReplicateResponse (RawChunk + EndOfStream).
-func (c *RemoteStreamClient) ReplicateStream(ctx context.Context, req *protocol.ReplicateRequest) error {
-	return c.tc.Write(*req)
-}
-
-// Recv reads the next ReplicateResponse from the stream. Call after ReplicateStream; loop until resp.EndOfStream.
-func (c *RemoteStreamClient) Recv() (*protocol.ReplicateResponse, error) {
-	resp, err := c.tc.ReadResponse()
-	if err != nil {
-		return nil, err
-	}
-	rep := resp.(protocol.ReplicateResponse)
-	return &rep, nil
-}
-
-// Close closes the underlying transport connection.
-func (c *RemoteStreamClient) Close() error {
-	return c.tc.Close()
-}
-
 type RemoteClient struct {
 	tc *transport.TransportClient
 }
@@ -120,4 +84,35 @@ func (c *RemoteClient) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.Ap
 	}
 	r := resp.(protocol.ApplyIsrUpdateEventResponse)
 	return &r, nil
+}
+
+// Replicate sends one ReplicateRequest and returns one ReplicateResponse (one batch).
+// Use a dedicated replication client and call in a loop until resp.EndOfStream.
+func (c *RemoteClient) Replicate(ctx context.Context, req *protocol.ReplicateRequest) (*protocol.ReplicateResponse, error) {
+	resp, err := c.tc.Call(*req)
+	if err != nil {
+		return nil, err
+	}
+	r := resp.(protocol.ReplicateResponse)
+	return &r, nil
+}
+
+// ReplicatePipeline sends multiple ReplicateRequests on the same connection without waiting for responses (connection pipelining),
+// then reads the same number of responses in order. Response i corresponds to request i.
+// Use one replication client per leader and pipeline requests for all topics that replicate from that leader.
+func (c *RemoteClient) ReplicatePipeline(requests []protocol.ReplicateRequest) ([]protocol.ReplicateResponse, error) {
+	for i := range requests {
+		if err := c.tc.Write(requests[i]); err != nil {
+			return nil, err
+		}
+	}
+	responses := make([]protocol.ReplicateResponse, len(requests))
+	for i := range responses {
+		resp, err := c.tc.ReadResponse()
+		if err != nil {
+			return nil, err
+		}
+		responses[i] = resp.(protocol.ReplicateResponse)
+	}
+	return responses, nil
 }

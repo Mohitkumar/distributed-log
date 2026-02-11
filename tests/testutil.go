@@ -65,6 +65,7 @@ func (ts *TestServer) Coordinator() *FakeTopicCoordinator {
 
 // Cleanup closes all resources associated with the test server.
 func (ts *TestServer) Cleanup() {
+	ts.coord.StopReplicationThread()
 	_ = ts.srv.Stop()
 }
 
@@ -178,6 +179,10 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	// Deterministically treat server1 as "leader" for tests that care.
 	fake1.IsRaftLeader = true
 	fake2.IsRaftLeader = false
+
+	// Follower runs replication thread (pipelined replication from leader).
+	fake2.SetReplicationTarget(server2TopicMgr)
+	fake2.StartReplicationThread()
 
 	server1 := &TestServer{
 		TestServerComponents: &TestServerComponents{

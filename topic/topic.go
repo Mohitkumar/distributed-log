@@ -2,13 +2,11 @@ package topic
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/log"
 	"github.com/mohitkumar/mlog/protocol"
@@ -17,14 +15,11 @@ import (
 
 // In memory representation of a topic
 type Topic struct {
-	mu                sync.RWMutex
-	Name              string
-	LeaderNodeID      string
-	Log               *log.LogManager
-	Logger            *zap.Logger
-	stopChan          chan struct{}
-	stopOnce          sync.Once
-	replicationCancel context.CancelFunc
+	mu           sync.RWMutex
+	Name         string
+	LeaderNodeID string
+	Log          *log.LogManager
+	Logger       *zap.Logger
 }
 type TopicManager struct {
 	mu          sync.RWMutex
@@ -375,10 +370,7 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderId string) error
 	topicObj.Log = logManager
 	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_id", leaderId))
 
-	if err := tm.StartReplication(topicObj); err != nil {
-		return ErrStartReplication(err)
-	}
-
+	// Replication is driven by the coordinator replication thread (connection pipelining per leader).
 	return nil
 }
 
@@ -394,7 +386,6 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 
 	tm.Logger.Info("deleting replica for topic", zap.String("topic", topic))
 
-	tm.StopReplication(topicObj)
 	if topicObj.Log != nil {
 		topicObj.Log.Delete()
 		topicObj.Log = nil
@@ -409,136 +400,78 @@ func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
 	return nil
 }
 
-// StartReplication starts the replication loop (topic must be a replica). Fetches from leader and appends to log; reports LEO.
-func (tm *TopicManager) StartReplication(t *Topic) error {
-	if t.LeaderNodeID == tm.currentNodeID() {
-		return fmt.Errorf("topic %s is leader, cannot start replication", t.Name)
-	}
-	t.mu.Lock()
-	if t.stopChan != nil {
-		t.mu.Unlock()
-		return ErrReplicationStartedf(t.Name)
-	}
-	t.stopChan = make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.replicationCancel = cancel
-	t.mu.Unlock()
+// ReplicationTarget implementation (coordinator calls these from its replication thread).
 
-	if t.Logger != nil {
-		t.Logger.Info("replication started for topic", zap.String("topic", t.Name))
+func (tm *TopicManager) ListReplicaTopics() []ReplicaTopicInfo {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	currentNodeID := tm.currentNodeID()
+	var out []ReplicaTopicInfo
+	for name, t := range tm.topics {
+		if t == nil || t.Log == nil || t.LeaderNodeID == currentNodeID {
+			continue
+		}
+		out = append(out, ReplicaTopicInfo{TopicName: name, LeaderNodeID: t.LeaderNodeID})
 	}
-	leaderNode, err := tm.coordinator.GetNode(t.LeaderNodeID)
+	return out
+}
+
+func (tm *TopicManager) GetLEO(topicName string) (uint64, bool) {
+	tm.mu.RLock()
+	t := tm.topics[topicName]
+	tm.mu.RUnlock()
+	if t == nil {
+		return 0, false
+	}
+	t.mu.RLock()
+	log := t.Log
+	t.mu.RUnlock()
+	if log == nil {
+		return 0, false
+	}
+	return log.LEO(), true
+}
+
+func (tm *TopicManager) ApplyChunk(topicName string, rawChunk []byte) error {
+	if len(rawChunk) == 0 {
+		return nil
+	}
+	records, err := protocol.DecodeReplicationBatch(rawChunk)
 	if err != nil {
 		return err
 	}
-	go tm.runReplication(t, leaderNode, ctx)
+	tm.mu.RLock()
+	t := tm.topics[topicName]
+	tm.mu.RUnlock()
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	log := t.Log
+	t.mu.RUnlock()
+	if log == nil {
+		return nil
+	}
+	for _, rec := range records {
+		if _, appendErr := log.Append(rec.Value); appendErr != nil {
+			return appendErr
+		}
+	}
 	return nil
 }
 
-func (tm *TopicManager) StopReplication(t *Topic) {
-	t.stopOnce.Do(func() {
-		if t.Logger != nil {
-			t.Logger.Info("stopping replication for topic", zap.String("topic", t.Name))
-		}
-		t.mu.Lock()
-		if t.replicationCancel != nil {
-			t.replicationCancel()
-			t.replicationCancel = nil
-		}
-		ch := t.stopChan
-		t.stopChan = nil
-		t.mu.Unlock()
-		if ch != nil {
-			close(ch)
-		}
-	})
-}
-
-func (tm *TopicManager) runReplication(t *Topic, leaderNode *common.Node, ctx context.Context) {
-	backoff := 50 * time.Millisecond
-	maxBackoff := 1 * time.Second
-
-	for {
-		select {
-		case <-t.stopChan:
-			return
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		// Send one request to leader (non-blocking). Then block in apply loop until stream is done.
-		currentOffset := t.Log.LEO()
-		req := &protocol.ReplicateRequest{
-			Topic:     t.Name,
-			Offset:    currentOffset,
-			BatchSize: 1000,
-		}
-
-		leaderStreamClient, err := tm.coordinator.GetRpcStreamClient(leaderNode.NodeID)
-		if err != nil {
-			if t.Logger != nil {
-				t.Logger.Warn("leader stream client not found, reconnecting", zap.String("topic", t.Name))
-			}
-			time.Sleep(backoff)
-			continue
-		}
-		if err := leaderStreamClient.ReplicateStream(ctx, req); err != nil {
-			if t.Logger != nil {
-				t.Logger.Warn("replicate stream error, reconnecting", zap.String("topic", t.Name), zap.Error(err))
-			}
-			time.Sleep(backoff)
-			if backoff < maxBackoff {
-				backoff *= 2
-			}
-			continue
-		}
-		backoff = 50 * time.Millisecond
-		tm.replicateStream(t, leaderStreamClient, leaderNode, ctx)
+func (tm *TopicManager) ReportLEO(ctx context.Context, topicName string, leaderNodeID string) error {
+	leaderNode, err := tm.coordinator.GetNode(leaderNodeID)
+	if err != nil || leaderNode == nil {
+		return err
 	}
-}
-
-func (tm *TopicManager) replicateStream(t *Topic, leaderStreamClient *client.RemoteStreamClient, leaderNode *common.Node, ctx context.Context) {
-	for {
-		select {
-		case <-t.stopChan:
-			return
-		case <-ctx.Done():
-			return
-		default:
-		}
-		t.mu.RLock()
-		log := t.Log
-		t.mu.RUnlock()
-		if log == nil {
-			return
-		}
-
-		resp, err := leaderStreamClient.Recv()
-		if err != nil {
-			break
-		}
-		if len(resp.RawChunk) > 0 {
-			records, decodeErr := protocol.DecodeReplicationBatch(resp.RawChunk)
-			if decodeErr != nil {
-				break
-			}
-			var appendErr error
-			for _, rec := range records {
-				_, appendErr = log.Append(rec.Value)
-				if appendErr != nil {
-					break
-				}
-			}
-			if appendErr != nil {
-				break
-			}
-		}
-		if resp.EndOfStream {
-			_ = tm.reportLEO(ctx, t, leaderNode)
-			break
-		}
+	tm.mu.RLock()
+	t := tm.topics[topicName]
+	tm.mu.RUnlock()
+	if t == nil {
+		return nil
 	}
+	return tm.reportLEO(ctx, t, leaderNode)
 }
 
 func (tm *TopicManager) reportLEO(ctx context.Context, t *Topic, leaderNode *common.Node) error {

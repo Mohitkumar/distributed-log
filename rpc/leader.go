@@ -3,7 +3,7 @@ package rpc
 import (
 	"context"
 	"io"
-	"net"
+	"sync"
 	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
@@ -47,14 +47,57 @@ func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEOReques
 	return &protocol.RecordLEOResponse{}, nil
 }
 
-// handleReplicateStream runs on a persistent connection: reads records from the leader log
-// from req.Offset, batches them (Kafka-style batch: baseOffset, batchLength, leaderEpoch, crc,
-// attributes, lastOffsetDelta, then records [offset+size+value]), and sends each batch to the replica
-// until caught up, then sends EndOfStream.
-func (s *RpcServer) handleReplicateStream(ctx context.Context, msg any, conn net.Conn, codec *protocol.Codec) error {
+// replicateReaderCache caches a log reader per (topic, replica). nextOffset is the offset of the next record to read.
+// If req.Offset == nextOffset we reuse the reader; else we create a new reader at req.Offset.
+type replicateReaderCache struct {
+	mu      sync.Mutex
+	entries map[string]*cachedReplicateReader
+}
+
+type cachedReplicateReader struct {
+	reader     io.Reader
+	nextOffset uint64 // offset of next record to read; updated after each batch
+}
+
+// get returns a reader for the given key and request offset. If cached reader's nextOffset matches, reuse it; else create at offset.
+// Caller must call setNextOffset(lastReadOffset+1) after reading a batch so the next request can reuse.
+func (c *replicateReaderCache) get(key string, offset uint64, create func() (io.Reader, error)) (reader io.Reader, setNextOffset func(uint64), err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]*cachedReplicateReader)
+	}
+	entry := c.entries[key]
+	if entry != nil && entry.nextOffset == offset {
+		setNext := func(next uint64) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if e := c.entries[key]; e != nil {
+				e.nextOffset = next
+			}
+		}
+		return entry.reader, setNext, nil
+	}
+	reader, err = create()
+	if err != nil {
+		return nil, nil, err
+	}
+	c.entries[key] = &cachedReplicateReader{reader: reader, nextOffset: offset}
+	setNext := func(next uint64) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if e := c.entries[key]; e != nil {
+			e.nextOffset = next
+		}
+	}
+	return reader, setNext, nil
+}
+
+// handleReplicate handles one ReplicateRequest: returns one batch (or empty) and EndOfStream.
+// Leader caches reader per (topic, replica); if request offset matches cached reader offset we reuse it, else reinit reader at request offset.
+func (s *RpcServer) handleReplicate(ctx context.Context, msg any) (any, error) {
 	req := msg.(protocol.ReplicateRequest)
 	leaderLog, err := s.topicManager.GetLeader(req.Topic)
-	// If metadata says we're not leader but we have the topic locally (e.g. we just created it and metadata not applied yet), use local log.
 	if err != nil {
 		if topicObj, e := s.topicManager.GetTopic(req.Topic); e == nil && topicObj != nil && topicObj.Log != nil {
 			leaderLog = topicObj.Log
@@ -62,48 +105,43 @@ func (s *RpcServer) handleReplicateStream(ctx context.Context, msg any, conn net
 		}
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	reader, err := leaderLog.ReaderFrom(req.Offset)
+	cacheKey := req.Topic + "\x00" + req.ReplicaNodeID
+	reader, setNextOffset, err := s.replicateReaderCache.get(cacheKey, req.Offset, func() (io.Reader, error) {
+		return leaderLog.ReaderFrom(req.Offset)
+	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	batchSize := req.BatchSize
 	if batchSize == 0 {
 		batchSize = 1000
 	}
 	var batch []protocol.ReplicationRecord
-	for {
+	var lastOffset uint64
+	for len(batch) < int(batchSize) {
 		offset, value, err := protocol.ReadRecordFromStream(reader)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
+		lastOffset = offset
 		batch = append(batch, protocol.ReplicationRecord{Offset: int64(offset), Value: value})
-		if len(batch) >= int(batchSize) {
-			payload, err := protocol.EncodeReplicationBatch(batch)
-			if err != nil {
-				return err
-			}
-			if err := codec.Encode(conn, &protocol.ReplicateResponse{RawChunk: payload, EndOfStream: false}); err != nil {
-				return err
-			}
-			batch = batch[:0]
-		}
 	}
 	if len(batch) > 0 {
-		payload, err := protocol.EncodeReplicationBatch(batch)
-		if err != nil {
-			return err
-		}
-		if err := codec.Encode(conn, &protocol.ReplicateResponse{RawChunk: payload, EndOfStream: false}); err != nil {
-			return err
+		setNextOffset(lastOffset + 1)
+	}
+	endOfStream := len(batch) == 0
+	var rawChunk []byte
+	if len(batch) > 0 {
+		var encErr error
+		rawChunk, encErr = protocol.EncodeReplicationBatch(batch)
+		if encErr != nil {
+			return nil, encErr
 		}
 	}
-	if err := codec.Encode(conn, &protocol.ReplicateResponse{RawChunk: nil, EndOfStream: true}); err != nil {
-		return err
-	}
-	return nil
+	return protocol.ReplicateResponse{RawChunk: rawChunk, EndOfStream: endOfStream}, nil
 }
