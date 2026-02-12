@@ -8,7 +8,6 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
-	"github.com/mohitkumar/mlog/coordinator"
 	"github.com/mohitkumar/mlog/topic"
 )
 
@@ -27,7 +26,7 @@ type FakeTopicCoordinator struct {
 	Topics   map[string]*fakeTopicMeta                  // topic -> meta
 	Replicas map[string]map[string]*common.ReplicaState // topic -> replicaNodeID -> state
 
-	replicationTarget topic.ReplicationTarget
+	replicationTarget *topic.TopicManager
 	stopReplication   chan struct{}
 }
 
@@ -218,6 +217,44 @@ func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID stri
 	return nil
 }
 
+// TopicCoordinator interface: apply events (update in-memory state for tests).
+
+func (f *FakeTopicCoordinator) ApplyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.applyCreateTopicEvent(topicName, replicaCount, leaderNodeID, replicaNodeIds)
+}
+
+func (f *FakeTopicCoordinator) ApplyDeleteTopicEventInternal(topicName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.applyDeleteTopicEvent(topicName)
+}
+
+func (f *FakeTopicCoordinator) ApplyIsrUpdateEventInternal(topicName, replicaNodeID string, isr bool, leo int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.applyIsrUpdateEvent(topicName, replicaNodeID, isr, leo)
+}
+
+func (f *FakeTopicCoordinator) ApplyLeaderChangeEvent(topicName, leaderNodeID string, leaderEpoch int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if meta := f.Topics[topicName]; meta != nil {
+		meta.LeaderNodeID = leaderNodeID
+	}
+	return nil
+}
+
+func (f *FakeTopicCoordinator) GetRaftLeaderNodeID() (string, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.IsRaftLeader {
+		return f.NodeID, nil
+	}
+	return "", fmt.Errorf("not raft leader")
+}
+
 // AddNode adds a node to the fake cluster (for multi-node tests without Raft).
 func (f *FakeTopicCoordinator) AddNode(nodeID, rpcAddr string) {
 	f.mu.Lock()
@@ -225,7 +262,7 @@ func (f *FakeTopicCoordinator) AddNode(nodeID, rpcAddr string) {
 	f.Nodes[nodeID] = &common.Node{NodeID: nodeID, RPCAddr: rpcAddr}
 }
 
-func (f *FakeTopicCoordinator) SetReplicationTarget(t topic.ReplicationTarget) {
+func (f *FakeTopicCoordinator) SetReplicationTarget(t *topic.TopicManager) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.replicationTarget = t
@@ -278,7 +315,7 @@ func (f *FakeTopicCoordinator) replicateAllTopics() {
 	}
 	ctx := context.Background()
 	for leaderID, topicNames := range leaderToTopics {
-		_ = coordinator.DoReplicateTopicsForLeader(ctx, target, f.GetReplicationClient, f.NodeID, leaderID, topicNames, 5000)
+		_ = replication.DoReplicateTopicsForLeader(ctx, target, f.GetReplicationClient, f.NodeID, leaderID, topicNames, 5000)
 	}
 }
 

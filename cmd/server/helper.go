@@ -56,12 +56,23 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 	logger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(0))
 	logger = logger.With(zap.String("node_id", cmdHelper.NodeConfig.ID))
 	zap.ReplaceGlobals(logger)
-	coord, err := coordinator.NewCoordinatorFromConfig(cmdHelper.Config, logger)
+
+	// TopicManager implements MetadataStore; create it first so Coordinator can use it.
+	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, nil, logger)
+	if err != nil {
+		logger.Sync()
+		return fmt.Errorf("create topic manager: %w", err)
+	}
+	coord, err := coordinator.NewCoordinatorFromConfig(cmdHelper.Config, topicMgr, logger)
 	if err != nil {
 		logger.Sync()
 		return err
 	}
+	topicMgr.SetCoordinator(coord)
+	topicMgr.SetCurrentNodeID(cmdHelper.NodeConfig.ID)
 	cmdHelper.coord = coord
+	cmdHelper.topicMgr = topicMgr
+
 	if cmdHelper.RaftConfig.Boostatrap {
 		if err := cmdHelper.coord.WaitForLeader(30 * time.Second); err != nil {
 			return fmt.Errorf("wait for leader: %w", err)
@@ -76,18 +87,13 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 }
 
 func (cmdHelper *CommandHelper) setupTopicManager() error {
-	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, cmdHelper.coord, cmdHelper.coord.Logger)
-	if err != nil {
-		return fmt.Errorf("create topic manager: %w", err)
-	}
-	cmdHelper.topicMgr = topicMgr
 	if err := cmdHelper.coord.WaitforRaftReadyWithRetryBackoff(RaftReadyTimeout, 2); err != nil {
 		cmdHelper.coord.Logger.Warn("Raft not ready before restore (continuing anyway)", zap.Error(err))
 	}
-	if err := topicMgr.RestoreFromMetadata(); err != nil {
+	if err := cmdHelper.topicMgr.RestoreFromMetadata(); err != nil {
 		return fmt.Errorf("restore topic manager from metadata: %w", err)
 	}
-	cmdHelper.coord.SetReplicationTarget(topicMgr)
+	cmdHelper.topicMgr.StartReplicationThread()
 	return nil
 }
 

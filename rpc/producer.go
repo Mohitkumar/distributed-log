@@ -11,7 +11,8 @@ func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest)
 	if err != nil {
 		return nil, ErrTopicNotFound(req.Topic, err)
 	}
-	if !srv.topicManager.IsLeader(req.Topic) {
+	isLeader, _ := srv.topicManager.IsLeader(req.Topic)
+	if !isLeader {
 		return nil, ErrNotTopicLeader
 	}
 
@@ -36,7 +37,8 @@ func (srv *RpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBat
 	if err != nil {
 		return nil, ErrTopicNotFound(req.Topic, err)
 	}
-	if !srv.topicManager.IsLeader(req.Topic) {
+	isLeader, _ := srv.topicManager.IsLeader(req.Topic)
+	if !isLeader {
 		return nil, ErrNotTopicLeader
 	}
 

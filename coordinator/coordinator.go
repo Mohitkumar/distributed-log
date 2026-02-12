@@ -52,9 +52,10 @@ func NewCoordinatorFromConfig(cfg config.Config, metadataStore MetadataStore, lo
 		return nil, err
 	}
 	c := &Coordinator{
-		Logger: logger,
-		raft:   raftNode,
-		cfg:    cfg,
+		Logger:        logger,
+		raft:          raftNode,
+		cfg:           cfg,
+		metadataStore: metadataStore,
 	}
 	c.Logger.Info("coordinator started", zap.String("raft_addr", cfg.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
 	return c, nil

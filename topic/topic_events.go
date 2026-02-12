@@ -1,11 +1,11 @@
 package topic
 
-// ApplyDeleteTopicEvent delegates to the coordinator (used by RPC on Raft leader).
-func (tm *TopicManager) ApplyDeleteTopicEvent(topic string) {
-	tm.coordinator.ApplyEvent(NewDeleteTopicApplyEvent(topic))
+// ApplyDeleteTopicEvent applies the delete topic event via Raft (used by RPC on Raft leader).
+func (tm *TopicManager) ApplyDeleteTopicEvent(topic string) error {
+	return tm.coordinator.ApplyDeleteTopicEventInternal(topic)
 }
 
-// ApplyIsrUpdateEvent delegates to the coordinator (used by RPC on Raft leader).
-func (tm *TopicManager) ApplyIsrUpdateEvent(topic, replicaNodeID string, isr bool, leo int64) {
-	tm.coordinator.ApplyEvent(NewIsrUpdateApplyEvent(topic, replicaNodeID, isr, leo))
+// ApplyIsrUpdateEvent applies the ISR update event via Raft (used by RPC on Raft leader).
+func (tm *TopicManager) ApplyIsrUpdateEvent(topic, replicaNodeID string, isr bool, leo int64) error {
+	return tm.coordinator.ApplyIsrUpdateEventInternal(topic, replicaNodeID, isr, leo)
 }

@@ -61,7 +61,9 @@ func TestNode_ApplyCreateTopicEvent(t *testing.T) {
 
 	topicName := "test-apply-create-topic"
 	replicaNodeIds := []string{leader.NodeID}
-	leader.ApplyEvent(topic.NewCreateTopicApplyEvent(topicName, 1, leader.NodeID, replicaNodeIds))
+	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leader.NodeID, replicaNodeIds)
+	leader.ApplyEvent(ev)
+	server2.Coordinator().ApplyEvent(ev) // so both fakes have the topic in metadata
 
 	waitForReplication(t, 200*time.Millisecond)
 	for _, c := range []*FakeTopicCoordinator{server1.Coordinator(), server2.Coordinator()} {
@@ -81,13 +83,17 @@ func TestNode_ApplyDeleteTopicEvent(t *testing.T) {
 
 	topicName := "test-apply-delete-topic"
 	replicaNodeIds := []string{leader.NodeID}
-	leader.ApplyEvent(topic.NewCreateTopicApplyEvent(topicName, 1, leader.NodeID, replicaNodeIds))
+	createEv := topic.NewCreateTopicApplyEvent(topicName, 1, leader.NodeID, replicaNodeIds)
+	leader.ApplyEvent(createEv)
+	server2.Coordinator().ApplyEvent(createEv) // both fakes have the topic
 	waitForReplication(t, 200*time.Millisecond)
 	if !server1.Coordinator().TopicExists(topicName) || !server2.Coordinator().TopicExists(topicName) {
 		t.Fatal("topic should exist after create")
 	}
 
-	leader.ApplyEvent(topic.NewDeleteTopicApplyEvent(topicName))
+	deleteEv := topic.NewDeleteTopicApplyEvent(topicName)
+	leader.ApplyEvent(deleteEv)
+	server2.Coordinator().ApplyEvent(deleteEv)
 	waitForReplication(t, 200*time.Millisecond)
 	for _, c := range []*FakeTopicCoordinator{server1.Coordinator(), server2.Coordinator()} {
 		if c.TopicExists(topicName) {
@@ -107,13 +113,14 @@ func TestNode_ApplyNodeAddEvent(t *testing.T) {
 	newNodeID := "node-test-add"
 	newRpcAddr := "127.0.0.1:19998"
 	leader.AddNode(newNodeID, newRpcAddr)
+	server2.Coordinator().AddNode(newNodeID, newRpcAddr) // both fakes see the new node
 
 	waitForReplication(t, 200*time.Millisecond)
 	for _, c := range []*FakeTopicCoordinator{server1.Coordinator(), server2.Coordinator()} {
 		nodes := c.GetOtherNodes()
 		found := false
 		for _, n := range nodes {
-			if n.NodeID == newNodeID {
+			if n != nil && n.NodeID == newNodeID {
 				found = true
 				break
 			}

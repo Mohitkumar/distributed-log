@@ -27,13 +27,17 @@ func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRe
 
 // ApplyDeleteTopicEvent applies DeleteTopicEvent to the Raft log. Call on the Raft leader (e.g. from topic leader via RPC).
 func (s *RpcServer) ApplyDeleteTopicEvent(ctx context.Context, req *protocol.ApplyDeleteTopicEventRequest) (*protocol.ApplyDeleteTopicEventResponse, error) {
-	s.topicManager.ApplyDeleteTopicEvent(req.Topic)
+	if err := s.topicManager.ApplyDeleteTopicEvent(req.Topic); err != nil {
+		return nil, err
+	}
 	return &protocol.ApplyDeleteTopicEventResponse{}, nil
 }
 
 // ApplyIsrUpdateEvent applies IsrUpdateEvent to the Raft log. Call on the Raft leader (e.g. from replica/leader via RPC).
 func (s *RpcServer) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.ApplyIsrUpdateEventRequest) (*protocol.ApplyIsrUpdateEventResponse, error) {
-	s.topicManager.ApplyIsrUpdateEvent(req.Topic, req.ReplicaNodeID, req.Isr, req.Leo)
+	if err := s.topicManager.ApplyIsrUpdateEvent(req.Topic, req.ReplicaNodeID, req.Isr, req.Leo); err != nil {
+		return nil, err
+	}
 	return &protocol.ApplyIsrUpdateEventResponse{}, nil
 }
 
