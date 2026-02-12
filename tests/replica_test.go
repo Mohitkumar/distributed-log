@@ -20,7 +20,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	topicName := "test-topic"
 	ctx := context.Background()
 
-	// Create topic via ReplicationClient (RPC to leader); leader will CreateReplica on follower via RPC
+	// Create topic via RPC to Raft leader; replicas are created when each node applies the Raft event
 	remoteClient, err := client.NewRemoteClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewReplicationClient: %v", err)
@@ -99,7 +99,7 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 		t.Fatalf("leader should have topic: %v", err)
 	}
 
-	// Follower has topic (with replica; CreateReplica adds the topic to follower's TopicManager)
+	// Follower has topic (replica created when it applies the CreateTopic Raft event)
 	_, err = server2.TopicManager.GetTopic(topicName)
 	if err != nil {
 		t.Fatalf("follower should have topic after leader created it with replica: %v", err)
@@ -111,128 +111,6 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 		t.Fatalf("follower replica dir %q should exist: %v", replicaDir, err)
 	} else if !fi.IsDir() {
 		t.Fatalf("follower replica path %q should be a directory", replicaDir)
-	}
-}
-
-// TestDeleteReplica verifies that deleting a replica on the follower removes it from
-// the TopicManager and removes the replica directory on disk.
-func TestDeleteReplica(t *testing.T) {
-	server1, server2 := SetupTwoTestServers(t, "leader-del", "follower-del")
-	defer server1.Cleanup()
-	defer server2.Cleanup()
-
-	topicName := "del-topic"
-	ctx := context.Background()
-
-	// Create topic on leader with 1 replica via RPC (follower gets replica-0)
-	remoteClient, err := client.NewRemoteClient(server1.Addr)
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        topicName,
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic via client: %v", err)
-	}
-
-	// Verify replica and directory exist on follower
-	replicaDir := filepath.Join(server2.BaseDir, topicName)
-	_, err = server2.TopicManager.GetTopic(topicName)
-	if err != nil {
-		t.Fatalf("GetTopic before delete: %v", err)
-	}
-	if _, err := os.Stat(replicaDir); err != nil {
-		t.Fatalf("replica dir %q should exist before delete: %v", replicaDir, err)
-	}
-
-	// Delete replica on follower via RPC
-	replClient, err := client.NewRemoteClient(server2.Addr)
-	if err != nil {
-		t.Fatalf("NewReplicationClient: %v", err)
-	}
-	_, err = replClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
-		Topic: topicName,
-	})
-	if err != nil {
-		t.Fatalf("DeleteReplica: %v", err)
-	}
-
-	// Verify replica is gone from TopicManager
-	_, err = server2.TopicManager.GetTopic(topicName)
-	if err == nil {
-		t.Fatal("GetTopic after delete should fail (replica should be gone)")
-	}
-
-	// Verify replica directory is gone on follower
-	if _, err := os.Stat(replicaDir); err == nil {
-		t.Fatalf("replica dir %q should not exist after delete", replicaDir)
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("stat replica dir: %v", err)
-	}
-}
-
-// TestDeleteReplica_TopicDirRemoved verifies that when the last replica is deleted on the follower,
-// the topic entry and topic directory are removed (follower has no leader for this topic).
-func TestDeleteReplica_TopicDirRemoved(t *testing.T) {
-	server1, server2 := SetupTwoTestServers(t, "leader-del2", "follower-del2")
-	defer server1.Cleanup()
-	defer server2.Cleanup()
-
-	topicName := "del-topic2"
-	ctx := context.Background()
-
-	remoteClient, err := client.NewRemoteClient(server1.Addr)
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        topicName,
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic via client: %v", err)
-	}
-
-	topicDir := filepath.Join(server2.BaseDir, topicName)
-	replicaDir := filepath.Join(topicDir, "replica-0")
-
-	_, err = server2.TopicManager.GetTopic(topicName)
-	if err != nil {
-		t.Fatalf("follower should have topic before delete: %v", err)
-	}
-	if _, err := os.Stat(topicDir); err != nil {
-		t.Fatalf("topic dir %q should exist before delete: %v", topicDir, err)
-	}
-
-	replClient, err := client.NewRemoteClient(server2.Addr)
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = replClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
-		Topic: topicName,
-	})
-	if err != nil {
-		t.Fatalf("DeleteReplica: %v", err)
-	}
-
-	// Topic should be gone from follower (no leader, no replicas left)
-	_, err = server2.TopicManager.GetTopic(topicName)
-	if err == nil {
-		t.Fatal("GetTopic after delete should fail (topic should be removed when last replica is deleted)")
-	}
-
-	// Topic directory should be removed on follower
-	if _, err := os.Stat(replicaDir); err == nil {
-		t.Fatalf("replica dir %q should not exist after delete", replicaDir)
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("stat replica dir: %v", err)
-	}
-	if _, err := os.Stat(topicDir); err == nil {
-		t.Fatalf("topic dir %q should not exist after last replica deleted", topicDir)
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("stat topic dir: %v", err)
 	}
 }
 

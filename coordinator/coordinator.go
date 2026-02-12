@@ -184,7 +184,8 @@ func (c *Coordinator) GetRaftLeaderNodeID() (string, error) {
 	if !c.IsLeader() {
 		return "", fmt.Errorf("not leader")
 	}
-	return string(c.raft.Leader()), nil
+	_, id := c.raft.LeaderWithID()
+	return string(id), nil
 }
 
 func (c *Coordinator) WaitForLeader(timeout time.Duration) error {

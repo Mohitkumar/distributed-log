@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"io"
-	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
@@ -12,25 +11,14 @@ func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRe
 	if req.Topic == "" {
 		return nil, ErrTopicNameRequired
 	}
-	if req.ReplicaCount < 1 {
-		return nil, ErrReplicaCountInvalid
-	}
-	return s.topicManager.CreateTopicWithForwarding(ctx, req)
+	return s.topicManager.CreateTopic(ctx, req)
 }
 
 func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
 	if req.Topic == "" {
 		return nil, ErrTopicNameRequired
 	}
-	return s.topicManager.DeleteTopicWithForwarding(ctx, req)
-}
-
-// ApplyDeleteTopicEvent applies DeleteTopicEvent to the Raft log. Call on the Raft leader (e.g. from topic leader via RPC).
-func (s *RpcServer) ApplyDeleteTopicEvent(ctx context.Context, req *protocol.ApplyDeleteTopicEventRequest) (*protocol.ApplyDeleteTopicEventResponse, error) {
-	if err := s.topicManager.ApplyDeleteTopicEvent(req.Topic); err != nil {
-		return nil, err
-	}
-	return &protocol.ApplyDeleteTopicEventResponse{}, nil
+	return s.topicManager.DeleteTopic(ctx, req)
 }
 
 // ApplyIsrUpdateEvent applies IsrUpdateEvent to the Raft log. Call on the Raft leader (e.g. from replica/leader via RPC).
@@ -39,15 +27,6 @@ func (s *RpcServer) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.Apply
 		return nil, err
 	}
 	return &protocol.ApplyIsrUpdateEventResponse{}, nil
-}
-
-// RecordLEO records the Log End Offset (LEO) of a replica
-func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
-	err := s.topicManager.RecordLEORemote(req.NodeID, req.Topic, uint64(req.Leo), time.Now())
-	if err != nil {
-		return nil, ErrTopicNotFound(req.Topic, err)
-	}
-	return &protocol.RecordLEOResponse{}, nil
 }
 
 func (s *RpcServer) handleReplicate(req *protocol.ReplicateRequest) (any, error) {
@@ -59,7 +38,7 @@ func (s *RpcServer) handleReplicate(req *protocol.ReplicateRequest) (any, error)
 		}
 	}
 	if leaderLog.LEO() <= req.Offset {
-		return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: nil, EndOfStream: true}, nil
+		return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: nil, EndOfStream: true, LeaderLEO: int64(leaderLog.LEO())}, nil
 	}
 	reader, err := leaderLog.ReaderFrom(req.Offset)
 
@@ -92,5 +71,9 @@ func (s *RpcServer) handleReplicate(req *protocol.ReplicateRequest) (any, error)
 			return nil, encErr
 		}
 	}
-	return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: rawChunk, EndOfStream: endOfStream}, nil
+	leaderLEO := int64(0)
+	if endOfStream && leaderLog != nil {
+		leaderLEO = int64(leaderLog.LEO())
+	}
+	return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: rawChunk, EndOfStream: endOfStream, LeaderLEO: leaderLEO}, nil
 }

@@ -126,7 +126,9 @@ func DoReplicateTopicsForLeader(
 				_ = target.ApplyChunk(topicName, resp.RawChunk)
 			}
 			if resp.EndOfStream {
-				_ = target.ReportLEO(ctx, topicName, leaderNodeID)
+				if leo, ok := target.GetLEO(topicName); ok {
+					_ = target.ReportLEOViaRaft(ctx, topicName, leo, uint64(resp.LeaderLEO))
+				}
 			} else {
 				names = append(names, topicName)
 			}

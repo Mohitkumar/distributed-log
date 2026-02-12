@@ -116,6 +116,7 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	fakeCoord.RPCAddr = srv.Addr
 	fakeCoord.AddNode(fakeCoord.NodeID, srv.Addr)
 	syncFakeNodesToTopicManager(topicMgr, fakeCoord)
+	fakeCoord.SetReplicationTarget(topicMgr) // so ApplyCreateTopicEvent also applies to TopicManager
 
 	return &TestServer{
 		TestServerComponents: &TestServerComponents{

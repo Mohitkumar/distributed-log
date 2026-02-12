@@ -2,12 +2,14 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
+	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/topic"
 )
 
@@ -203,17 +205,40 @@ func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCo
 			IsISR:         true,
 		}
 	}
+	// Push event to TopicManager (metadata store) so it creates the topic locally, mirroring Raft FSM Apply.
+	if f.replicationTarget != nil {
+		eventData, _ := json.Marshal(protocol.CreateTopicEvent{
+			Topic:          topicName,
+			ReplicaCount:   replicaCount,
+			LeaderNodeID:   leaderNodeID,
+			LeaderEpoch:    1,
+			ReplicaNodeIds: replicaNodeIds,
+		})
+		ev := &protocol.MetadataEvent{EventType: protocol.MetadataEventTypeCreateTopic, Data: eventData}
+		_ = f.replicationTarget.Apply(ev)
+	}
 	return nil
 }
 
 func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
 	delete(f.Topics, topicName)
 	delete(f.Replicas, topicName)
+	// Push event to TopicManager so it deletes the topic locally, mirroring Raft FSM Apply.
+	if f.replicationTarget != nil {
+		eventData, _ := json.Marshal(protocol.DeleteTopicEvent{Topic: topicName})
+		ev := &protocol.MetadataEvent{EventType: protocol.MetadataEventTypeDeleteTopic, Data: eventData}
+		_ = f.replicationTarget.Apply(ev)
+	}
 	return nil
 }
 
 func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool, leo int64) error {
 	f.UpdateTopicReplicaLEO(topicName, replicaNodeID, leo, isr)
+	if f.replicationTarget != nil {
+		eventData, _ := json.Marshal(protocol.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr, Leo: leo})
+		ev := &protocol.MetadataEvent{EventType: protocol.MetadataEventTypeIsrUpdate, Data: eventData}
+		_ = f.replicationTarget.Apply(ev)
+	}
 	return nil
 }
 
@@ -315,7 +340,7 @@ func (f *FakeTopicCoordinator) replicateAllTopics() {
 	}
 	ctx := context.Background()
 	for leaderID, topicNames := range leaderToTopics {
-		_ = replication.DoReplicateTopicsForLeader(ctx, target, f.GetReplicationClient, f.NodeID, leaderID, topicNames, 5000)
+		_ = topic.DoReplicateTopicsForLeader(ctx, target, f.NodeID, leaderID, topicNames, 5000)
 	}
 }
 

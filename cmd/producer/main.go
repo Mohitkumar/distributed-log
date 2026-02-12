@@ -43,16 +43,30 @@ func main() {
 	var replicas uint32
 	createTopicCmd := &cobra.Command{
 		Use:   "create-topic",
-		Short: "Create a topic on the cluster (request goes to addr; node forwards to leader → topic leader)",
+		Short: "Create a topic on the cluster (metadata RPC to get Raft leader, then CreateTopic on Raft leader)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			producerClient, err := client.NewProducerClient(addr)
+			remoteClient, err := client.NewRemoteClient(addr)
 			if err != nil {
 				return err
 			}
-			defer producerClient.Close()
+			defer remoteClient.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			resp, err := producerClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+			// Metadata RPC: get Raft leader address (like produce uses FindLeader for topic leader).
+			raftLeaderResp, err := remoteClient.GetRaftLeader(ctx, &protocol.GetRaftLeaderRequest{})
+			if err != nil {
+				return fmt.Errorf("get raft leader: %w", err)
+			}
+			if raftLeaderResp.RaftLeaderAddr == "" {
+				return fmt.Errorf("empty raft leader address")
+			}
+			// Send CreateTopic to the Raft leader; it selects topic leader + replicas and applies a Raft event.
+			raftLeaderClient, err := client.NewRemoteClient(raftLeaderResp.RaftLeaderAddr)
+			if err != nil {
+				return fmt.Errorf("connect to raft leader: %w", err)
+			}
+			defer raftLeaderClient.Close()
+			resp, err := raftLeaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 				Topic:        createTopicName,
 				ReplicaCount: replicas,
 			})

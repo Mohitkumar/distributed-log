@@ -142,155 +142,57 @@ func (tm *TopicManager) GetTopicLeaderRPCAddr(topic string) (string, error) {
 	return node.RpcAddr, nil
 }
 
-// CreateTopic creates a new topic with this node as leader and optional replicas on other nodes.
-// Returns the actual replica set (this node as leader + replica node IDs in order) for metadata.
-func (tm *TopicManager) CreateTopic(topic string, replicaCount int) (replicaNodeIds []string, err error) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	if _, exists := tm.Topics[topic]; exists {
-		return nil, ErrTopicExistsf(topic)
+// GetRaftLeaderRPCAddr returns the RPC address of the current Raft (metadata) leader.
+// selfRpcAddr is this node's RPC address (e.g. from the server); it is returned when this node is the Raft leader.
+func (tm *TopicManager) GetRaftLeaderRPCAddr() (string, error) {
+	if tm.coordinator == nil {
+		return "", fmt.Errorf("topic: no coordinator")
 	}
-
-	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
+	leaderNodeID, err := tm.coordinator.GetRaftLeaderNodeID()
 	if err != nil {
-		return nil, ErrCreateLog(err)
+		return "", err
 	}
-
-	topicObj := &Topic{
-		Name:         topic,
-		LeaderNodeID: tm.CurrentNodeID,
-		LeaderEpoch:  1,
-		Replicas:     make(map[string]*ReplicaState),
-		Log:          logManager,
-		Logger:       tm.Logger,
+	tm.mu.RLock()
+	node := tm.Nodes[leaderNodeID]
+	tm.mu.RUnlock()
+	if node == nil {
+		return "", fmt.Errorf("raft leader node %q not in metadata", leaderNodeID)
 	}
-	tm.Topics[topic] = topicObj
-
-	var otherNodes []*NodeMetadata
-	for _, node := range tm.Nodes {
-		if node != nil && node.NodeID != tm.CurrentNodeID {
-			otherNodes = append(otherNodes, node)
-		}
-	}
-	if len(otherNodes) < replicaCount {
-		delete(tm.Topics, topic)
-		logManager.Close()
-		return nil, ErrNotEnoughNodesf(replicaCount, len(otherNodes))
-	}
-
-	replicaNodeIds = []string{}
-	tm.Logger.Info("creating topic with replicas", zap.String("topic", topic), zap.Int("replica_count", replicaCount))
-
-	i := 0
-	for _, node := range otherNodes {
-		if i >= replicaCount {
-			break
-		}
-		replClient, err := node.GetReplicationClient()
-		if err != nil {
-			delete(tm.Topics, topic)
-			logManager.Close()
-			return nil, ErrGetRpcClient(node.NodeID, err)
-		}
-		tm.Logger.Info("creating replica on node", zap.String("topic", topic), zap.String("node_id", node.NodeID), zap.String("node_addr", node.RpcAddr))
-		_, err = replClient.CreateReplica(context.Background(), &protocol.CreateReplicaRequest{
-			Topic:    topic,
-			LeaderId: tm.CurrentNodeID,
-		})
-		if err != nil {
-			delete(tm.Topics, topic)
-			logManager.Close()
-			return nil, ErrCreateReplicaOnNode(node.NodeID, err)
-		}
-		replicaNodeIds = append(replicaNodeIds, node.NodeID)
-		i++
-	}
-
-	tm.Logger.Info("topic created", zap.String("topic", topic), zap.Strings("replica_node_ids", replicaNodeIds))
-	return replicaNodeIds, nil
+	return node.RpcAddr, nil
 }
 
-func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
+// CreateTopic applies a CreateTopic event via Raft and returns the chosen leader and replica set.
+// Must be called on the Raft leader (client should use GetRaftLeader first). Replicas are created
+// when each node applies the event in Apply() via createTopicFromEvent.
+func (tm *TopicManager) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if tm.coordinator == nil {
 		return nil, fmt.Errorf("topic: no coordinator")
 	}
 	c := tm.coordinator
-
-	// We are the designated topic leader: create locally and return replica set for Raft leader to apply.
-	if req.DesignatedLeaderNodeID != "" && tm.CurrentNodeID == req.DesignatedLeaderNodeID {
-		tm.Logger.Info("creating topic as designated leader", zap.String("topic", req.Topic))
-		replicaNodeIds, err := tm.CreateTopic(req.Topic, int(req.ReplicaCount))
-		if err != nil {
-			return nil, ErrCreateTopic(err)
-		}
-		if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, tm.CurrentNodeID, replicaNodeIds); err != nil {
-			return nil, err
-		}
-		return &protocol.CreateTopicResponse{Topic: req.Topic, ReplicaNodeIds: replicaNodeIds}, nil
-	}
-
-	// Not the designated leader: if we're not Raft leader, forward to Raft leader.
 	if !c.IsLeader() {
-		tm.Logger.Debug("forwarding create topic to Raft leader", zap.String("topic", req.Topic))
-		leaderNodeID, err := c.GetRaftLeaderNodeID()
-		if err != nil {
-			return nil, ErrCannotReachLeader
-		}
-		node := tm.Nodes[leaderNodeID]
-		if node == nil {
-			return nil, ErrCannotReachLeader
-		}
-		cl, err := node.GetRpcClient()
-		if err != nil {
-			return nil, ErrCannotReachLeader
-		}
-		return cl.CreateTopic(ctx, req)
+		return nil, fmt.Errorf("create topic must be sent to Raft leader: %w", ErrCannotReachLeader)
 	}
-
-	// We are the Raft leader: decide topic leader from metadata, set designated leader, forward to that node.
 	tm.mu.RLock()
 	_, exists := tm.Topics[req.Topic]
-	tm.mu.RUnlock()
 	if exists {
+		tm.mu.RUnlock()
 		return nil, ErrTopicExistsf(req.Topic)
 	}
 	leaderNodeID, err := tm.GetNodeIDWithLeastTopics()
 	if err != nil {
+		tm.mu.RUnlock()
 		return nil, err
 	}
-
-	if leaderNodeID == tm.CurrentNodeID {
-		tm.Logger.Info("selected node is current node, creating topic locally", zap.String("topic", req.Topic))
-		replicaNodeIds, err := tm.CreateTopic(req.Topic, int(req.ReplicaCount))
-		if err != nil {
-			return nil, ErrCreateTopic(err)
-		}
-		if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, leaderNodeID, replicaNodeIds); err != nil {
-			return nil, err
-		}
-		return &protocol.CreateTopicResponse{Topic: req.Topic, ReplicaNodeIds: replicaNodeIds}, nil
-	}
-	leaderNode := tm.Nodes[leaderNodeID]
-	if leaderNode == nil {
-		return nil, ErrCannotReachLeader
-	}
-	tm.Logger.Info("forwarding create topic to topic leader", zap.String("topic", req.Topic), zap.String("topic_leader_id", leaderNodeID), zap.String("topic_leader_addr", leaderNode.RpcAddr))
-
-	cl, err := leaderNode.GetRpcClient()
+	replicaNodeIds, err := tm.pickReplicaNodeIds(leaderNodeID, int(req.ReplicaCount))
+	tm.mu.RUnlock()
 	if err != nil {
+		return nil, ErrCreateTopic(err)
+	}
+	tm.Logger.Info("applying create topic via Raft", zap.String("topic", req.Topic), zap.String("leader_node_id", leaderNodeID), zap.Strings("replica_node_ids", replicaNodeIds))
+	if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, leaderNodeID, replicaNodeIds); err != nil {
 		return nil, err
 	}
-	forwardReq := *req
-	forwardReq.DesignatedLeaderNodeID = leaderNodeID
-	resp, err := cl.CreateTopic(ctx, &forwardReq)
-	if err != nil {
-		return nil, ErrForwardToTopicLeader(err)
-	}
-	if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, leaderNodeID, resp.ReplicaNodeIds); err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return &protocol.CreateTopicResponse{Topic: req.Topic, ReplicaNodeIds: replicaNodeIds}, nil
 }
 
 func (tm *TopicManager) GetNodeIDWithLeastTopics() (string, error) {
@@ -319,82 +221,46 @@ func (tm *TopicManager) GetNodeIDWithLeastTopics() (string, error) {
 	return bestID, nil
 }
 
-// DeleteTopic deletes a topic (caller must be leader). Closes and deletes leader log; deletes replicas on remote nodes.
-func (tm *TopicManager) DeleteTopic(topic string) error {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	topicObj, ok := tm.Topics[topic]
-	if !ok {
-		return ErrTopicNotFoundf(topic)
-	}
-
-	tm.Logger.Info("deleting topic", zap.String("topic", topic))
-
-	if topicObj.Log != nil {
-		topicObj.Log.Close()
-		topicObj.Log.Delete()
-		topicObj.Log = nil
-	}
-
-	ctx := context.Background()
-	topicObj.mu.RLock()
-	replicaIDs := make([]string, 0, len(topicObj.Replicas))
-	for rid := range topicObj.Replicas {
-		replicaIDs = append(replicaIDs, rid)
-	}
-	topicObj.mu.RUnlock()
-	for _, replicaID := range replicaIDs {
-		node := tm.Nodes[replicaID]
-		if node == nil {
-			continue
+// pickReplicaNodeIds returns up to replicaCount node IDs from the cluster, excluding leaderNodeID.
+// Caller should hold tm.mu at least for the duration of reading Nodes; used when applying create-topic via Raft.
+func (tm *TopicManager) pickReplicaNodeIds(leaderNodeID string, replicaCount int) ([]string, error) {
+	var otherNodes []*NodeMetadata
+	for _, node := range tm.Nodes {
+		if node != nil && node.NodeID != leaderNodeID {
+			otherNodes = append(otherNodes, node)
 		}
-		replicaClient, err := node.GetRpcClient()
-		if err != nil {
-			continue
-		}
-		_, _ = replicaClient.DeleteReplica(ctx, &protocol.DeleteReplicaRequest{
-			Topic: topic,
-		})
 	}
-
-	delete(tm.Topics, topic)
-	return nil
+	if len(otherNodes) < replicaCount {
+		return nil, ErrNotEnoughNodesf(replicaCount, len(otherNodes))
+	}
+	replicaNodeIds := make([]string, 0, replicaCount)
+	for i := 0; i < replicaCount; i++ {
+		replicaNodeIds = append(replicaNodeIds, otherNodes[i].NodeID)
+	}
+	return replicaNodeIds, nil
 }
 
-// DeleteTopicWithForwarding deletes a topic. If this node is the topic leader, deletes locally and applies DeleteTopicEvent.
-// Otherwise, when node is set, forwards the request to the topic leader. When node is nil, deletes locally only (fails if not leader).
-func (tm *TopicManager) DeleteTopicWithForwarding(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
-	// If we have the topic and we're the leader, delete locally and apply metadata event.
-	topicObj, err := tm.GetTopic(req.Topic)
-	if err == nil && topicObj != nil {
-		isLeader, _ := tm.IsLeader(req.Topic)
-		if isLeader {
-			if err := tm.DeleteTopic(req.Topic); err != nil {
-				return nil, ErrDeleteTopic(err)
-			}
-			if err := tm.applyDeleteTopicEventOnRaftLeader(ctx, req.Topic); err != nil {
-				return nil, ErrApplyDeleteTopic(err)
-			}
-			return &protocol.DeleteTopicResponse{Topic: req.Topic}, nil
-		}
+// DeleteTopic applies a DeleteTopic event via Raft. Must be called on the Raft leader (client should use GetRaftLeader first).
+// Replicas are removed when each node applies the event in Apply() via deleteTopicFromEvent.
+func (tm *TopicManager) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
+	if tm.coordinator == nil {
+		return nil, fmt.Errorf("topic: no coordinator")
 	}
-	// Forward to topic leader.
+	c := tm.coordinator
+	if !c.IsLeader() {
+		return nil, fmt.Errorf("delete topic must be sent to Raft leader: %w", ErrCannotReachLeader)
+	}
 	tm.mu.RLock()
-	t := tm.Topics[req.Topic]
+	_, exists := tm.Topics[req.Topic]
 	tm.mu.RUnlock()
-	if t == nil {
+	if !exists {
 		return nil, ErrTopicNotFoundf(req.Topic)
 	}
-	leaderNode := tm.Nodes[t.LeaderNodeID]
-	if leaderNode == nil {
-		return nil, ErrTopicNotFoundf(req.Topic)
+	tm.Logger.Info("applying delete topic via Raft", zap.String("topic", req.Topic))
+	if err := c.ApplyDeleteTopicEventInternal(req.Topic); err != nil {
+		return nil, ErrApplyDeleteTopic(err)
 	}
-	leaderClient, err := leaderNode.GetRpcClient()
-	if err != nil {
-		return nil, err
-	}
-	return leaderClient.DeleteTopic(ctx, req)
+	return &protocol.DeleteTopicResponse{Topic: req.Topic}, nil
 }
 
 // GetLeader returns the leader log view for a topic (this node must be the leader).
@@ -452,7 +318,7 @@ func (tm *TopicManager) RestoreFromMetadata() error {
 				continue
 			}
 		} else {
-			if err := tm.CreateReplicaRemote(topicName, leaderID); err != nil {
+			if err := tm.restoreReplicaTopic(topicName, leaderID); err != nil {
 				tm.Logger.Warn("restore replica topic failed", zap.String("topic", topicName), zap.Error(err))
 				continue
 			}
@@ -481,8 +347,8 @@ func (tm *TopicManager) restoreLeaderTopic(topic string) error {
 	return nil
 }
 
-// CreateReplicaRemote creates a replica for the topic on this node (called by leader via RPC).
-func (tm *TopicManager) CreateReplicaRemote(topic string, leaderId string) error {
+// restoreReplicaTopic creates a replica for the topic on this node (called by leader via RPC).
+func (tm *TopicManager) restoreReplicaTopic(topic string, leaderId string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	topicObj, ok := tm.Topics[topic]
@@ -504,27 +370,6 @@ func (tm *TopicManager) CreateReplicaRemote(topic string, leaderId string) error
 	}
 	topicObj.Log = logManager
 	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_id", leaderId))
-	return nil
-}
-
-// DeleteReplicaRemote deletes a replica for the topic on this node.
-func (tm *TopicManager) DeleteReplicaRemote(topic string) error {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	topicObj, ok := tm.Topics[topic]
-	if !ok {
-		return ErrTopicNotFoundf(topic)
-	}
-	tm.Logger.Info("deleting replica for topic", zap.String("topic", topic))
-	if topicObj.Log != nil {
-		topicObj.Log.Delete()
-		topicObj.Log = nil
-	}
-	delete(tm.Topics, topic)
-	topicDir := filepath.Join(tm.BaseDir, topic)
-	if err := os.RemoveAll(topicDir); err != nil {
-		return ErrRemoveTopicDir(err)
-	}
 	return nil
 }
 
@@ -587,15 +432,40 @@ func (tm *TopicManager) ApplyChunk(topicName string, rawChunk []byte) error {
 	return nil
 }
 
-func (tm *TopicManager) ReportLEO(ctx context.Context, topicName string, leaderNodeID string) error {
-	tm.mu.RLock()
-	leaderNode := tm.Nodes[leaderNodeID]
-	t := tm.Topics[topicName]
-	tm.mu.RUnlock()
-	if leaderNode == nil || t == nil {
+// ReportLEOViaRaft sends an ISR/LEO update to the Raft leader so it can be applied via the metadata log.
+// Replication goroutine calls this with replica LEO and leader LEO (from ReplicateResponse.LeaderLEO).
+func (tm *TopicManager) ReportLEOViaRaft(ctx context.Context, topicName string, replicaLEO, leaderLEO uint64) error {
+	if tm.coordinator == nil {
 		return nil
 	}
-	return tm.reportLEOLocked(ctx, t, leaderNode)
+	// Same ISR logic as previously in RecordLEORemote
+	var isr bool
+	if leaderLEO >= 100 {
+		isr = replicaLEO >= leaderLEO-100
+	} else {
+		isr = replicaLEO >= leaderLEO
+	}
+	raftLeaderNodeID, err := tm.coordinator.GetRaftLeaderNodeID()
+	if err != nil {
+		tm.Logger.Debug("report LEO via Raft: get raft leader failed", zap.String("topic", topicName), zap.Error(err))
+		return err
+	}
+	raftClient, err := tm.GetRPCClient(raftLeaderNodeID)
+	if err != nil {
+		tm.Logger.Debug("report LEO via Raft: dial raft leader failed", zap.String("topic", topicName), zap.Error(err))
+		return err
+	}
+	_, err = raftClient.ApplyIsrUpdateEvent(ctx, &protocol.ApplyIsrUpdateEventRequest{
+		Topic:         topicName,
+		ReplicaNodeID: tm.CurrentNodeID,
+		Isr:           isr,
+		Leo:           int64(replicaLEO),
+	})
+	if err != nil {
+		tm.Logger.Debug("apply ISR update on Raft leader failed", zap.String("topic", topicName), zap.Error(err))
+		return err
+	}
+	return nil
 }
 
 // GetReplicationClient returns a client to the given node (for replication); part of ReplicationTarget.
@@ -609,24 +479,14 @@ func (tm *TopicManager) GetReplicationClient(nodeID string) (*client.RemoteClien
 	return node.GetReplicationClient()
 }
 
-func (tm *TopicManager) reportLEOLocked(ctx context.Context, t *Topic, leaderNode *NodeMetadata) error {
-	t.mu.RLock()
-	log := t.Log
-	t.mu.RUnlock()
-	if log == nil {
-		return nil
+func (tm *TopicManager) GetRPCClient(nodeID string) (*client.RemoteClient, error) {
+	tm.mu.RLock()
+	node := tm.Nodes[nodeID]
+	tm.mu.RUnlock()
+	if node == nil {
+		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
-	req := &protocol.RecordLEORequest{
-		NodeID: tm.CurrentNodeID,
-		Topic:  t.Name,
-		Leo:    int64(log.LEO()),
-	}
-	leaderClient, err := leaderNode.GetRpcClient()
-	if err != nil {
-		return err
-	}
-	_, err = leaderClient.RecordLEO(ctx, req)
-	return err
+	return node.GetRpcClient()
 }
 
 // HandleProduce appends to the topic log (leader only). For ACK_ALL, waits for replicas to catch up.
@@ -754,49 +614,6 @@ func (tm *TopicManager) maybeAdvanceHW(t *Topic) {
 	t.mu.Unlock()
 }
 
-// RecordLEORemote records the LEO of a replica (topic leader only). Called by RPC when a replica reports its LEO.
-func (tm *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64, leoTime time.Time) error {
-	if nodeId == "" {
-		return ErrNodeIDRequired
-	}
-	tm.mu.RLock()
-	topicObj, ok := tm.Topics[topic]
-	if !ok {
-		tm.mu.RUnlock()
-		return ErrTopicNotFoundf(topic)
-	}
-	topicObj.mu.RLock()
-	leaderLog := topicObj.Log
-	replicaStates := topicObj.Replicas
-	topicObj.mu.RUnlock()
-	tm.mu.RUnlock()
-	if replicaStates[nodeId] == nil {
-		return ErrReplicaNotFoundf(nodeId, topic)
-	}
-
-	var isr bool
-	if leaderLog != nil {
-		leaderLEO := leaderLog.LEO()
-		if leaderLEO >= 100 && leo >= leaderLEO-100 {
-			isr = true
-		} else if leaderLEO < 100 {
-			isr = leo >= leaderLEO
-		}
-	}
-
-	tm.mu.Lock()
-	if t := tm.Topics[topic]; t != nil && t.Replicas[nodeId] != nil {
-		t.Replicas[nodeId].LEO = int64(leo)
-		t.Replicas[nodeId].IsISR = isr
-	}
-	tm.mu.Unlock()
-	tm.maybeAdvanceHW(topicObj)
-	if err := tm.applyIsrUpdateEventOnRaftLeader(context.Background(), topic, nodeId, isr, int64(leo)); err != nil {
-		tm.Logger.Debug("apply ISR update on Raft leader failed", zap.String("topic", topic), zap.String("replica", nodeId), zap.Error(err))
-	}
-	return nil
-}
-
 func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -806,22 +623,7 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
 		}
-		t := &Topic{
-			Name:         e.Topic,
-			LeaderNodeID: e.LeaderNodeID,
-			LeaderEpoch:  e.LeaderEpoch,
-			Replicas:     make(map[string]*ReplicaState),
-			Logger:       tm.Logger,
-		}
-		for _, replica := range e.ReplicaNodeIds {
-			t.Replicas[replica] = &ReplicaState{
-				ReplicaNodeID: replica,
-				LEO:           0,
-				IsISR:         true,
-			}
-		}
-		tm.Topics[e.Topic] = t
-		tm.ensureLocalLogForTopic(e.Topic, e.LeaderNodeID, e.ReplicaNodeIds)
+		tm.createTopicFromEvent(e.Topic, e.LeaderNodeID, e.LeaderEpoch, e.ReplicaNodeIds)
 	case protocol.MetadataEventTypeLeaderChange:
 		e := protocol.LeaderChangeEvent{}
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
@@ -850,7 +652,7 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
 		}
-		tm.removeTopicLocalLocked(e.Topic)
+		tm.deleteTopicFromEvent(e.Topic)
 	case protocol.MetadataEventTypeAddNode:
 		e := protocol.AddNodeEvent{}
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
@@ -878,6 +680,27 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 		return fmt.Errorf("unknown event type: %d", ev.EventType)
 	}
 	return nil
+}
+
+// createTopicFromEvent creates the topic locally from a CreateTopic event (leader + replica IDs).
+// Caller holds tm.mu. Used when applying MetadataEventTypeCreateTopic in Apply().
+func (tm *TopicManager) createTopicFromEvent(topicName, leaderNodeID string, leaderEpoch int64, replicaNodeIds []string) {
+	t := &Topic{
+		Name:         topicName,
+		LeaderNodeID: leaderNodeID,
+		LeaderEpoch:  leaderEpoch,
+		Replicas:     make(map[string]*ReplicaState),
+		Logger:       tm.Logger,
+	}
+	for _, replica := range replicaNodeIds {
+		t.Replicas[replica] = &ReplicaState{
+			ReplicaNodeID: replica,
+			LEO:           0,
+			IsISR:         true,
+		}
+	}
+	tm.Topics[topicName] = t
+	tm.ensureLocalLogForTopic(topicName, leaderNodeID, replicaNodeIds)
 }
 
 // ensureLocalLogForTopic opens the local log for the topic if this node is leader or replica. Caller holds tm.mu.
@@ -957,6 +780,11 @@ func (tm *TopicManager) ensureLocalLogAfterLeaderChange(topicName, newLeaderID s
 	}
 }
 
+// deleteTopicFromEvent removes the topic locally when applying a DeleteTopic event. Caller holds tm.mu.
+func (tm *TopicManager) deleteTopicFromEvent(topicName string) {
+	tm.removeTopicLocalLocked(topicName)
+}
+
 // removeTopicLocalLocked closes the topic log, removes from map, and deletes the topic dir. Caller holds tm.mu.
 func (tm *TopicManager) removeTopicLocalLocked(topicName string) {
 	t, ok := tm.Topics[topicName]
@@ -964,6 +792,7 @@ func (tm *TopicManager) removeTopicLocalLocked(topicName string) {
 		return
 	}
 	if t != nil && t.Log != nil {
+		t.Log.Close()
 		t.Log.Delete()
 		t.Log = nil
 	}

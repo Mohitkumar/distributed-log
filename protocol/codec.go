@@ -12,29 +12,11 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	var payload []byte
 	var err error
 	switch v := msg.(type) {
-	case CreateReplicaRequest, *CreateReplicaRequest:
-		mType = MsgCreateReplica
-		payload, err = json.Marshal(v)
-	case CreateReplicaResponse, *CreateReplicaResponse:
-		mType = MsgCreateReplicaResp
-		payload, err = json.Marshal(v)
-	case DeleteReplicaRequest, *DeleteReplicaRequest:
-		mType = MsgDeleteReplica
-		payload, err = json.Marshal(v)
-	case DeleteReplicaResponse, *DeleteReplicaResponse:
-		mType = MsgDeleteReplicaResp
-		payload, err = json.Marshal(v)
 	case ReplicateRequest, *ReplicateRequest:
 		mType = MsgReplicateStream
 		payload, err = json.Marshal(v)
 	case ReplicateResponse, *ReplicateResponse:
 		mType = MsgReplicateResp
-		payload, err = json.Marshal(v)
-	case RecordLEORequest, *RecordLEORequest:
-		mType = MsgRecordLEO
-		payload, err = json.Marshal(v)
-	case RecordLEOResponse, *RecordLEOResponse:
-		mType = MsgRecordLEOResp
 		payload, err = json.Marshal(v)
 	case ProduceRequest, *ProduceRequest:
 		mType = MsgProduce
@@ -78,12 +60,6 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	case DeleteTopicResponse, *DeleteTopicResponse:
 		mType = MsgDeleteTopicResp
 		payload, err = json.Marshal(v)
-	case ApplyDeleteTopicEventRequest, *ApplyDeleteTopicEventRequest:
-		mType = MsgApplyDeleteTopicEvent
-		payload, err = json.Marshal(v)
-	case ApplyDeleteTopicEventResponse, *ApplyDeleteTopicEventResponse:
-		mType = MsgApplyDeleteTopicEventResp
-		payload, err = json.Marshal(v)
 	case ApplyIsrUpdateEventRequest, *ApplyIsrUpdateEventRequest:
 		mType = MsgApplyIsrUpdateEvent
 		payload, err = json.Marshal(v)
@@ -95,6 +71,12 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 		payload, err = json.Marshal(v)
 	case FindLeaderResponse, *FindLeaderResponse:
 		mType = MsgFindLeaderResp
+		payload, err = json.Marshal(v)
+	case GetRaftLeaderRequest, *GetRaftLeaderRequest:
+		mType = MsgGetRaftLeader
+		payload, err = json.Marshal(v)
+	case GetRaftLeaderResponse, *GetRaftLeaderResponse:
+		mType = MsgGetRaftLeaderResp
 		payload, err = json.Marshal(v)
 	case RPCErrorResponse, *RPCErrorResponse:
 		mType = MsgRPCError
@@ -114,36 +96,12 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		return 0, nil, err
 	}
 	switch mType {
-	case MsgCreateReplica:
-		var msg CreateReplicaRequest
-		err = json.Unmarshal(payload, &msg)
-		return mType, msg, err
-	case MsgCreateReplicaResp:
-		var msg CreateReplicaResponse
-		err = json.Unmarshal(payload, &msg)
-		return mType, msg, err
-	case MsgDeleteReplica:
-		var msg DeleteReplicaRequest
-		err = json.Unmarshal(payload, &msg)
-		return mType, msg, err
-	case MsgDeleteReplicaResp:
-		var msg DeleteReplicaResponse
-		err = json.Unmarshal(payload, &msg)
-		return mType, msg, err
 	case MsgReplicateStream:
 		var msg ReplicateRequest
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	case MsgReplicateResp:
 		var msg ReplicateResponse
-		err = json.Unmarshal(payload, &msg)
-		return mType, msg, err
-	case MsgRecordLEO:
-		var msg RecordLEORequest
-		err = json.Unmarshal(payload, &msg)
-		return mType, msg, err
-	case MsgRecordLEOResp:
-		var msg RecordLEOResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	case MsgProduce:
@@ -202,14 +160,6 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		var msg DeleteTopicResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
-	case MsgApplyDeleteTopicEvent:
-		var msg ApplyDeleteTopicEventRequest
-		err = json.Unmarshal(payload, &msg)
-		return mType, msg, err
-	case MsgApplyDeleteTopicEventResp:
-		var msg ApplyDeleteTopicEventResponse
-		err = json.Unmarshal(payload, &msg)
-		return mType, msg, err
 	case MsgApplyIsrUpdateEvent:
 		var msg ApplyIsrUpdateEventRequest
 		err = json.Unmarshal(payload, &msg)
@@ -224,6 +174,14 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		return mType, msg, err
 	case MsgFindLeaderResp:
 		var msg FindLeaderResponse
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgGetRaftLeader:
+		var msg GetRaftLeaderRequest
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgGetRaftLeaderResp:
+		var msg GetRaftLeaderResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	case MsgRPCError:

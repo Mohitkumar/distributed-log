@@ -32,12 +32,6 @@ type DeleteTopicResponse struct {
 	Topic string
 }
 
-// ApplyDeleteTopicEventRequest is sent to the Raft leader to apply DeleteTopicEvent to the log.
-type ApplyDeleteTopicEventRequest struct {
-	Topic string
-}
-type ApplyDeleteTopicEventResponse struct{}
-
 // ApplyIsrUpdateEventRequest is sent to the Raft leader to apply IsrUpdateEvent to the log.
 type ApplyIsrUpdateEventRequest struct {
 	Topic         string
@@ -52,12 +46,6 @@ type RPCErrorResponse struct {
 	Message string `json:"message"`
 }
 
-type RecordLEORequest struct {
-	NodeID string
-	Topic  string
-	Leo    int64
-}
-type RecordLEOResponse struct{}
 type ReplicateRequest struct {
 	Topic         string
 	Offset        uint64 // replica LEO; leader streams from this offset
@@ -67,21 +55,9 @@ type ReplicateRequest struct {
 type ReplicateResponse struct {
 	Topic       string
 	RawChunk    []byte // raw segment-format records: [Offset 8][Len 4][Value]...
-	EndOfStream bool   // when true, leader has sent all data for this round; replica can send RecordLEO and next ReplicateRequest
+	EndOfStream bool   // when true, leader has sent all data for this round; replica reports LEO via Raft event
+	LeaderLEO   int64  // when EndOfStream, leader's LEO so replica can compute ISR and send IsrUpdateEvent
 }
-
-// Replication types (replace api/replication).
-type CreateReplicaRequest struct {
-	Topic    string
-	LeaderId string
-}
-type CreateReplicaResponse struct {
-	Topic string
-}
-type DeleteReplicaRequest struct {
-	Topic string
-}
-type DeleteReplicaResponse struct{}
 
 // Producer types (replace api/producer).
 type ProduceRequest struct {
@@ -111,6 +87,14 @@ type FindLeaderRequest struct {
 
 type FindLeaderResponse struct {
 	LeaderAddr string
+}
+
+// GetRaftLeader types are used by clients to discover the Raft (metadata) leader RPC address.
+// Any node can answer; create-topic and other metadata ops should be sent to the Raft leader.
+type GetRaftLeaderRequest struct{}
+
+type GetRaftLeaderResponse struct {
+	RaftLeaderAddr string
 }
 
 // Consumer types (replace api/consumer).

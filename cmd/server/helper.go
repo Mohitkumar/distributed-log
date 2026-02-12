@@ -123,7 +123,10 @@ func (cmdHelper *CommandHelper) Start() error {
 	if err := cmdHelper.coord.Start(); err != nil {
 		return fmt.Errorf("start coordinator: %w", err)
 	}
-	return cmdHelper.rpcServer.Start()
+	if err := cmdHelper.rpcServer.Start(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (cmdHelper *CommandHelper) Shutdown() error {

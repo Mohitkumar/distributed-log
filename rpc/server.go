@@ -30,19 +30,6 @@ func NewRpcServer(addr string, topicManager *topic.TopicManager, consumerManager
 
 // RegisterHandlers registers all RPC handlers on tr. Used by Start() and by tests that run the transport themselves.
 func (s *RpcServer) RegisterHandlers() {
-	// Replication / leader
-	s.transport.RegisterHandler(protocol.MsgCreateReplica, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.CreateReplicaRequest)
-		return s.CreateReplica(ctx, &r)
-	})
-	s.transport.RegisterHandler(protocol.MsgDeleteReplica, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.DeleteReplicaRequest)
-		return s.DeleteReplica(ctx, &r)
-	})
-	s.transport.RegisterHandler(protocol.MsgRecordLEO, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.RecordLEORequest)
-		return s.RecordLEO(ctx, &r)
-	})
 	s.transport.RegisterHandler(protocol.MsgReplicateStream, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.ReplicateRequest)
 		return s.handleReplicate(&r)
@@ -78,10 +65,6 @@ func (s *RpcServer) RegisterHandlers() {
 		r := req.(protocol.DeleteTopicRequest)
 		return s.DeleteTopic(ctx, &r)
 	})
-	s.transport.RegisterHandler(protocol.MsgApplyDeleteTopicEvent, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.ApplyDeleteTopicEventRequest)
-		return s.ApplyDeleteTopicEvent(ctx, &r)
-	})
 	s.transport.RegisterHandler(protocol.MsgApplyIsrUpdateEvent, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.ApplyIsrUpdateEventRequest)
 		return s.ApplyIsrUpdateEvent(ctx, &r)
@@ -90,6 +73,10 @@ func (s *RpcServer) RegisterHandlers() {
 	s.transport.RegisterHandler(protocol.MsgFindLeader, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.FindLeaderRequest)
 		return s.FindLeader(ctx, &r)
+	})
+	s.transport.RegisterHandler(protocol.MsgGetRaftLeader, func(ctx context.Context, req any) (any, error) {
+		r := req.(protocol.GetRaftLeaderRequest)
+		return s.GetRaftLeader(ctx, &r)
 	})
 }
 

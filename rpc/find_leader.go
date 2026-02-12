@@ -23,3 +23,12 @@ func (srv *RpcServer) FindLeader(ctx context.Context, req *protocol.FindLeaderRe
 	}, nil
 }
 
+// GetRaftLeader returns the RPC address of the current Raft (metadata) leader.
+// Any node can answer; clients should send create-topic and other metadata ops to this address.
+func (srv *RpcServer) GetRaftLeader(ctx context.Context, req *protocol.GetRaftLeaderRequest) (*protocol.GetRaftLeaderResponse, error) {
+	addr, err := srv.topicManager.GetRaftLeaderRPCAddr()
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.GetRaftLeaderResponse{RaftLeaderAddr: addr}, nil
+}
