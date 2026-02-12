@@ -2,7 +2,6 @@ package tests
 
 import (
 	"context"
-	"io"
 	"testing"
 	"time"
 
@@ -92,78 +91,6 @@ func TestFetch_InvalidArguments(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing topic")
-	}
-}
-
-func TestFetchStream(t *testing.T) {
-	ts := StartTestServer(t, "leader")
-	if _, err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-	defer ts.Cleanup()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	producerClient, err := client.NewProducerClient(ts.Addr)
-	if err != nil {
-		t.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	for i := 0; i < 3; i++ {
-		_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
-			Topic: "test-topic",
-			Value: []byte("message-" + string(rune('0'+i))),
-			Acks:  protocol.AckLeader,
-		})
-		if err != nil {
-			t.Fatalf("Produce: %v", err)
-		}
-	}
-
-	time.Sleep(300 * time.Millisecond)
-
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
-	if err != nil {
-		t.Fatalf("NewConsumerClient: %v", err)
-	}
-	defer consumerClient.Close()
-	stream, err := consumerClient.FetchStream(ctx, &protocol.FetchRequest{
-		Id:     "test-consumer",
-		Topic:  "test-topic",
-		Offset: 0,
-	})
-	if err != nil {
-		t.Fatalf("FetchStream: %v", err)
-	}
-
-	received := 0
-	seenOffsets := make(map[uint64]bool)
-	for received < 3 {
-		resp, err := stream.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				break
-			}
-			t.Fatalf("stream.Recv: %v", err)
-		}
-		if resp.Entry == nil {
-			t.Fatal("expected non-nil entry")
-		}
-		if !seenOffsets[resp.Entry.Offset] {
-			seenOffsets[resp.Entry.Offset] = true
-			received++
-		}
-		if received >= 1 {
-			break
-		}
-	}
-
-	if received < 1 {
-		t.Fatalf("expected at least 1 message from stream, got %d", received)
 	}
 }
 

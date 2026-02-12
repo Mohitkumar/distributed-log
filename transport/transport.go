@@ -18,26 +18,20 @@ type StreamHandler func(ctx context.Context, msg any, conn net.Conn, codec *prot
 // Transport manages TCP connections with a length-prefixed frame protocol.
 // Producer, consumer, and replication use it to Send and Receive raw bytes.
 type Transport struct {
-	Codec          *protocol.Codec
-	handlers       map[protocol.MessageType]func(context.Context, any) (any, error)
-	streamHandlers map[protocol.MessageType]StreamHandler
-	ln             net.Listener
+	Codec    *protocol.Codec
+	handlers map[protocol.MessageType]func(context.Context, any) (any, error)
+	ln       net.Listener
 }
 
 func NewTransport() *Transport {
 	return &Transport{
-		Codec:          &protocol.Codec{},
-		handlers:       make(map[protocol.MessageType]func(context.Context, any) (any, error)),
-		streamHandlers: make(map[protocol.MessageType]StreamHandler),
+		Codec:    &protocol.Codec{},
+		handlers: make(map[protocol.MessageType]func(context.Context, any) (any, error)),
 	}
 }
 
 func (t *Transport) RegisterHandler(msgType protocol.MessageType, handler func(context.Context, any) (any, error)) {
 	t.handlers[msgType] = handler
-}
-
-func (t *Transport) RegisterStreamHandler(msgType protocol.MessageType, handler StreamHandler) {
-	t.streamHandlers[msgType] = handler
 }
 
 func (t *Transport) Listen(addr string) (net.Listener, error) {
@@ -94,13 +88,6 @@ func (t *Transport) handleConn(conn net.Conn) {
 				fmt.Println("Read error:", err)
 			}
 			return
-		}
-		if streamHandler := t.streamHandlers[mType]; streamHandler != nil {
-			if err := streamHandler(context.Background(), msg, conn, t.Codec); err != nil {
-				fmt.Println("Stream handler error:", err)
-				return
-			}
-			continue
 		}
 		handler := t.handlers[mType]
 		if handler == nil {

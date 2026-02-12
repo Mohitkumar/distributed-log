@@ -32,6 +32,9 @@ cluster-up:
 cluster-down:
 	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) down
 
+cluster-restart:
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) down -v
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) up -d --build
 cluster-logs:
 	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) logs -f
 

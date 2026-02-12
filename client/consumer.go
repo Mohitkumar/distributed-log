@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/transport"
@@ -45,42 +44,6 @@ func (c *ConsumerClient) Fetch(ctx context.Context, req *protocol.FetchRequest) 
 	}
 	r := resp.(protocol.FetchResponse)
 	return &r, nil
-}
-
-func (c *ConsumerClient) FetchStream(ctx context.Context, req *protocol.FetchRequest) (FetchStreamReader, error) {
-	return &fetchStreamReader{tc: c.tc, req: *req}, nil
-}
-
-type FetchStreamReader interface {
-	Recv() (*protocol.FetchResponse, error)
-}
-
-type fetchStreamReader struct {
-	tc  *transport.TransportClient
-	req protocol.FetchRequest
-}
-
-func (r *fetchStreamReader) Recv() (*protocol.FetchResponse, error) {
-	for {
-		resp, err := r.tc.Call(r.req)
-		if err != nil {
-			// When the requested offset is beyond the current end/high watermark of the log,
-			// the server returns an error like "offset X out of range" or "beyond high watermark".
-			// Treat this as "no new data yet": wait briefly and retry instead of failing the stream.
-			msg := err.Error()
-			if strings.Contains(msg, "out of range") || strings.Contains(msg, "beyond high watermark") {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-			return nil, err
-		}
-		rep := resp.(protocol.FetchResponse)
-		if rep.Entry != nil {
-			r.req.Offset = rep.Entry.Offset + 1
-			return &rep, nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 }
 
 func (c *ConsumerClient) CommitOffset(ctx context.Context, req *protocol.CommitOffsetRequest) (*protocol.CommitOffsetResponse, error) {

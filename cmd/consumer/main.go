@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -102,22 +101,13 @@ func main() {
 			}
 
 			currentOffset := startOffset
-			// Helper to (re)create a stream from the given offset on the current consumer client.
-			newStream := func(from uint64) (client.FetchStreamReader, error) {
-				return consumerClient.FetchStream(ctx, &protocol.FetchRequest{
-					Id:     id,
-					Topic:  topic,
-					Offset: from,
-				})
-			}
-
-			stream, err := newStream(currentOffset)
-			if err != nil {
-				return err
-			}
 
 			for {
-				resp, err := stream.Recv()
+				resp, err := consumerClient.Fetch(ctx, &protocol.FetchRequest{
+					Id:     id,
+					Topic:  topic,
+					Offset: currentOffset,
+				})
 				if err != nil {
 					// Handle leader failover: if the node we are connected to is no longer leader,
 					// re-resolve the topic leader via FindLeader and reconnect, then resume.
@@ -141,40 +131,9 @@ func main() {
 							return findErr
 						}
 						fmt.Fprintf(os.Stderr, "reconnected to new topic leader at %s\n", leaderAddr)
-
-						stream, findErr = newStream(currentOffset)
-						if findErr != nil {
-							return findErr
-						}
 						continue
 					}
-					// Handle transient network errors (e.g. broken pipe, connection reset) by
-					// reconnecting to the last known leader address and recreating the stream.
-					if strings.Contains(msg, "broken pipe") ||
-						strings.Contains(msg, "connection reset by peer") ||
-						strings.Contains(msg, "use of closed network connection") {
-						fmt.Fprintln(os.Stderr, "connection to leader broken; reconnecting...")
-						_ = consumerClient.Close()
-						consumerClient, err = client.NewConsumerClient(leaderAddr)
-						if err != nil {
-							return err
-						}
-						stream, err = newStream(currentOffset)
-						if err != nil {
-							return err
-						}
-						continue
-					}
-					// If the server closed the stream (EOF), treat it like a temporary condition:
-					// recreate the stream from the current offset and keep waiting for new data.
-					if err == io.EOF {
-						stream, err = newStream(currentOffset)
-						if err != nil {
-							return err
-						}
-						continue
-					}
-					return err
+					continue
 				}
 				if resp.Entry == nil {
 					continue
