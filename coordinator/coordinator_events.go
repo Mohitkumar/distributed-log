@@ -7,19 +7,10 @@ import (
 
 	"github.com/hashicorp/raft"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
 )
 
-func (c *Coordinator) ApplyEvent(ev topic.ApplyEvent) {
-	select {
-	case <-c.stopApply:
-		c.Logger.Error("coordinator stopped, skipping apply event", zap.Any("event", ev))
-	case c.applyCh <- ev:
-	}
-}
-
-func (c *Coordinator) applyCreateTopicEventInternal(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
+func (c *Coordinator) ApplyCreateTopicEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
 	if c.raft.State() != raft.Leader {
 		c.Logger.Debug("not leader, skipping create topic event", zap.String("topic", topic))
 		return nil
@@ -51,7 +42,7 @@ func (c *Coordinator) applyCreateTopicEventInternal(topic string, replicaCount u
 	return nil
 }
 
-func (c *Coordinator) applyDeleteTopicEventInternal(topic string) error {
+func (c *Coordinator) ApplyDeleteTopicEventInternal(topic string) error {
 	if c.raft.State() != raft.Leader {
 		c.Logger.Debug("not leader, skipping delete topic event", zap.String("topic", topic))
 		return nil
@@ -127,7 +118,7 @@ func (c *Coordinator) ApplyNodeRemoveEvent(nodeID string) error {
 	return nil
 }
 
-func (c *Coordinator) applyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool, leo int64) error {
+func (c *Coordinator) ApplyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool, leo int64) error {
 	if c.raft.State() != raft.Leader {
 		c.Logger.Debug("not leader, skipping ISR update event", zap.String("topic", topic))
 		return nil

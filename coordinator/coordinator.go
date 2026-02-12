@@ -11,16 +11,12 @@ import (
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
-	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/common"
 	"github.com/mohitkumar/mlog/config"
 	"github.com/mohitkumar/mlog/discovery"
-	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
 )
 
 var _ discovery.Handler = (*Coordinator)(nil)
-var _ topic.TopicCoordinator = (*Coordinator)(nil)
 
 const (
 	SnapshotThreshold   = 10000
@@ -31,25 +27,18 @@ const (
 // Coordinator handles cluster-wide responsibility: Raft, metadata store, and membership (Join/Leave, Apply* events).
 // Addresses and RPC clients to other nodes live in Node; Coordinator holds the local Node and delegates to it where appropriate.
 type Coordinator struct {
-	mu              sync.RWMutex
-	Logger          *zap.Logger
-	raft            *raft.Raft
-	cfg             config.Config
-	metadataStore   *MetadataStore
-	nodes           map[string]*common.Node
-	stopReconcile   chan struct{}
-	applyCh         chan topic.ApplyEvent
-	stopApply       chan struct{}
-	stopReplication    chan struct{}
-	replicationTarget  topic.ReplicationTarget
+	mu            sync.RWMutex
+	Logger        *zap.Logger
+	raft          *raft.Raft
+	cfg           config.Config
+	metadataStore MetadataStore
 }
 
 // NewCoordinatorFromConfig creates a Coordinator from full config (replaces NewNodeFromConfig).
-func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinator, error) {
+func NewCoordinatorFromConfig(cfg config.Config, metadataStore MetadataStore, logger *zap.Logger) (*Coordinator, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	metadataStore := NewMetadataStore()
 	fsm, err := NewCoordinatorFSM(cfg.RaftConfig.Dir, metadataStore)
 	if err != nil {
 		return nil, err
@@ -63,17 +52,10 @@ func NewCoordinatorFromConfig(cfg config.Config, logger *zap.Logger) (*Coordinat
 		return nil, err
 	}
 	c := &Coordinator{
-		Logger:          logger,
-		raft:            raftNode,
-		cfg:             cfg,
-		metadataStore:   metadataStore,
-		nodes:           make(map[string]*common.Node),
-		stopReconcile:   make(chan struct{}),
-		applyCh:         make(chan topic.ApplyEvent, 1024),
-		stopApply:       make(chan struct{}),
-		stopReplication: make(chan struct{}),
+		Logger: logger,
+		raft:   raftNode,
+		cfg:    cfg,
 	}
-	c.nodes[cfg.NodeConfig.ID] = common.NewNode(cfg.NodeConfig.ID, rpcAddr)
 	c.Logger.Info("coordinator started", zap.String("raft_addr", cfg.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
 	return c, nil
 }
@@ -143,87 +125,6 @@ func (c *Coordinator) EnsureSelfInMetadata() error {
 	return c.ApplyNodeAddEvent(c.cfg.NodeConfig.ID, c.cfg.RaftConfig.Address, rpcAddr)
 }
 
-func (c *Coordinator) GetRpcClient(nodeID string) (*client.RemoteClient, error) {
-	c.mu.RLock()
-	n := c.nodes[nodeID]
-	c.mu.RUnlock()
-	if n == nil {
-		return nil, ErrNodeNotFound
-	}
-	return n.GetRpcClient()
-}
-
-func (c *Coordinator) GetReplicationClient(nodeID string) (*client.RemoteClient, error) {
-	c.mu.RLock()
-	n := c.nodes[nodeID]
-	c.mu.RUnlock()
-	if n == nil {
-		return nil, ErrNodeNotFound
-	}
-	return n.GetReplicationClient()
-}
-
-func (c *Coordinator) GetRaftLeaderRemoteClient() (*client.RemoteClient, error) {
-	if c.raft.State() == raft.Leader {
-		return c.GetRpcClient(c.cfg.NodeConfig.ID)
-	}
-	_, leaderId := c.raft.LeaderWithID()
-	if leaderId == "" {
-		return nil, ErrRaftNoLeader
-	}
-	return c.GetRpcClient(string(leaderId))
-}
-
-func (c *Coordinator) GetTopicLeaderRemoteClient(topic string) (*client.RemoteClient, error) {
-	tm := c.metadataStore.GetTopic(topic)
-	if tm == nil {
-		return nil, fmt.Errorf("topic %s not found", topic)
-	}
-	return c.GetRpcClient(tm.LeaderNodeID)
-}
-
-func (c *Coordinator) GetClusterNodes() []*common.Node {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	nodes := make([]*common.Node, 0)
-	for _, node := range c.nodes {
-		nodes = append(nodes, node)
-	}
-	return nodes
-}
-
-func (c *Coordinator) GetNode(nodeID string) (*common.Node, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	node, ok := c.nodes[nodeID]
-	if !ok {
-		return nil, fmt.Errorf("node %s not found", nodeID)
-	}
-	return node, nil
-}
-
-func (c *Coordinator) GetNodeIDWithLeastTopics() (*common.Node, error) {
-	nodes := c.GetClusterNodes()
-	if len(nodes) == 0 {
-		return nil, ErrNoNodesInCluster
-	}
-	counts := c.metadataStore.TopicCountByLeader()
-	best := nodes[0]
-	minCount := counts[best.NodeID]
-	for _, node := range nodes[1:] {
-		cn := counts[node.NodeID]
-		if cn < minCount {
-			minCount = cn
-			best = node
-		}
-	}
-	return best, nil
-}
-
-func (c *Coordinator) TopicExists(topic string) bool {
-	return c.metadataStore.GetTopic(topic) != nil
-}
-
 func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 	c.WaitforRaftReadyWithRetryBackoff(2*time.Second, 5)
 	if !c.IsLeader() {
@@ -271,180 +172,18 @@ func (c *Coordinator) Leave(id string) error {
 		return err
 	}
 	c.ApplyNodeRemoveEvent(id)
-	c.maybeReassignTopicLeaders(id)
 	return nil
-}
-
-func (c *Coordinator) maybeReassignTopicLeaders(nodeID string) {
-	if c.raft.State() != raft.Leader {
-		return
-	}
-	topicsCopy := c.metadataStore.GetTopicsCopy()
-	for topic, tm := range topicsCopy {
-		if tm == nil || tm.LeaderNodeID != nodeID {
-			continue
-		}
-		var newLeader string
-		for rid, rs := range tm.Replicas {
-			if rid == nodeID || rs == nil || !rs.IsISR {
-				continue
-			}
-			if c.metadataStore.GetNodeMetadata(rid) == nil {
-				continue
-			}
-			newLeader = rid
-			break
-		}
-		if newLeader == "" {
-			c.Logger.Warn("no ISR replica available to take leadership", zap.String("topic", topic), zap.String("old_leader_node_id", nodeID))
-			continue
-		}
-		nextEpoch := tm.LeaderEpoch + 1
-		if err := c.ApplyLeaderChangeEvent(topic, newLeader, nextEpoch); err != nil {
-			c.Logger.Warn("apply leader change failed", zap.String("topic", topic), zap.Error(err))
-		}
-	}
-}
-
-func (c *Coordinator) AddNode(node *common.Node) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.nodes[node.NodeID] = node
-}
-
-func (c *Coordinator) RemoveNode(nodeID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.nodes, nodeID)
-}
-
-func (c *Coordinator) GetCurrentNode() *common.Node {
-	n := c.nodes[c.cfg.NodeConfig.ID]
-	if n == nil {
-		return nil
-	}
-	return n
-}
-
-// GetNodeID returns this node's ID (for discovery and tests).
-func (c *Coordinator) GetNodeID() string {
-	if n := c.GetCurrentNode(); n != nil {
-		return n.NodeID
-	}
-	return c.cfg.NodeConfig.ID
-}
-
-// GetNodeAddr returns this node's RPC address (for discovery and tests).
-func (c *Coordinator) GetNodeAddr() string {
-	if n := c.GetCurrentNode(); n != nil {
-		return n.RPCAddr
-	}
-	return ""
-}
-
-// GetTopicLeaderNodeID returns the topic leader node ID (for tests and RPC).
-func (c *Coordinator) GetTopicLeaderNodeID(topic string) string {
-	tm := c.metadataStore.GetTopic(topic)
-	if tm == nil {
-		return ""
-	}
-	return tm.LeaderNodeID
-}
-
-// GetRpcAddrForNodeID returns the RPC address for the given node ID (for discovery and tests).
-func (c *Coordinator) GetRpcAddrForNodeID(nodeID string) (string, error) {
-	meta := c.metadataStore.GetNodeMetadata(nodeID)
-	if meta == nil {
-		return "", ErrNodeNotFound
-	}
-	return meta.RpcAddr, nil
-}
-
-// GetClusterNodeIDs returns all node IDs in the cluster (for tests).
-func (c *Coordinator) GetClusterNodeIDs() []string {
-	return c.metadataStore.ListNodeIDs()
-}
-
-func (c *Coordinator) GetOtherNodes() []*common.Node {
-	servers := c.raft.GetConfiguration().Configuration().Servers
-	out := make([]*common.Node, 0)
-	for _, srv := range servers {
-		if srv.ID == raft.ServerID(c.cfg.NodeConfig.ID) {
-			continue
-		}
-		nodeID := string(srv.ID)
-		if n := c.nodes[nodeID]; n != nil {
-			out = append(out, n)
-		}
-	}
-	return out
 }
 
 func (c *Coordinator) IsLeader() bool {
 	return c.raft.State() == raft.Leader
 }
 
-func (c *Coordinator) ListTopicNames() []string {
-	return c.metadataStore.ListTopicNames()
-}
-
-func (c *Coordinator) GetTopicLeaderNode(topic string) (*common.Node, error) {
-	tm := c.metadataStore.GetTopic(topic)
-	if tm == nil {
-		return nil, fmt.Errorf("topic %s not found", topic)
+func (c *Coordinator) GetRaftLeaderNodeID() (string, error) {
+	if !c.IsLeader() {
+		return "", fmt.Errorf("not leader")
 	}
-	n := c.nodes[tm.LeaderNodeID]
-	if n == nil {
-		return nil, fmt.Errorf("topic %s not found", topic)
-	}
-	return n, nil
-}
-
-func (c *Coordinator) GetTopicReplicaNodes(topic string) ([]*common.Node, error) {
-	tm := c.metadataStore.GetTopic(topic)
-	if tm == nil || tm.Replicas == nil {
-		return nil, fmt.Errorf("topic %s not found", topic)
-	}
-	out := make([]*common.Node, 0, len(tm.Replicas))
-	for id := range tm.Replicas {
-		if n := c.nodes[id]; n != nil {
-			out = append(out, n)
-		}
-	}
-	return out, nil
-}
-
-func (c *Coordinator) GetTopicReplicaStates(topic string) map[string]*common.ReplicaState {
-	tm := c.metadataStore.GetTopic(topic)
-	if tm == nil || tm.Replicas == nil {
-		return nil
-	}
-	out := make(map[string]*common.ReplicaState, len(tm.Replicas))
-	for id, rs := range tm.Replicas {
-		if rs != nil {
-			out[id] = &common.ReplicaState{
-				ReplicaNodeID: rs.ReplicaNodeID,
-				LEO:           rs.LEO,
-				IsISR:         rs.IsISR,
-			}
-		}
-	}
-	return out
-}
-
-func (c *Coordinator) GetTopicReplicaState(topic, replicaNodeID string) (leo uint64, isISR bool) {
-	tm := c.metadataStore.GetTopic(topic)
-	if tm == nil || tm.Replicas == nil {
-		return 0, false
-	}
-	rs := tm.Replicas[replicaNodeID]
-	if rs == nil {
-		return 0, false
-	}
-	if rs.LEO < 0 {
-		return 0, rs.IsISR
-	}
-	return uint64(rs.LEO), rs.IsISR
+	return string(c.raft.Leader()), nil
 }
 
 func (c *Coordinator) WaitForLeader(timeout time.Duration) error {
@@ -481,131 +220,12 @@ func (c *Coordinator) WaitforRaftReadyWithRetryBackoff(timeout time.Duration, re
 	return fmt.Errorf("timed out waiting for leader")
 }
 
-func (c *Coordinator) startReconcileNodes() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-c.stopReconcile:
-			return
-		case <-ticker.C:
-			c.reconcileNodes()
-		}
-	}
-}
-
-func (c *Coordinator) stopReconcileNodes() {
-	select {
-	case <-c.stopReconcile:
-		return
-	default:
-		close(c.stopReconcile)
-	}
-}
-
-func (c *Coordinator) startApplyLoop() {
-	for {
-		select {
-		case <-c.stopApply:
-			return
-		case ev := <-c.applyCh:
-			var err error
-			switch ev.Type {
-			case topic.ApplyEventCreateTopic:
-				p := ev.CreateTopic
-				if p != nil {
-					err = c.applyCreateTopicEventInternal(p.Topic, p.ReplicaCount, p.LeaderNodeID, p.ReplicaNodeIds)
-				}
-			case topic.ApplyEventDeleteTopic:
-				err = c.applyDeleteTopicEventInternal(ev.DeleteTopic.Topic)
-			case topic.ApplyEventIsrUpdate:
-				p := ev.IsrUpdate
-				if p != nil {
-					err = c.applyIsrUpdateEventInternal(p.Topic, p.ReplicaNodeID, p.Isr, p.Leo)
-				}
-			}
-			if err != nil {
-				c.Logger.Error("apply event failed", zap.Error(err), zap.Any("event", ev))
-			}
-		}
-	}
-}
-
-func (c *Coordinator) stopApplyLoop() {
-	select {
-	case <-c.stopApply:
-		return
-	default:
-		close(c.stopApply)
-	}
-}
-
-func (c *Coordinator) reconcileNodes() {
-	metaIDs := c.metadataStore.ListNodeIDs()
-	c.mu.RLock()
-	var toAdd []struct {
-		id      string
-		rpcAddr string
-	}
-	ourIDs := make(map[string]struct{}, len(c.nodes))
-	for id := range c.nodes {
-		ourIDs[id] = struct{}{}
-	}
-	for _, id := range metaIDs {
-		if _, ok := ourIDs[id]; !ok {
-			meta := c.metadataStore.GetNodeMetadata(id)
-			if meta != nil {
-				toAdd = append(toAdd, struct {
-					id      string
-					rpcAddr string
-				}{id, meta.RpcAddr})
-			}
-		}
-	}
-	var toRemove []string
-	for id := range c.nodes {
-		found := false
-		for _, mid := range metaIDs {
-			if mid == id {
-				found = true
-				break
-			}
-		}
-		if !found {
-			toRemove = append(toRemove, id)
-		}
-	}
-	c.mu.RUnlock()
-
-	for _, a := range toAdd {
-		c.AddNode(common.NewNode(a.id, a.rpcAddr))
-	}
-	for _, id := range toRemove {
-		c.RemoveNode(id)
-	}
-}
-
 func (c *Coordinator) Start() error {
-	go c.startReconcileNodes()
-	go c.startApplyLoop()
-	go c.startReplicationThread()
 	return nil
-}
-
-func (c *Coordinator) SetReplicationTarget(t topic.ReplicationTarget) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.replicationTarget = t
 }
 
 func (c *Coordinator) Shutdown() error {
 	c.Logger.Info("node shutting down")
-	c.metadataStore.StopPeriodicLog()
-	c.stopReconcileNodes()
-	c.stopApplyLoop()
-	if c.stopReplication != nil {
-		close(c.stopReplication)
-	}
 	f := c.raft.Shutdown()
 	return f.Error()
 }

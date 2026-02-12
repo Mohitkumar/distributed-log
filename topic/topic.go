@@ -2,74 +2,133 @@ package topic
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/hashicorp/raft"
+	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
+	"github.com/mohitkumar/mlog/coordinator"
 	"github.com/mohitkumar/mlog/log"
 	"github.com/mohitkumar/mlog/protocol"
 	"go.uber.org/zap"
 )
 
+const defaultMetadataLogInterval = 30 * time.Second
+
+type NodeMetadata struct {
+	mu                sync.RWMutex
+	NodeID            string `json:"node_id"`
+	Addr              string `json:"addr"`
+	RpcAddr           string `json:"rpc_addr"`
+	remoteClient      *client.RemoteClient
+	replicationClient *client.RemoteClient
+}
+
+func (n *NodeMetadata) GetRpcClient() (*client.RemoteClient, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.remoteClient == nil {
+		remoteClient, err := client.NewRemoteClient(n.RpcAddr)
+		if err != nil {
+			return nil, err
+		}
+		n.remoteClient = remoteClient
+	}
+	return n.remoteClient, nil
+}
+
+func (n *NodeMetadata) GetReplicationClient() (*client.RemoteClient, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.replicationClient == nil {
+		replClient, err := client.NewRemoteClient(n.RpcAddr)
+		if err != nil {
+			return nil, err
+		}
+		n.replicationClient = replClient
+	}
+	return n.replicationClient, nil
+}
+
+type ReplicaState struct {
+	ReplicaNodeID string `json:"replica_id"`
+	LEO           int64  `json:"leo"`
+	IsISR         bool   `json:"is_isr"`
+}
+
 // In memory representation of a topic
 type Topic struct {
 	mu           sync.RWMutex
-	Name         string
-	LeaderNodeID string
+	Name         string                   `json:"name"`
+	LeaderNodeID string                   `json:"leader_id"`
+	LeaderEpoch  int64                    `json:"leader_epoch"`
+	Replicas     map[string]*ReplicaState `json:"replicas"`
 	Log          *log.LogManager
 	Logger       *zap.Logger
 }
+
+var _ coordinator.MetadataStore = (*TopicManager)(nil)
+
 type TopicManager struct {
-	mu          sync.RWMutex
-	topics      map[string]*Topic
-	BaseDir     string
-	Logger      *zap.Logger
-	coordinator TopicCoordinator
+	mu            sync.RWMutex
+	Topics        map[string]*Topic `json:"topics"`
+	BaseDir       string
+	Logger        *zap.Logger
+	Nodes         map[string]*NodeMetadata `json:"nodes"`
+	CurrentNodeID string                   `json:"current_node_id"`
+	coordinator   *coordinator.Coordinator
+	stopPeriodic  chan struct{}
 }
 
-func NewTopicManager(baseDir string, c TopicCoordinator, logger *zap.Logger) (*TopicManager, error) {
+func NewTopicManager(baseDir string, coordinator *coordinator.Coordinator, logger *zap.Logger) (*TopicManager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	tm := &TopicManager{
-		topics:      make(map[string]*Topic),
+		Topics:      make(map[string]*Topic),
 		BaseDir:     baseDir,
 		Logger:      logger,
-		coordinator: c,
+		Nodes:       make(map[string]*NodeMetadata),
+		coordinator: coordinator,
 	}
+	go tm.periodicLog(defaultMetadataLogInterval)
 	return tm, nil
 }
 
-func (tm *TopicManager) currentNodeID() string {
-	if n := tm.coordinator.GetCurrentNode(); n != nil {
-		return n.NodeID
+func (tm *TopicManager) IsLeader(topic string) (bool, error) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	topicObj, ok := tm.Topics[topic]
+	if !ok {
+		return false, ErrTopicNotFoundf(topic)
 	}
-	return ""
-}
-
-func (tm *TopicManager) IsLeader(topic string) bool {
-	leaderNode, err := tm.coordinator.GetTopicLeaderNode(topic)
-	if err != nil {
-		tm.Logger.Error("failed to get topic leader node", zap.String("topic", topic), zap.Error(err))
-		return false
-	}
-	return leaderNode.NodeID == tm.currentNodeID()
+	return topicObj.LeaderNodeID == tm.CurrentNodeID, nil
 }
 
 // GetTopicLeaderRPCAddr returns the RPC address of the current leader for the given topic.
 func (tm *TopicManager) GetTopicLeaderRPCAddr(topic string) (string, error) {
-	leaderNode, err := tm.coordinator.GetTopicLeaderNode(topic)
-	if err != nil {
-		return "", err
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	topicObj, ok := tm.Topics[topic]
+	if !ok {
+		return "", ErrTopicNotFoundf(topic)
 	}
-	return leaderNode.RPCAddr, nil
+	return topicObj.LeaderNodeID, nil
 }
 
 // applyDeleteTopicEventOnRaftLeader gets the Raft leader RPC address and calls ApplyDeleteTopicEvent there.
 func (tm *TopicManager) applyDeleteTopicEventOnRaftLeader(ctx context.Context, topic string) error {
-	client, err := tm.coordinator.GetRaftLeaderRemoteClient()
+	leaderNodeID, err := tm.coordinator.GetRaftLeaderNodeID()
+	if err != nil {
+		return err
+	}
+
+	client, err := tm.Nodes[leaderNodeID].GetRpcClient()
 	if err != nil {
 		return err
 	}
@@ -82,7 +141,12 @@ func (tm *TopicManager) applyDeleteTopicEventOnRaftLeader(ctx context.Context, t
 
 // applyIsrUpdateEventOnRaftLeader gets the Raft leader RPC address and calls ApplyIsrUpdateEvent there.
 func (tm *TopicManager) applyIsrUpdateEventOnRaftLeader(ctx context.Context, topic, replicaNodeID string, isr bool, leo int64) error {
-	client, err := tm.coordinator.GetRaftLeaderRemoteClient()
+	leaderNodeID, err := tm.coordinator.GetRaftLeaderNodeID()
+	if err != nil {
+		return err
+	}
+
+	client, err := tm.Nodes[leaderNodeID].GetRpcClient()
 	if err != nil {
 		return err
 	}
@@ -99,7 +163,7 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) (replicaNode
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
-	if _, exists := tm.topics[topic]; exists {
+	if _, exists := tm.Topics[topic]; exists {
 		return nil, ErrTopicExistsf(topic)
 	}
 
@@ -112,14 +176,14 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) (replicaNode
 		Name:         topic,
 		Log:          logManager,
 		Logger:       tm.Logger,
-		LeaderNodeID: tm.currentNodeID(),
+		LeaderNodeID: tm.CurrentNodeID,
 	}
-	tm.topics[topic] = topicObj
+	tm.Topics[topic] = topicObj
 
-	otherNodes := tm.coordinator.GetOtherNodes()
+	otherNodes := tm.Nodes
 
 	if len(otherNodes) < replicaCount {
-		delete(tm.topics, topic)
+		delete(tm.Topics, topic)
 		logManager.Close()
 		return nil, ErrNotEnoughNodesf(replicaCount, len(otherNodes))
 	}
@@ -127,26 +191,29 @@ func (tm *TopicManager) CreateTopic(topic string, replicaCount int) (replicaNode
 	replicaNodeIds = []string{}
 	tm.Logger.Info("creating topic with replicas", zap.String("topic", topic), zap.Int("replica_count", replicaCount))
 
-	for i := 0; i < replicaCount; i++ {
-		node := otherNodes[i]
-
-		replClient, err := tm.coordinator.GetRpcClient(node.NodeID)
+	i := 0
+	for _, node := range otherNodes {
+		if i >= replicaCount {
+			break
+		}
+		replClient, err := node.GetReplicationClient()
 		if err != nil {
-			delete(tm.topics, topic)
+			delete(tm.Topics, topic)
 			logManager.Close()
 			return nil, ErrGetRpcClient(node.NodeID, err)
 		}
 		tm.Logger.Info("creating replica on node", zap.String("topic", topic), zap.String("node_id", node.NodeID), zap.String("node_addr", node.RPCAddr), zap.Error(err))
 		_, err = replClient.CreateReplica(context.Background(), &protocol.CreateReplicaRequest{
 			Topic:    topic,
-			LeaderId: tm.currentNodeID(),
+			LeaderId: tm.CurrentNodeID,
 		})
 		if err != nil {
-			delete(tm.topics, topic)
+			delete(tm.Topics, topic)
 			logManager.Close()
 			return nil, ErrCreateReplicaOnNode(node.NodeID, err)
 		}
 		replicaNodeIds = append(replicaNodeIds, node.NodeID)
+		i++
 	}
 
 	tm.Logger.Info("topic created", zap.String("topic", topic), zap.Strings("replica_node_ids", replicaNodeIds))
@@ -157,7 +224,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	c := tm.coordinator
 
 	// We are the designated topic leader: create locally and return replica set for Raft leader to apply.
-	if req.DesignatedLeaderNodeID != "" && c.GetCurrentNode() != nil && req.DesignatedLeaderNodeID == c.GetCurrentNode().NodeID {
+	if req.DesignatedLeaderNodeID != "" && tm.CurrentNodeID == req.DesignatedLeaderNodeID {
 		tm.Logger.Info("creating topic as designated leader", zap.String("topic", req.Topic))
 		replicaNodeIds, err := tm.CreateTopic(req.Topic, int(req.ReplicaCount))
 		if err != nil {
@@ -169,7 +236,11 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	// Not the designated leader: if we're not Raft leader, forward to Raft leader.
 	if !c.IsLeader() {
 		tm.Logger.Debug("forwarding create topic to Raft leader", zap.String("topic", req.Topic))
-		client, err := c.GetRaftLeaderRemoteClient()
+		leaderNodeID, err := tm.coordinator.GetRaftLeaderNodeID()
+		if err != nil {
+			return nil, ErrCannotReachLeader
+		}
+		client, err := tm.Nodes[leaderNodeID].GetRpcClient()
 		if err != nil {
 			return nil, ErrCannotReachLeader
 		}
@@ -177,7 +248,7 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	}
 
 	// We are the Raft leader: decide topic leader from metadata, set designated leader, forward to that node.
-	if c.TopicExists(req.Topic) {
+	if _, exists := tm.Topics[req.Topic]; exists {
 		return nil, ErrTopicExistsf(req.Topic)
 	}
 	topicLeaderNode, err := c.GetNodeIDWithLeastTopics()
@@ -210,6 +281,18 @@ func (tm *TopicManager) CreateTopicWithForwarding(ctx context.Context, req *prot
 	replicaNodeIds := resp.ReplicaNodeIds
 	c.ApplyEvent(NewCreateTopicApplyEvent(req.Topic, req.ReplicaCount, topicLeaderNode.NodeID, replicaNodeIds))
 	return resp, nil
+}
+
+func (tm *TopicManager) GetNodeIDWithLeastTopics() (string, error) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	leastTopics := len(tm.Topics)
+	for _, topic := range tm.Topics {
+		if topicCount < leastTopics {
+			leastTopics = len(topic.Replicas)
+		}
+	}
+	return leastTopics.NodeID, nil
 }
 
 // DeleteTopic deletes a topic (caller must be leader). Closes and deletes leader log; deletes replicas on remote nodes.
@@ -664,4 +747,155 @@ func (tm *TopicManager) RecordLEORemote(nodeId string, topic string, leo uint64,
 		tm.Logger.Debug("apply ISR update on Raft leader failed", zap.String("topic", topic), zap.String("replica", nodeId), zap.Error(err))
 	}
 	return nil
+}
+
+func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	switch ev.EventType {
+	case protocol.MetadataEventTypeCreateTopic:
+		e := protocol.CreateTopicEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
+		tm.Topics[e.Topic] = &Topic{
+			LeaderNodeID: e.LeaderNodeID,
+			LeaderEpoch:  e.LeaderEpoch,
+			Replicas:     make(map[string]*ReplicaState),
+		}
+		for _, replica := range e.ReplicaNodeIds {
+			tm.Topics[e.Topic].Replicas[replica] = &ReplicaState{
+				ReplicaNodeID: replica,
+				LEO:           0,
+				IsISR:         true,
+			}
+		}
+	case protocol.MetadataEventTypeLeaderChange:
+		e := protocol.LeaderChangeEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
+		tm := tm.Topics[e.Topic]
+		if tm != nil {
+			tm.LeaderNodeID = e.LeaderNodeID
+			tm.LeaderEpoch = e.LeaderEpoch
+			delete(tm.Replicas, e.LeaderNodeID)
+		}
+	case protocol.MetadataEventTypeIsrUpdate:
+		e := protocol.IsrUpdateEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
+		if tm := tm.Topics[e.Topic]; tm != nil {
+			if rs := tm.Replicas[e.ReplicaNodeID]; rs != nil {
+				rs.IsISR = e.Isr
+				rs.LEO = e.Leo
+			}
+		}
+	case protocol.MetadataEventTypeDeleteTopic:
+		e := protocol.DeleteTopicEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
+		delete(tm.Topics, e.Topic)
+	case protocol.MetadataEventTypeAddNode:
+		e := protocol.AddNodeEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
+		tm.Nodes[e.NodeID] = &NodeMetadata{
+			NodeID:  e.NodeID,
+			Addr:    e.Addr,
+			RpcAddr: e.RpcAddr,
+		}
+	case protocol.MetadataEventTypeRemoveNode:
+		e := protocol.RemoveNodeEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
+		delete(tm.Nodes, e.NodeID)
+	case protocol.MetadataEventTypeUpdateNode:
+		e := protocol.UpdateNodeEvent{}
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
+		//TODO: update node status
+	default:
+		return fmt.Errorf("unknown event type: %d", ev.EventType)
+	}
+	return nil
+}
+
+func (c *TopicManager) maybeReassignTopicLeaders(nodeID string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if c.raft.State() != raft.Leader {
+		return
+	}
+	topicsCopy := c.metadataStore.GetTopicsCopy()
+	for topic, tm := range topicsCopy {
+		if tm == nil || tm.LeaderNodeID != nodeID {
+			continue
+		}
+		var newLeader string
+		for rid, rs := range tm.Replicas {
+			if rid == nodeID || rs == nil || !rs.IsISR {
+				continue
+			}
+			if c.metadataStore.GetNodeMetadata(rid) == nil {
+				continue
+			}
+			newLeader = rid
+			break
+		}
+		if newLeader == "" {
+			c.Logger.Warn("no ISR replica available to take leadership", zap.String("topic", topic), zap.String("old_leader_node_id", nodeID))
+			continue
+		}
+		nextEpoch := tm.LeaderEpoch + 1
+		if err := c.ApplyLeaderChangeEvent(topic, newLeader, nextEpoch); err != nil {
+			c.Logger.Warn("apply leader change failed", zap.String("topic", topic), zap.Error(err))
+		}
+	}
+}
+
+func (tm *TopicManager) Restore(data []byte) error {
+	var decoded TopicManager
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.Topics = decoded.Topics
+	tm.Nodes = decoded.Nodes
+	return nil
+}
+
+func (tm *TopicManager) periodicLog(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-tm.stopPeriodic:
+			return
+		case <-ticker.C:
+			tm.mu.RLock()
+			b, err := json.Marshal(tm)
+			tm.mu.RUnlock()
+			if err != nil {
+				fmt.Printf("[coordinator] metadata periodic log marshal error: %v\n", err)
+				continue
+			}
+			fmt.Printf("[coordinator] metadata store (%s):\n%s\n", time.Now().Format(time.RFC3339), string(b))
+		}
+	}
+}
+
+func (tm *TopicManager) StopPeriodicLog() {
+	select {
+	case <-tm.stopPeriodic:
+		return
+	default:
+		close(tm.stopPeriodic)
+	}
 }

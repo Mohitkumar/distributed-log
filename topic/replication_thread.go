@@ -1,4 +1,4 @@
-package coordinator
+package topic
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
 )
 
 const (
@@ -14,7 +13,7 @@ const (
 	defaultReplicationBatchSize = 5000
 )
 
-func (c *Coordinator) startReplicationThread() {
+func (c *TopicManager) startReplicationThread() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -27,7 +26,7 @@ func (c *Coordinator) startReplicationThread() {
 	}
 }
 
-func (c *Coordinator) replicateAllTopics() {
+func (c *TopicManager) replicateAllTopics() {
 	c.mu.RLock()
 	target := c.replicationTarget
 	c.mu.RUnlock()
