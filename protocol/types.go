@@ -103,6 +103,16 @@ type ProduceBatchResponse struct {
 	Count      uint32
 }
 
+// FindLeader types are used by clients to discover the topic leader RPC address.
+// Any node can answer this using its local metadata (kept in sync via Raft).
+type FindLeaderRequest struct {
+	Topic string
+}
+
+type FindLeaderResponse struct {
+	LeaderAddr string
+}
+
 // Consumer types (replace api/consumer).
 type FetchRequest struct {
 	Topic  string

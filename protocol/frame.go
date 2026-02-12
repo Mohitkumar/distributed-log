@@ -48,4 +48,6 @@ const (
 	MsgApplyIsrUpdateEvent
 	MsgApplyIsrUpdateEventResp
 	MsgRPCError
+	MsgFindLeader
+	MsgFindLeaderResp
 )

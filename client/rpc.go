@@ -86,8 +86,16 @@ func (c *RemoteClient) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.Ap
 	return &r, nil
 }
 
-// Replicate sends one ReplicateRequest and returns one ReplicateResponse (one batch).
-// Use a dedicated replication client and call in a loop until resp.EndOfStream.
+// FindLeader asks a node which RPC address is currently the leader for the given topic.
+func (c *RemoteClient) FindLeader(ctx context.Context, req *protocol.FindLeaderRequest) (*protocol.FindLeaderResponse, error) {
+	resp, err := c.tc.Call(*req)
+	if err != nil {
+		return nil, err
+	}
+	r := resp.(protocol.FindLeaderResponse)
+	return &r, nil
+}
+
 func (c *RemoteClient) Replicate(ctx context.Context, req *protocol.ReplicateRequest) (*protocol.ReplicateResponse, error) {
 	resp, err := c.tc.Call(*req)
 	if err != nil {
@@ -97,9 +105,6 @@ func (c *RemoteClient) Replicate(ctx context.Context, req *protocol.ReplicateReq
 	return &r, nil
 }
 
-// ReplicatePipeline sends multiple ReplicateRequests on the same connection without waiting for responses (connection pipelining),
-// then reads the same number of responses in order. Response i corresponds to request i.
-// Use one replication client per leader and pipeline requests for all topics that replicate from that leader.
 func (c *RemoteClient) ReplicatePipeline(requests []protocol.ReplicateRequest) ([]protocol.ReplicateResponse, error) {
 	for i := range requests {
 		if err := c.tc.Write(requests[i]); err != nil {

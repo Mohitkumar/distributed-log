@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"net"
+	"strings"
 
 	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/transport"
@@ -14,6 +16,18 @@ type ProducerClient struct {
 func NewProducerClient(addr string) (*ProducerClient, error) {
 	tc, err := transport.Dial(addr)
 	if err != nil {
+		// When running the producer outside Docker but the cluster is inside Docker,
+		// FindLeader may return hostnames like "node1:9094" that are only resolvable
+		// inside the Docker network. If we see a DNS error for such a hostname,
+		// fall back to dialing 127.0.0.1:<port>, which works with typical port mappings.
+		if strings.Contains(err.Error(), "no such host") {
+			if host, port, splitErr := net.SplitHostPort(addr); splitErr == nil && strings.HasPrefix(host, "node") && port != "" {
+				fallback := net.JoinHostPort("127.0.0.1", port)
+				if tc2, err2 := transport.Dial(fallback); err2 == nil {
+					return &ProducerClient{tc: tc2}, nil
+				}
+			}
+		}
 		return nil, err
 	}
 	return &ProducerClient{tc: tc}, nil

@@ -13,7 +13,6 @@ import (
 const (
 	IndexIntervalBytes = 4 * 1024    // 4KB
 	MaxSegmentBytes    = 1024 * 1024 // 1MB
-	WriteBufferSize    = 64 * 1024   // 64KB
 
 	lenWidth         = 4 // 4 bytes for message length
 	offWidth         = 8
@@ -22,19 +21,18 @@ const (
 
 var endian = binary.BigEndian
 
-// Segement represents a log segment consisting of a log file and an index file.
-// Base offset is the starting offset of the segment, NextOffset is the next offset to be assigned
+// Segment represents a log segment consisting of a log file and an index file.
+// Base offset is the starting offset of the segment, NextOffset is the next offset to be assigned.
 // Each log file is named as {baseOffset}.log and each index file is named as {baseOffset}.idx
 type Segment struct {
-	BaseOffset          uint64 //base offset of the segment
-	NextOffset          uint64 //next offset of the segment
-	MaxOffset           uint64 //max offset of the segment
+	BaseOffset          uint64 // base offset of the segment
+	NextOffset          uint64 // next offset of the segment
+	MaxOffset           uint64 // max offset of the segment
 	logFile             *os.File
-	bufWriter           *bufio.Writer // buffered writer for log file
 	index               *Index
 	bytesSinceLastIndex uint64
-	writePos            int64      // current end-of-log position
-	mu                  sync.Mutex // protects writes
+	writePos            int64 // current end-of-log position in bytes
+	mu                  sync.Mutex
 }
 
 func NewSegment(baseOffset uint64, dir string) (*Segment, error) {
@@ -53,7 +51,6 @@ func NewSegment(baseOffset uint64, dir string) (*Segment, error) {
 		BaseOffset: baseOffset,
 		NextOffset: baseOffset,
 		logFile:    logFile,
-		bufWriter:  bufio.NewWriterSize(logFile, WriteBufferSize),
 		index:      index,
 		writePos:   0,
 	}, nil
@@ -76,7 +73,6 @@ func LoadExistingSegment(baseOffset uint64, dir string) (*Segment, error) {
 		BaseOffset: baseOffset,
 		NextOffset: baseOffset,
 		logFile:    logFile,
-		bufWriter:  bufio.NewWriterSize(logFile, WriteBufferSize),
 		index:      index,
 	}
 	if err := segment.Recover(); err != nil {
@@ -103,21 +99,15 @@ func (s *Segment) Append(value []byte) (uint64, error) {
 	header := make([]byte, offWidth+lenWidth)
 	endian.PutUint64(header[0:offWidth], offset)
 	endian.PutUint32(header[offWidth:totalHeaderWidth], uint32(len(value)))
-	_, err := s.bufWriter.Write(header)
-	if err != nil {
+	if _, err := writeFull(s.logFile, header); err != nil {
 		return 0, err
 	}
-	_, err = s.bufWriter.Write(value)
-	if err != nil {
+	if _, err := writeFull(s.logFile, value); err != nil {
 		return 0, err
 	}
 
 	s.bytesSinceLastIndex += uint64(totalHeaderWidth + len(value))
 	if s.bytesSinceLastIndex >= IndexIntervalBytes || offset == s.BaseOffset {
-		// Flush buffer before indexing to ensure data is written
-		if err := s.bufWriter.Flush(); err != nil {
-			return 0, err
-		}
 		if err := s.index.Write(uint32(offset-s.BaseOffset), uint64(s.writePos)); err != nil {
 			return 0, err
 		}
@@ -144,9 +134,6 @@ func (s *Segment) Remove() error {
 
 func (s *Segment) Read(offset uint64) ([]byte, error) {
 	s.mu.Lock()
-	if s.bufWriter != nil {
-		_ = s.bufWriter.Flush()
-	}
 	writePos := s.writePos
 	s.mu.Unlock()
 
@@ -214,10 +201,9 @@ func (s *Segment) Reader() io.Reader {
 
 // NewStreamingReader returns an io.Reader starting at the physical position
 // corresponding to startOffset. It will read until the current end-of-segment.
+// No flush is needed: writes go directly to the file, so the OS page cache is the only buffer.
 func (s *Segment) NewStreamingReader(startOffset uint64) (io.Reader, error) {
 	s.mu.Lock()
-	//Flush Go's buffer so the reader can see the most recent appends
-	s.bufWriter.Flush()
 	currentWritePos := s.writePos
 	s.mu.Unlock()
 
@@ -287,7 +273,7 @@ func (s *Segment) Recover() error {
 		return ErrSeekFailed(err)
 	}
 
-	// Use a buffered reader for recovery to avoid thousands of small syscalls
+	// Buffered reader for recovery to avoid thousands of small read syscalls (read path only)
 	reader := bufio.NewReader(s.logFile)
 	currPos := startPos
 	currOffset := nextOffset
@@ -329,22 +315,16 @@ func (s *Segment) Recover() error {
 		return ErrTruncateFailed(err)
 	}
 
-	// 4. SYNC FILE POINTER: Crucial for bufio.Writer
-	// Truncate doesn't update the file's internal cursor.
+	// 4. Seek file to new EOF (truncate doesn't move the file offset)
 	if _, err := s.logFile.Seek(currPos, io.SeekStart); err != nil {
 		return err
 	}
 
-	// 5. Reset State
+	// 5. Reset state
 	s.writePos = currPos
 	s.NextOffset = currOffset
 
-	// Reset the production writer to the new EOF
-	if s.bufWriter != nil {
-		s.bufWriter.Reset(s.logFile)
-	}
-
-	// 6. Clean Index
+	// 6. Clean index
 	// Remove any index entries that point to the truncated/corrupt area
 	if err := s.index.TruncateAfter(uint64(currPos)); err != nil {
 		return ErrIndexSyncFailed(err)
@@ -360,24 +340,24 @@ func (s *Segment) IsFull() bool {
 	return pos >= MaxSegmentBytes
 }
 
-func (s *Segment) Flush() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.bufWriter.Flush(); err != nil {
-		return err
+// writeFull writes the entire buffer to f, retrying on short writes.
+func writeFull(f *os.File, buf []byte) (int, error) {
+	total := 0
+	for len(buf) > 0 {
+		n, err := f.Write(buf)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		buf = buf[n:]
 	}
-	return nil
+	return total, nil
 }
 
 func (s *Segment) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.bufWriter != nil {
-		if err := s.bufWriter.Flush(); err != nil {
-			return err
-		}
-	}
 	if err := s.logFile.Close(); err != nil {
 		return err
 	}
