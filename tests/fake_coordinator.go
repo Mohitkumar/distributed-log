@@ -193,9 +193,11 @@ func (f *FakeTopicCoordinator) GetNodeIDWithLeastTopics() (*common.Node, error) 
 }
 
 func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
-	// For tests, treat the local node as the topic leader regardless of the requested leader,
-	// so that producer tests can always talk to the local node as leader.
-	leaderNodeID = f.NodeID
+	// For tests, when replicaCount == 0 (no replicas), treat the local node as the topic leader
+	// so that single-node producer tests can always talk to the local node as leader.
+	if replicaCount == 0 {
+		leaderNodeID = f.NodeID
+	}
 	f.Topics[topicName] = &fakeTopicMeta{
 		LeaderNodeID: leaderNodeID,
 		ReplicaIDs:   replicaNodeIds,

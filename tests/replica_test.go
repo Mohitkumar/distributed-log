@@ -10,6 +10,7 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/topic"
 )
 
 func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
@@ -18,23 +19,13 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	defer server2.Cleanup()
 
 	topicName := "test-topic"
-	ctx := context.Background()
 
-	// Create topic via RPC to Raft leader; replicas are created when each node applies the Raft event
-	remoteClient, err := client.NewRemoteClient(server1.Addr)
-	if err != nil {
-		t.Fatalf("NewReplicationClient: %v", err)
-	}
-	resp, err := remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        topicName,
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic via client: %v", err)
-	}
-	if resp.Topic != topicName {
-		t.Fatalf("CreateTopic response topic = %q, want %q", resp.Topic, topicName)
-	}
+	// Apply a CreateTopic event on both fake coordinators (simulating Raft log apply on all nodes).
+	leaderCoord := server1.Coordinator()
+	followerCoord := server2.Coordinator()
+	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leaderCoord.NodeID, []string{server2.Coordinator().NodeID})
+	leaderCoord.ApplyEvent(ev)
+	followerCoord.ApplyEvent(ev)
 
 	// Verify topic exists on leader (leader has the topic with leader log)
 	leaderView, err := server1.TopicManager.GetLeader(topicName)
@@ -79,29 +70,20 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 	defer server2.Cleanup()
 
 	topicName := "my-topic"
-	ctx := context.Background()
-
-	remoteClient, err := client.NewRemoteClient(server1.Addr)
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        topicName,
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic via client: %v", err)
-	}
+	// Apply CreateTopic event via fake coordinators on both nodes.
+	leaderCoord := server1.Coordinator()
+	followerCoord := server2.Coordinator()
+	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leaderCoord.NodeID, []string{server2.Coordinator().NodeID})
+	leaderCoord.ApplyEvent(ev)
+	followerCoord.ApplyEvent(ev)
 
 	// Leader has topic
-	_, err = server1.TopicManager.GetTopic(topicName)
-	if err != nil {
+	if _, err := server1.TopicManager.GetTopic(topicName); err != nil {
 		t.Fatalf("leader should have topic: %v", err)
 	}
 
 	// Follower has topic (replica created when it applies the CreateTopic Raft event)
-	_, err = server2.TopicManager.GetTopic(topicName)
-	if err != nil {
+	if _, err := server2.TopicManager.GetTopic(topicName); err != nil {
 		t.Fatalf("follower should have topic after leader created it with replica: %v", err)
 	}
 
@@ -123,17 +105,14 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 
 	topicName := "repl-topic2"
 	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(server1.Addr)
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        topicName,
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic via client: %v", err)
-	}
+
+	// Apply CreateTopic event on both fake coordinators so both TopicManagers see leader+replica.
+	leaderCoord := server1.Coordinator()
+	followerCoord := server2.Coordinator()
+	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leaderCoord.NodeID, []string{server2.Coordinator().NodeID})
+	leaderCoord.ApplyEvent(ev)
+	followerCoord.ApplyEvent(ev)
+
 	producerClient, err := client.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
@@ -201,17 +180,13 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 
 	topicName := "repl-topic2"
 	ctx := context.Background()
-	remoteClient, err := client.NewRemoteClient(server1.Addr)
-	if err != nil {
-		t.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        topicName,
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		t.Fatalf("CreateTopic via client: %v", err)
-	}
+
+	// Apply CreateTopic event on both fake coordinators so both TopicManagers see leader+replica.
+	leaderCoord := server1.Coordinator()
+	followerCoord := server2.Coordinator()
+	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leaderCoord.NodeID, []string{server2.Coordinator().NodeID})
+	leaderCoord.ApplyEvent(ev)
+	followerCoord.ApplyEvent(ev)
 	producerClient, err := client.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
