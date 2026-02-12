@@ -641,11 +641,24 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
 		}
-		if tm := tm.Topics[e.Topic]; tm != nil {
-			if rs := tm.Replicas[e.ReplicaNodeID]; rs != nil {
+		t := tm.Topics[e.Topic]
+		if t != nil {
+			rs := t.Replicas[e.ReplicaNodeID]
+			if rs != nil {
 				rs.IsISR = e.Isr
 				rs.LEO = e.Leo
+			} else {
+				// Replica not in map (e.g. node restarted, or event order); add so LEO is tracked on all nodes
+				if t.Replicas == nil {
+					t.Replicas = make(map[string]*ReplicaState)
+				}
+				t.Replicas[e.ReplicaNodeID] = &ReplicaState{
+					ReplicaNodeID: e.ReplicaNodeID,
+					LEO:           e.Leo,
+					IsISR:         e.Isr,
+				}
 			}
+			tm.maybeAdvanceHW(t)
 		}
 	case protocol.MetadataEventTypeDeleteTopic:
 		e := protocol.DeleteTopicEvent{}
