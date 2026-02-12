@@ -142,22 +142,6 @@ func (tm *TopicManager) GetTopicLeaderRPCAddr(topic string) (string, error) {
 	return node.RpcAddr, nil
 }
 
-// applyDeleteTopicEventOnRaftLeader applies the delete topic event via Raft (this node must be Raft leader).
-func (tm *TopicManager) applyDeleteTopicEventOnRaftLeader(ctx context.Context, topicName string) error {
-	if tm.coordinator == nil {
-		return fmt.Errorf("topic: no coordinator")
-	}
-	return tm.coordinator.ApplyDeleteTopicEventInternal(topicName)
-}
-
-// applyIsrUpdateEventOnRaftLeader applies the ISR update event via Raft (this node must be Raft leader).
-func (tm *TopicManager) applyIsrUpdateEventOnRaftLeader(ctx context.Context, topic, replicaNodeID string, isr bool, leo int64) error {
-	if tm.coordinator == nil {
-		return fmt.Errorf("topic: no coordinator")
-	}
-	return tm.coordinator.ApplyIsrUpdateEventInternal(topic, replicaNodeID, isr, leo)
-}
-
 // CreateTopic creates a new topic with this node as leader and optional replicas on other nodes.
 // Returns the actual replica set (this node as leader + replica node IDs in order) for metadata.
 func (tm *TopicManager) CreateTopic(topic string, replicaCount int) (replicaNodeIds []string, err error) {
@@ -837,7 +821,7 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 			}
 		}
 		tm.Topics[e.Topic] = t
-		tm.ensureLocalLogForTopicLocked(e.Topic, e.LeaderNodeID, e.ReplicaNodeIds)
+		tm.ensureLocalLogForTopic(e.Topic, e.LeaderNodeID, e.ReplicaNodeIds)
 	case protocol.MetadataEventTypeLeaderChange:
 		e := protocol.LeaderChangeEvent{}
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
@@ -848,7 +832,7 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 			t.LeaderNodeID = e.LeaderNodeID
 			t.LeaderEpoch = e.LeaderEpoch
 			delete(t.Replicas, e.LeaderNodeID)
-			tm.ensureLocalLogAfterLeaderChangeLocked(e.Topic, e.LeaderNodeID)
+			tm.ensureLocalLogAfterLeaderChange(e.Topic, e.LeaderNodeID)
 		}
 	case protocol.MetadataEventTypeIsrUpdate:
 		e := protocol.IsrUpdateEvent{}
@@ -883,6 +867,7 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 			return err
 		}
 		delete(tm.Nodes, e.NodeID)
+		tm.maybeReassignTopicLeaders(e.NodeID)
 	case protocol.MetadataEventTypeUpdateNode:
 		e := protocol.UpdateNodeEvent{}
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
@@ -895,8 +880,8 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 	return nil
 }
 
-// ensureLocalLogForTopicLocked opens the local log for the topic if this node is leader or replica. Caller holds tm.mu.
-func (tm *TopicManager) ensureLocalLogForTopicLocked(topicName, leaderNodeID string, replicaNodeIds []string) {
+// ensureLocalLogForTopic opens the local log for the topic if this node is leader or replica. Caller holds tm.mu.
+func (tm *TopicManager) ensureLocalLogForTopic(topicName, leaderNodeID string, replicaNodeIds []string) {
 	t := tm.Topics[topicName]
 	if t == nil {
 		return
@@ -929,8 +914,8 @@ func (tm *TopicManager) ensureLocalLogForTopicLocked(topicName, leaderNodeID str
 	}
 }
 
-// ensureLocalLogAfterLeaderChangeLocked updates local log after leader change (promote or demote). Caller holds tm.mu.
-func (tm *TopicManager) ensureLocalLogAfterLeaderChangeLocked(topicName, newLeaderID string) {
+// ensureLocalLogAfterLeaderChange updates local log after leader change (promote or demote). Caller holds tm.mu.
+func (tm *TopicManager) ensureLocalLogAfterLeaderChange(topicName, newLeaderID string) {
 	t := tm.Topics[topicName]
 	if t == nil {
 		return
