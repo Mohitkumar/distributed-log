@@ -198,6 +198,8 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	// Sync fake nodes into each TopicManager so CreateTopic and replication see the cluster.
 	syncFakeNodesToTopicManager(server1TopicMgr, fake1)
 	syncFakeNodesToTopicManager(server2TopicMgr, fake2)
+	fake1.SetReplicationTarget(server1TopicMgr)
+	fake2.SetReplicationTarget(server2TopicMgr)
 
 	// Deterministically treat server1 as "leader" for tests that care.
 	fake1.IsRaftLeader = true

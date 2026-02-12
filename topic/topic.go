@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -200,23 +201,32 @@ func (tm *TopicManager) GetNodeIDWithLeastTopics() (string, error) {
 	defer tm.mu.RUnlock()
 	countByNode := make(map[string]int)
 	for _, node := range tm.Nodes {
-		countByNode[node.NodeID] = 0
+		if node != nil {
+			countByNode[node.NodeID] = 0
+		}
 	}
 	for _, t := range tm.Topics {
 		if t != nil && t.LeaderNodeID != "" {
 			countByNode[t.LeaderNodeID]++
 		}
 	}
-	var bestID string
-	minCount := -1
-	for id, c := range countByNode {
-		if minCount < 0 || c < minCount {
+	if len(countByNode) == 0 {
+		return "", ErrNoNodesInCluster
+	}
+	// Deterministic tie-breaking: pick the node ID with the smallest topic count;
+	// when counts are equal, pick lexicographically smallest node ID.
+	ids := make([]string, 0, len(countByNode))
+	for id := range countByNode {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	bestID := ids[0]
+	minCount := countByNode[bestID]
+	for _, id := range ids[1:] {
+		if c := countByNode[id]; c < minCount {
 			minCount = c
 			bestID = id
 		}
-	}
-	if bestID == "" {
-		return "", ErrNoNodesInCluster
 	}
 	return bestID, nil
 }
