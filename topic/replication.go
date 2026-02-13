@@ -2,6 +2,7 @@ package topic
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -109,7 +110,7 @@ func DoReplicateTopicsForLeader(
 			}
 			req := &protocol.FetchBatchRequest{
 				Topic:    topicName,
-				Id:       "",
+				Id:       fmt.Sprintf("replicate-%s-%s", currentNodeID, leaderNodeID),
 				Offset:   leo,
 				MaxCount: batchSize,
 			}
