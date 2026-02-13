@@ -56,22 +56,21 @@ func (c *RemoteClient) DeleteTopic(ctx context.Context, req *protocol.DeleteTopi
 }
 
 // FindLeader asks a node which RPC address is currently the leader for the given topic.
-func (c *RemoteClient) FindLeader(ctx context.Context, req *protocol.FindLeaderRequest) (*protocol.FindLeaderResponse, error) {
+func (c *RemoteClient) FindTopicLeader(ctx context.Context, req *protocol.FindTopicLeaderRequest) (*protocol.FindTopicLeaderResponse, error) {
 	resp, err := c.tc.Call(*req)
 	if err != nil {
 		return nil, err
 	}
-	r := resp.(protocol.FindLeaderResponse)
+	r := resp.(protocol.FindTopicLeaderResponse)
 	return &r, nil
 }
 
 // GetRaftLeader asks a node for the Raft (metadata) leader RPC address. Use this before create-topic.
-func (c *RemoteClient) GetRaftLeader(ctx context.Context, req *protocol.GetRaftLeaderRequest) (*protocol.GetRaftLeaderResponse, error) {
+func (c *RemoteClient) FindRaftLeader(ctx context.Context, req *protocol.FindRaftLeaderRequest) (*protocol.FindRaftLeaderResponse, error) {
 	resp, err := c.tc.Call(*req)
 	if err != nil {
 		return nil, err
 	}
-	r := resp.(protocol.GetRaftLeaderResponse)
+	r := resp.(protocol.FindRaftLeaderResponse)
 	return &r, nil
 }
-

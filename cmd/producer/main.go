@@ -53,7 +53,7 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			// Metadata RPC: get Raft leader address (like produce uses FindLeader for topic leader).
-			raftLeaderResp, err := remoteClient.GetRaftLeader(ctx, &protocol.GetRaftLeaderRequest{})
+			raftLeaderResp, err := remoteClient.FindRaftLeader(ctx, &protocol.FindRaftLeaderRequest{})
 			if err != nil {
 				return fmt.Errorf("get raft leader: %w", err)
 			}
@@ -100,7 +100,7 @@ func main() {
 
 			// Helper to resolve the current topic leader RPC address.
 			findLeader := func(ctx context.Context) (string, error) {
-				resp, err := remoteClient.FindLeader(ctx, &protocol.FindLeaderRequest{Topic: topic})
+				resp, err := remoteClient.FindTopicLeader(ctx, &protocol.FindTopicLeaderRequest{Topic: topic})
 				if err != nil {
 					return "", err
 				}

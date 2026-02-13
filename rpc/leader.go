@@ -20,7 +20,7 @@ func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRe
 	return s.topicManager.DeleteTopic(ctx, req)
 }
 
-func (srv *RpcServer) FindLeader(ctx context.Context, req *protocol.FindLeaderRequest) (*protocol.FindLeaderResponse, error) {
+func (srv *RpcServer) FindTopicLeader(ctx context.Context, req *protocol.FindTopicLeaderRequest) (*protocol.FindTopicLeaderResponse, error) {
 	if req.Topic == "" {
 		return nil, ErrTopicRequired
 	}
@@ -30,17 +30,17 @@ func (srv *RpcServer) FindLeader(ctx context.Context, req *protocol.FindLeaderRe
 		return nil, ErrTopicNotFound(req.Topic, err)
 	}
 
-	return &protocol.FindLeaderResponse{
+	return &protocol.FindTopicLeaderResponse{
 		LeaderAddr: leaderAddr,
 	}, nil
 }
 
 // GetRaftLeader returns the RPC address of the current Raft (metadata) leader.
 // Any node can answer; clients should send create-topic and other metadata ops to this address.
-func (srv *RpcServer) GetRaftLeader(ctx context.Context, req *protocol.GetRaftLeaderRequest) (*protocol.GetRaftLeaderResponse, error) {
+func (srv *RpcServer) FindRaftLeader(ctx context.Context, req *protocol.FindRaftLeaderRequest) (*protocol.FindRaftLeaderResponse, error) {
 	addr, err := srv.topicManager.GetRaftLeaderRPCAddr()
 	if err != nil {
 		return nil, err
 	}
-	return &protocol.GetRaftLeaderResponse{RaftLeaderAddr: addr}, nil
+	return &protocol.FindRaftLeaderResponse{RaftLeaderAddr: addr}, nil
 }

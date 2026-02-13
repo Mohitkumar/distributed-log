@@ -72,11 +72,11 @@ type ProduceBatchResponse struct {
 
 // FindLeader types are used by clients to discover the topic leader RPC address.
 // Any node can answer this using its local metadata (kept in sync via Raft).
-type FindLeaderRequest struct {
+type FindTopicLeaderRequest struct {
 	Topic string
 }
 
-type FindLeaderResponse struct {
+type FindTopicLeaderResponse struct {
 	LeaderAddr string
 }
 
@@ -91,9 +91,9 @@ type ApplyIsrUpdateEventResponse struct{}
 
 // GetRaftLeader types are used by clients to discover the Raft (metadata) leader RPC address.
 // Any node can answer; create-topic and other metadata ops should be sent to the Raft leader.
-type GetRaftLeaderRequest struct{}
+type FindRaftLeaderRequest struct{}
 
-type GetRaftLeaderResponse struct {
+type FindRaftLeaderResponse struct {
 	RaftLeaderAddr string
 }
 

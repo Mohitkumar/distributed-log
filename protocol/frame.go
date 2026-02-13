@@ -40,10 +40,10 @@ const (
 	MsgDeleteTopic
 	MsgDeleteTopicResp
 	MsgRPCError
-	MsgFindLeader
-	MsgFindLeaderResp
-	MsgGetRaftLeader
-	MsgGetRaftLeaderResp
+	MsgFindTopicLeader
+	MsgFindTopicLeaderResp
+	MsgFindRaftLeader
+	MsgFindRaftLeaderResp
 	MsgApplyIsrUpdateEvent
 	MsgApplyIsrUpdateEventResp
 )

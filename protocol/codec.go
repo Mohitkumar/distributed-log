@@ -66,17 +66,17 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	case DeleteTopicResponse, *DeleteTopicResponse:
 		mType = MsgDeleteTopicResp
 		payload, err = json.Marshal(v)
-	case FindLeaderRequest, *FindLeaderRequest:
-		mType = MsgFindLeader
+	case FindTopicLeaderRequest, *FindTopicLeaderRequest:
+		mType = MsgFindTopicLeader
 		payload, err = json.Marshal(v)
-	case FindLeaderResponse, *FindLeaderResponse:
-		mType = MsgFindLeaderResp
+	case FindTopicLeaderResponse, *FindTopicLeaderResponse:
+		mType = MsgFindTopicLeaderResp
 		payload, err = json.Marshal(v)
-	case GetRaftLeaderRequest, *GetRaftLeaderRequest:
-		mType = MsgGetRaftLeader
+	case FindRaftLeaderRequest, *FindRaftLeaderRequest:
+		mType = MsgFindRaftLeader
 		payload, err = json.Marshal(v)
-	case GetRaftLeaderResponse, *GetRaftLeaderResponse:
-		mType = MsgGetRaftLeaderResp
+	case FindRaftLeaderResponse, *FindRaftLeaderResponse:
+		mType = MsgFindRaftLeaderResp
 		payload, err = json.Marshal(v)
 	case ApplyIsrUpdateEventRequest, *ApplyIsrUpdateEventRequest:
 		mType = MsgApplyIsrUpdateEvent
@@ -182,20 +182,20 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		var msg ApplyIsrUpdateEventResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
-	case MsgFindLeader:
-		var msg FindLeaderRequest
+	case MsgFindTopicLeader:
+		var msg FindTopicLeaderRequest
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
-	case MsgFindLeaderResp:
-		var msg FindLeaderResponse
+	case MsgFindTopicLeaderResp:
+		var msg FindTopicLeaderResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
-	case MsgGetRaftLeader:
-		var msg GetRaftLeaderRequest
+	case MsgFindRaftLeader:
+		var msg FindRaftLeaderRequest
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
-	case MsgGetRaftLeaderResp:
-		var msg GetRaftLeaderResponse
+	case MsgFindRaftLeaderResp:
+		var msg FindRaftLeaderResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	case MsgRPCError:

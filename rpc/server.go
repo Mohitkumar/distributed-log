@@ -66,13 +66,13 @@ func (s *RpcServer) RegisterHandlers() {
 		return s.DeleteTopic(ctx, &r)
 	})
 	// Discovery
-	s.transport.RegisterHandler(protocol.MsgFindLeader, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.FindLeaderRequest)
-		return s.FindLeader(ctx, &r)
+	s.transport.RegisterHandler(protocol.MsgFindTopicLeader, func(ctx context.Context, req any) (any, error) {
+		r := req.(protocol.FindTopicLeaderRequest)
+		return s.FindTopicLeader(ctx, &r)
 	})
-	s.transport.RegisterHandler(protocol.MsgGetRaftLeader, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.GetRaftLeaderRequest)
-		return s.GetRaftLeader(ctx, &r)
+	s.transport.RegisterHandler(protocol.MsgFindRaftLeader, func(ctx context.Context, req any) (any, error) {
+		r := req.(protocol.FindRaftLeaderRequest)
+		return s.FindRaftLeader(ctx, &r)
 	})
 }
 

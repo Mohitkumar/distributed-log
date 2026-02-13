@@ -58,7 +58,7 @@ func main() {
 
 			// Resolve topic leader RPC address.
 			leaderCtx, leaderCancel := context.WithTimeout(ctx, 5*time.Second)
-			leaderResp, err := remoteClient.FindLeader(leaderCtx, &protocol.FindLeaderRequest{Topic: topic})
+			leaderResp, err := remoteClient.FindTopicLeader(leaderCtx, &protocol.FindTopicLeaderRequest{Topic: topic})
 			leaderCancel()
 			if err != nil {
 				return err
@@ -115,7 +115,7 @@ func main() {
 					if strings.Contains(msg, "not the topic leader") || strings.Contains(msg, "this node is not leader") {
 						fmt.Fprintln(os.Stderr, "current node is no longer the topic leader; looking up new leader...")
 						leaderCtx, leaderCancel := context.WithTimeout(ctx, 5*time.Second)
-						leaderResp, findErr := remoteClient.FindLeader(leaderCtx, &protocol.FindLeaderRequest{Topic: topic})
+						leaderResp, findErr := remoteClient.FindTopicLeader(leaderCtx, &protocol.FindTopicLeaderRequest{Topic: topic})
 						leaderCancel()
 						if findErr != nil {
 							return findErr
