@@ -232,7 +232,6 @@ func (tm *TopicManager) GetNodeIDWithLeastTopics() (string, error) {
 }
 
 // pickReplicaNodeIds returns up to replicaCount node IDs from the cluster, excluding leaderNodeID.
-// Caller should hold tm.mu at least for the duration of reading Nodes; used when applying create-topic via Raft.
 func (tm *TopicManager) pickReplicaNodeIds(leaderNodeID string, replicaCount int) ([]string, error) {
 	var otherNodes []*NodeMetadata
 	for _, node := range tm.Nodes {
@@ -438,42 +437,6 @@ func (tm *TopicManager) ApplyChunk(topicName string, rawChunk []byte) error {
 		if _, appendErr := log.Append(rec.Value); appendErr != nil {
 			return appendErr
 		}
-	}
-	return nil
-}
-
-// ReportLEOViaRaft sends an ISR/LEO update to the Raft leader so it can be applied via the metadata log.
-// Replication goroutine calls this with replica LEO and leader LEO (from ReplicateResponse.LeaderLEO).
-func (tm *TopicManager) ReportLEOViaRaft(ctx context.Context, topicName string, replicaLEO, leaderLEO uint64) error {
-	if tm.coordinator == nil {
-		return nil
-	}
-	// Same ISR logic as previously in RecordLEORemote
-	var isr bool
-	if leaderLEO >= 100 {
-		isr = replicaLEO >= leaderLEO-100
-	} else {
-		isr = replicaLEO >= leaderLEO
-	}
-	raftLeaderNodeID, err := tm.coordinator.GetRaftLeaderNodeID()
-	if err != nil {
-		tm.Logger.Debug("report LEO via Raft: get raft leader failed", zap.String("topic", topicName), zap.Error(err))
-		return err
-	}
-	raftClient, err := tm.GetRPCClient(raftLeaderNodeID)
-	if err != nil {
-		tm.Logger.Debug("report LEO via Raft: dial raft leader failed", zap.String("topic", topicName), zap.Error(err))
-		return err
-	}
-	_, err = raftClient.ApplyIsrUpdateEvent(ctx, &protocol.ApplyIsrUpdateEventRequest{
-		Topic:         topicName,
-		ReplicaNodeID: tm.CurrentNodeID,
-		Isr:           isr,
-		Leo:           int64(replicaLEO),
-	})
-	if err != nil {
-		tm.Logger.Debug("apply ISR update on Raft leader failed", zap.String("topic", topicName), zap.Error(err))
-		return err
 	}
 	return nil
 }

@@ -55,15 +55,6 @@ func (c *RemoteClient) DeleteTopic(ctx context.Context, req *protocol.DeleteTopi
 	return &r, nil
 }
 
-func (c *RemoteClient) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.ApplyIsrUpdateEventRequest) (*protocol.ApplyIsrUpdateEventResponse, error) {
-	resp, err := c.tc.Call(*req)
-	if err != nil {
-		return nil, err
-	}
-	r := resp.(protocol.ApplyIsrUpdateEventResponse)
-	return &r, nil
-}
-
 // FindLeader asks a node which RPC address is currently the leader for the given topic.
 func (c *RemoteClient) FindLeader(ctx context.Context, req *protocol.FindLeaderRequest) (*protocol.FindLeaderResponse, error) {
 	resp, err := c.tc.Call(*req)

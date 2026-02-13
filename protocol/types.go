@@ -32,15 +32,6 @@ type DeleteTopicResponse struct {
 	Topic string
 }
 
-// ApplyIsrUpdateEventRequest is sent to the Raft leader to apply IsrUpdateEvent to the log.
-type ApplyIsrUpdateEventRequest struct {
-	Topic         string
-	ReplicaNodeID string
-	Isr           bool
-	Leo           int64
-}
-type ApplyIsrUpdateEventResponse struct{}
-
 // RPCErrorResponse is sent by the server when a handler returns an error, so the client gets the error message instead of EOF.
 type RPCErrorResponse struct {
 	Message string `json:"message"`

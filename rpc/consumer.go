@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
@@ -43,52 +42,6 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 	return &protocol.FetchResponse{
 		Entry: &protocol.LogEntry{Offset: off, Value: raw},
 	}, nil
-}
-
-// FetchStream streams log entries to the client (used over transport with polling).
-func (s *RpcServer) FetchStream(req *protocol.FetchRequest, send func(*protocol.FetchResponse) error) error {
-	if req.Topic == "" {
-		return ErrTopicRequired
-	}
-	id := req.Id
-	if id == "" {
-		id = "default"
-	}
-
-	leaderNode, err := s.topicManager.GetLeader(req.Topic)
-	if err != nil {
-		return ErrTopicNotFound(req.Topic, err)
-	}
-
-	off := req.Offset
-	if off == 0 {
-		if err := s.consumerManager.Recover(); err == nil {
-			if cached, err := s.consumerManager.GetOffset(id, req.Topic); err == nil {
-				off = cached
-			}
-		}
-	}
-
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		raw, err := leaderNode.Log.Read(off)
-		if err != nil {
-			<-ticker.C
-			continue
-		}
-		const offWidth = 8
-		if len(raw) >= offWidth {
-			raw = raw[offWidth:]
-		}
-		if err := send(&protocol.FetchResponse{
-			Entry: &protocol.LogEntry{Offset: off, Value: raw},
-		}); err != nil {
-			return err
-		}
-		off++
-	}
 }
 
 func (s *RpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffsetRequest) (*protocol.CommitOffsetResponse, error) {

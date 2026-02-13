@@ -37,8 +37,6 @@ const (
 	MsgCreateTopicResp
 	MsgDeleteTopic
 	MsgDeleteTopicResp
-	MsgApplyIsrUpdateEvent
-	MsgApplyIsrUpdateEventResp
 	MsgRPCError
 	MsgFindLeader
 	MsgFindLeaderResp

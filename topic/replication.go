@@ -78,7 +78,7 @@ func (tm *TopicManager) replicateAllTopics() {
 // DoReplicateTopicsForLeader runs pipelined replication for topicNames from leaderNodeID.
 func DoReplicateTopicsForLeader(
 	ctx context.Context,
-	target *TopicManager,
+	topicMgr *TopicManager,
 	currentNodeID string,
 	leaderNodeID string,
 	topicNames []string,
@@ -90,7 +90,7 @@ func DoReplicateTopicsForLeader(
 	if batchSize == 0 {
 		batchSize = DefaultReplicationBatchSize
 	}
-	replClient, err := target.GetReplicationClient(leaderNodeID)
+	replClient, err := topicMgr.GetReplicationClient(leaderNodeID)
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func DoReplicateTopicsForLeader(
 	for round := 0; round < ReplicateTopicsMaxRounds && len(names) > 0; round++ {
 		var requests []protocol.ReplicateRequest
 		for _, name := range names {
-			leo, ok := target.GetLEO(name)
+			leo, ok := topicMgr.GetLEO(name)
 			if !ok {
 				continue
 			}
@@ -123,12 +123,10 @@ func DoReplicateTopicsForLeader(
 				continue
 			}
 			if len(resp.RawChunk) > 0 {
-				_ = target.ApplyChunk(topicName, resp.RawChunk)
+				_ = topicMgr.ApplyChunk(topicName, resp.RawChunk)
 			}
 			if resp.EndOfStream {
-				if leo, ok := target.GetLEO(topicName); ok {
-					_ = target.ReportLEOViaRaft(ctx, topicName, leo, uint64(resp.LeaderLEO))
-				}
+				continue
 			} else {
 				names = append(names, topicName)
 			}

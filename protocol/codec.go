@@ -60,12 +60,6 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	case DeleteTopicResponse, *DeleteTopicResponse:
 		mType = MsgDeleteTopicResp
 		payload, err = json.Marshal(v)
-	case ApplyIsrUpdateEventRequest, *ApplyIsrUpdateEventRequest:
-		mType = MsgApplyIsrUpdateEvent
-		payload, err = json.Marshal(v)
-	case ApplyIsrUpdateEventResponse, *ApplyIsrUpdateEventResponse:
-		mType = MsgApplyIsrUpdateEventResp
-		payload, err = json.Marshal(v)
 	case FindLeaderRequest, *FindLeaderRequest:
 		mType = MsgFindLeader
 		payload, err = json.Marshal(v)

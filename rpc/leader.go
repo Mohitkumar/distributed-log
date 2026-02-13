@@ -21,14 +21,6 @@ func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRe
 	return s.topicManager.DeleteTopic(ctx, req)
 }
 
-// ApplyIsrUpdateEvent applies IsrUpdateEvent to the Raft log. Call on the Raft leader (e.g. from replica/leader via RPC).
-func (s *RpcServer) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.ApplyIsrUpdateEventRequest) (*protocol.ApplyIsrUpdateEventResponse, error) {
-	if err := s.topicManager.ApplyIsrUpdateEvent(req.Topic, req.ReplicaNodeID, req.Isr, req.Leo); err != nil {
-		return nil, err
-	}
-	return &protocol.ApplyIsrUpdateEventResponse{}, nil
-}
-
 func (s *RpcServer) handleReplicate(req *protocol.ReplicateRequest) (any, error) {
 	leaderLog, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {

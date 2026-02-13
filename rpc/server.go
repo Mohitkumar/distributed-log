@@ -65,10 +65,6 @@ func (s *RpcServer) RegisterHandlers() {
 		r := req.(protocol.DeleteTopicRequest)
 		return s.DeleteTopic(ctx, &r)
 	})
-	s.transport.RegisterHandler(protocol.MsgApplyIsrUpdateEvent, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.ApplyIsrUpdateEventRequest)
-		return s.ApplyIsrUpdateEvent(ctx, &r)
-	})
 	// Discovery
 	s.transport.RegisterHandler(protocol.MsgFindLeader, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.FindLeaderRequest)
