@@ -3,8 +3,8 @@ package rpc
 import (
 	"errors"
 
+	"github.com/mohitkumar/mlog/errs"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
 )
 
 // Err returns a *protocol.RPCError so the transport sends Code and Message to the client.
@@ -12,26 +12,55 @@ func Err(code int32, message string) error {
 	return &protocol.RPCError{Code: code, Message: message}
 }
 
-// FromError maps known errors (from topic, coordinator, etc.) to a *protocol.RPCError with the appropriate code.
+// CodeFor returns the protocol RPC code for the given error. Use when mapping errors to RPC responses.
+func CodeFor(err error) int32 {
+	if err == nil {
+		return 0
+	}
+	switch {
+	case errors.Is(err, errs.ErrTopicNotFound):
+		return protocol.CodeTopicNotFound
+	case errors.Is(err, errs.ErrTopicExists):
+		return protocol.CodeTopicExists
+	case errors.Is(err, errs.ErrNotEnoughNodes):
+		return protocol.CodeNotEnoughNodes
+	case errors.Is(err, errs.ErrCannotReachLeader):
+		return protocol.CodeCannotReachLeader
+	case errors.Is(err, errs.ErrThisNodeNotLeader):
+		return protocol.CodeNotTopicLeader
+	case errors.Is(err, errs.ErrInvalidAckMode):
+		return protocol.CodeInvalidAckMode
+	case errors.Is(err, errs.ErrTimeoutCatchUp):
+		return protocol.CodeTimeoutCatchUp
+	case errors.Is(err, errs.ErrValuesEmpty):
+		return protocol.CodeValuesRequired
+	case errors.Is(err, errs.ErrLogOffsetOutOfRange), errors.Is(err, errs.ErrSegmentOffsetNotFound):
+		return protocol.CodeReadOffset
+	case errors.Is(err, errs.ErrRaftNoLeader), errors.Is(err, errs.ErrRaftNodeNotFound):
+		return protocol.CodeRaftLeaderUnavailable
+	default:
+		return protocol.CodeUnknown
+	}
+}
+
+// Retriable returns true if the error is transient and the caller can retry (e.g. after re-resolving leader).
+func Retriable(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch CodeFor(err) {
+	case protocol.CodeNotTopicLeader, protocol.CodeTopicNotFound, protocol.CodeRaftLeaderUnavailable, protocol.CodeCannotReachLeader:
+		return true
+	default:
+		return false
+	}
+}
+
+// FromError maps known errors to a *protocol.RPCError with the appropriate code.
 // Use for errors returned by topicManager or coordinator that should be propagated to the client with a code.
 func FromError(err error) error {
 	if err == nil {
 		return nil
 	}
-	switch {
-	case errors.Is(err, topic.ErrTopicNotFound):
-		return &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: err.Error()}
-	case errors.Is(err, topic.ErrTopicExists):
-		return &protocol.RPCError{Code: protocol.CodeTopicExists, Message: err.Error()}
-	case errors.Is(err, topic.ErrNotEnoughNodes):
-		return &protocol.RPCError{Code: protocol.CodeNotEnoughNodes, Message: err.Error()}
-	case errors.Is(err, topic.ErrCannotReachLeader):
-		return &protocol.RPCError{Code: protocol.CodeCannotReachLeader, Message: err.Error()}
-	case errors.Is(err, topic.ErrInvalidAckMode):
-		return &protocol.RPCError{Code: protocol.CodeInvalidAckMode, Message: err.Error()}
-	case errors.Is(err, topic.ErrTimeoutCatchUp):
-		return &protocol.RPCError{Code: protocol.CodeTimeoutCatchUp, Message: err.Error()}
-	default:
-		return &protocol.RPCError{Code: protocol.CodeUnknown, Message: err.Error()}
-	}
+	return &protocol.RPCError{Code: CodeFor(err), Message: err.Error()}
 }

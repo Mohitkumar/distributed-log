@@ -2,11 +2,13 @@ package log
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/mohitkumar/mlog/errs"
 	"github.com/mohitkumar/mlog/segment"
 	"github.com/stretchr/testify/require"
 )
@@ -81,9 +83,8 @@ func TestLogManager_Read_WithHighWatermark(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when reading beyond high watermark, got nil")
 	}
-	expectedError := "offset 2 is beyond high watermark 1 (uncommitted data)"
-	if err.Error() != expectedError {
-		t.Fatalf("expected error '%s', got '%s'", expectedError, err.Error())
+	if !errors.Is(err, errs.ErrLogOffsetBeyondHW) {
+		t.Fatalf("expected ErrLogOffsetBeyondHW, got '%s'", err.Error())
 	}
 
 	// Advance high watermark to 2

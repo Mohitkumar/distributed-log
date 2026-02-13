@@ -3,6 +3,8 @@ package log
 import (
 	"io"
 	"sync"
+
+	"github.com/mohitkumar/mlog/errs"
 )
 
 type LogManager struct {
@@ -81,7 +83,7 @@ func (l *LogManager) Read(offset uint64) ([]byte, error) {
 	l.mu.RUnlock()
 	// Consumers should only be able to read up to (and including) the high watermark
 	if offset > hw {
-		return nil, ErrOffsetBeyondHW(offset, hw)
+		return nil, errs.ErrLogOffsetBeyondHWf(offset, hw)
 	}
 
 	return l.Log.Read(offset)

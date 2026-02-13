@@ -12,6 +12,7 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/coordinator"
+	"github.com/mohitkumar/mlog/errs"
 	"github.com/mohitkumar/mlog/log"
 	"github.com/mohitkumar/mlog/protocol"
 	"go.uber.org/zap"
@@ -121,7 +122,7 @@ func (tm *TopicManager) IsLeader(topic string) (bool, error) {
 	defer tm.mu.RUnlock()
 	topicObj, ok := tm.Topics[topic]
 	if !ok {
-		return false, ErrTopicNotFoundf(topic)
+		return false, errs.ErrTopicNotFoundf(topic)
 	}
 	return topicObj.LeaderNodeID == tm.CurrentNodeID, nil
 }
@@ -132,11 +133,11 @@ func (tm *TopicManager) GetTopicLeaderRPCAddr(topic string) (string, error) {
 	defer tm.mu.RUnlock()
 	topicObj, ok := tm.Topics[topic]
 	if !ok {
-		return "", ErrTopicNotFoundf(topic)
+		return "", errs.ErrTopicNotFoundf(topic)
 	}
 	node := tm.Nodes[topicObj.LeaderNodeID]
 	if node == nil {
-		return "", ErrTopicNotFoundf(topic)
+		return "", errs.ErrTopicNotFoundf(topic)
 	}
 	return node.RpcAddr, nil
 }
@@ -169,13 +170,13 @@ func (tm *TopicManager) CreateTopic(ctx context.Context, req *protocol.CreateTop
 	}
 	c := tm.coordinator
 	if !c.IsLeader() {
-		return nil, fmt.Errorf("create topic must be sent to Raft leader: %w", ErrCannotReachLeader)
+		return nil, fmt.Errorf("create topic must be sent to Raft leader: %w", errs.ErrCannotReachLeader)
 	}
 	tm.mu.RLock()
 	_, exists := tm.Topics[req.Topic]
 	if exists {
 		tm.mu.RUnlock()
-		return nil, ErrTopicExistsf(req.Topic)
+		return nil, errs.ErrTopicExistsf(req.Topic)
 	}
 	leaderNodeID, err := tm.GetNodeIDWithLeastTopics()
 	if err != nil {
@@ -185,7 +186,7 @@ func (tm *TopicManager) CreateTopic(ctx context.Context, req *protocol.CreateTop
 	replicaNodeIds, err := tm.pickReplicaNodeIds(leaderNodeID, int(req.ReplicaCount))
 	tm.mu.RUnlock()
 	if err != nil {
-		return nil, ErrCreateTopic(err)
+		return nil, errs.ErrCreateTopic(err)
 	}
 	tm.Logger.Info("applying create topic via Raft", zap.String("topic", req.Topic), zap.String("leader_node_id", leaderNodeID), zap.Strings("replica_node_ids", replicaNodeIds))
 	if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, leaderNodeID, replicaNodeIds); err != nil {
@@ -209,7 +210,7 @@ func (tm *TopicManager) GetNodeIDWithLeastTopics() (string, error) {
 		}
 	}
 	if len(countByNode) == 0 {
-		return "", ErrNoNodesInCluster
+		return "", errs.ErrNoNodesInCluster
 	}
 	// Deterministic tie-breaking: pick the node ID with the smallest topic count;
 	// when counts are equal, pick lexicographically smallest node ID.
@@ -238,7 +239,7 @@ func (tm *TopicManager) pickReplicaNodeIds(leaderNodeID string, replicaCount int
 		}
 	}
 	if len(otherNodes) < replicaCount {
-		return nil, ErrNotEnoughNodesf(replicaCount, len(otherNodes))
+		return nil, errs.ErrNotEnoughNodesf(replicaCount, len(otherNodes))
 	}
 	replicaNodeIds := make([]string, 0, replicaCount)
 	for i := 0; i < replicaCount; i++ {
@@ -255,17 +256,17 @@ func (tm *TopicManager) DeleteTopic(ctx context.Context, req *protocol.DeleteTop
 	}
 	c := tm.coordinator
 	if !c.IsLeader() {
-		return nil, fmt.Errorf("delete topic must be sent to Raft leader: %w", ErrCannotReachLeader)
+		return nil, fmt.Errorf("delete topic must be sent to Raft leader: %w", errs.ErrCannotReachLeader)
 	}
 	tm.mu.RLock()
 	_, exists := tm.Topics[req.Topic]
 	tm.mu.RUnlock()
 	if !exists {
-		return nil, ErrTopicNotFoundf(req.Topic)
+		return nil, errs.ErrTopicNotFoundf(req.Topic)
 	}
 	tm.Logger.Info("applying delete topic via Raft", zap.String("topic", req.Topic))
 	if err := c.ApplyDeleteTopicEventInternal(req.Topic); err != nil {
-		return nil, ErrApplyDeleteTopic(err)
+		return nil, errs.ErrApplyDeleteTopic(err)
 	}
 	return &protocol.DeleteTopicResponse{Topic: req.Topic}, nil
 }
@@ -276,10 +277,10 @@ func (tm *TopicManager) GetLeader(topic string) (*log.LogManager, error) {
 	defer tm.mu.RUnlock()
 	topicObj, ok := tm.Topics[topic]
 	if !ok {
-		return nil, ErrTopicNotFoundf(topic)
+		return nil, errs.ErrTopicNotFoundf(topic)
 	}
 	if topicObj.LeaderNodeID != tm.CurrentNodeID {
-		return nil, ErrThisNodeNotLeaderf(topic)
+		return nil, errs.ErrThisNodeNotLeaderf(topic)
 	}
 	return topicObj.Log, nil
 }
@@ -290,7 +291,7 @@ func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
 	defer tm.mu.RUnlock()
 	topicObj, ok := tm.Topics[topic]
 	if !ok {
-		return nil, ErrTopicNotFoundf(topic)
+		return nil, errs.ErrTopicNotFoundf(topic)
 	}
 	return topicObj, nil
 }
@@ -347,7 +348,7 @@ func (tm *TopicManager) restoreLeaderTopic(topic string) error {
 	}
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
-		return ErrCreateLog(err)
+		return errs.ErrCreateLog(err)
 	}
 	t.Log = logManager
 	tm.Logger.Info("restored leader topic from metadata", zap.String("topic", topic))
@@ -369,11 +370,11 @@ func (tm *TopicManager) restoreReplicaTopic(topic string, leaderId string) error
 		tm.Topics[topic] = topicObj
 	}
 	if topicObj.Log != nil {
-		return ErrTopicAlreadyReplicaf(topic)
+		return errs.ErrTopicAlreadyReplicaf(topic)
 	}
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
-		return ErrCreateLogReplica(err)
+		return errs.ErrCreateLogReplica(err)
 	}
 	topicObj.Log = logManager
 	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_id", leaderId))
@@ -536,18 +537,18 @@ func (tm *TopicManager) HandleProduce(ctx context.Context, t *Topic, logEntry *p
 		return offset, nil
 	case protocol.AckAll:
 		if err := tm.waitForAllFollowersToCatchUp(ctx, t, offset); err != nil {
-			return 0, ErrWaitFollowersCatchUp(err)
+			return 0, errs.ErrWaitFollowersCatchUp(err)
 		}
 		return offset, nil
 	default:
-		return 0, ErrInvalidAckModef(int32(acks))
+		return 0, errs.ErrInvalidAckModef(int32(acks))
 	}
 }
 
 // HandleProduceBatch appends multiple records (leader only).
 func (tm *TopicManager) HandleProduceBatch(ctx context.Context, t *Topic, values [][]byte, acks protocol.AckMode) (uint64, uint64, error) {
 	if len(values) == 0 {
-		return 0, 0, ErrValuesEmpty
+		return 0, 0, errs.ErrValuesEmpty
 	}
 
 	var base, last uint64
@@ -567,11 +568,11 @@ func (tm *TopicManager) HandleProduceBatch(ctx context.Context, t *Topic, values
 		return base, last, nil
 	case protocol.AckAll:
 		if err := tm.waitForAllFollowersToCatchUp(ctx, t, last); err != nil {
-			return 0, 0, ErrWaitFollowersCatchUp(err)
+			return 0, 0, errs.ErrWaitFollowersCatchUp(err)
 		}
 		return base, last, nil
 	default:
-		return 0, 0, ErrInvalidAckModef(int32(acks))
+		return 0, 0, errs.ErrInvalidAckModef(int32(acks))
 	}
 }
 
@@ -625,7 +626,7 @@ func (tm *TopicManager) waitForAllFollowersToCatchUp(ctx context.Context, t *Top
 			if t.Logger != nil {
 				t.Logger.Warn("timeout waiting for followers to catch up", zap.String("topic", t.Name), zap.Uint64("required_offset", offset))
 			}
-			return ErrTimeoutCatchUp
+			return errs.ErrTimeoutCatchUp
 		}
 	}
 }

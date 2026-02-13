@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	"github.com/mohitkumar/mlog/errs"
 )
 
 const (
@@ -138,7 +140,7 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 	s.mu.Unlock()
 
 	if offset < s.BaseOffset || offset >= s.NextOffset {
-		return nil, ErrOffsetOutOfRange(offset, s.BaseOffset, s.NextOffset)
+		return nil, errs.ErrSegmentOffsetOutOfRange(offset, s.BaseOffset, s.NextOffset)
 	}
 
 	// Start position: use index if we have an entry (sparse index gives position of record <= offset),
@@ -175,7 +177,7 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 			return value, err
 		}
 		if foundOffset > offset {
-			return nil, ErrOffsetNotFound
+			return nil, errs.ErrSegmentOffsetNotFound
 		}
 		currPos += int64(totalHeaderWidth) + int64(msgLen)
 	}
@@ -209,14 +211,14 @@ func (s *Segment) NewStreamingReader(startOffset uint64) (io.Reader, error) {
 
 	//Range check
 	if startOffset < s.BaseOffset || startOffset >= s.NextOffset {
-		return nil, ErrOffsetOutOfRangeSimple(startOffset)
+		return nil, errs.ErrSegmentOffsetOutOfRangeSimple(startOffset)
 	}
 
 	// Use the index to find the starting physical position
 	relOffset := uint32(startOffset - s.BaseOffset)
 	indexEntry, ok := s.index.Find(relOffset)
 	if !ok {
-		return nil, ErrIndexNotFound
+		return nil, errs.ErrSegmentIndexNotFound
 	}
 
 	//Calculate how many bytes are available to read from that position
@@ -263,14 +265,14 @@ func (s *Segment) Recover() error {
 	// 1. Start from the last healthy index entry
 	lastEntry, ok := s.index.Last()
 	if !ok {
-		return ErrIndexNotFound
+		return errs.ErrSegmentIndexNotFound
 	}
 	startPos = int64(lastEntry.Position)
 	nextOffset = s.BaseOffset + uint64(lastEntry.RelativeOffset)
 
 	// 2. Seek to the checkpoint
 	if _, err := s.logFile.Seek(startPos, io.SeekStart); err != nil {
-		return ErrSeekFailed(err)
+		return errs.ErrSeekFailed(err)
 	}
 
 	// Buffered reader for recovery to avoid thousands of small read syscalls (read path only)

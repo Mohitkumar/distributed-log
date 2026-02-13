@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/mohitkumar/mlog/errs"
 	"github.com/mohitkumar/mlog/segment"
 )
 
@@ -100,7 +101,7 @@ func (l *Log) Read(offset uint64) ([]byte, error) {
 		}
 	}
 	if targetSegment == nil || offset < targetSegment.BaseOffset || offset >= targetSegment.NextOffset {
-		return nil, ErrOffsetOutOfRange(offset)
+		return nil, errs.ErrLogOffsetOutOfRangef(offset)
 	}
 	r, err := targetSegment.Read(offset)
 	if err != nil {
@@ -206,7 +207,7 @@ func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	}
 	if targetIdx < 0 {
 		l.mu.RUnlock()
-		return nil, ErrOffsetOutOfRange(startOffset)
+		return nil, errs.ErrLogOffsetOutOfRangef(startOffset)
 	}
 	seg := l.segments[targetIdx]
 	r, err := seg.NewStreamingReader(startOffset)

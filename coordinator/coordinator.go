@@ -13,6 +13,7 @@ import (
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 	"github.com/mohitkumar/mlog/config"
 	"github.com/mohitkumar/mlog/discovery"
+	"github.com/mohitkumar/mlog/errs"
 	"go.uber.org/zap"
 )
 
@@ -96,7 +97,7 @@ func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, error) {
 	}
 	ra, err := raft.NewRaft(raftConfig, fsm, logStore, boltDB, snapshots, transport)
 	if err != nil {
-		return nil, ErrNewRaft(err)
+		return nil, errs.ErrNewRaft(err)
 	}
 	if cfg.Boostatrap {
 		configuration := raft.Configuration{
@@ -108,7 +109,7 @@ func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, error) {
 			},
 		}
 		if err := ra.BootstrapCluster(configuration).Error(); err != nil {
-			return nil, ErrBootstrapCluster(err)
+			return nil, errs.ErrBootstrapCluster(err)
 		}
 	}
 	return ra, nil

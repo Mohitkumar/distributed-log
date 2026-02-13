@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
+	"github.com/mohitkumar/mlog/errs"
 	"github.com/mohitkumar/mlog/protocol"
 	"go.uber.org/zap"
 )
@@ -37,7 +38,7 @@ func (c *Coordinator) ApplyCreateTopicEvent(topic string, replicaCount uint32, l
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply create topic failed", zap.Error(err), zap.String("topic", topic))
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
@@ -63,7 +64,7 @@ func (c *Coordinator) ApplyDeleteTopicEventInternal(topic string) error {
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply delete topic failed", zap.Error(err), zap.String("topic", topic))
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
@@ -88,7 +89,7 @@ func (c *Coordinator) ApplyNodeAddEvent(nodeID, addr, rpcAddr string) error {
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("add_node_id", nodeID))
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
@@ -113,7 +114,7 @@ func (c *Coordinator) ApplyNodeRemoveEvent(nodeID string) error {
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("remove_node_id", nodeID))
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
@@ -143,7 +144,7 @@ func (c *Coordinator) ApplyIsrUpdateEventInternal(topic, replicaNodeID string, i
 		} else {
 			c.Logger.Error("raft apply ISR update failed", zap.Error(err))
 		}
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
@@ -173,7 +174,7 @@ func (c *Coordinator) ApplyLeaderChangeEvent(topic, leaderNodeID string, leaderE
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply leader change failed", zap.Error(err), zap.String("topic", topic))
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }

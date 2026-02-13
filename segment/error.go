@@ -1,31 +1,19 @@
 package segment
 
-import (
-	"errors"
-	"fmt"
-)
+import "github.com/mohitkumar/mlog/errs"
 
-// Sentinel errors for segment package.
+// Re-export segment errors from errs so code that uses segment.Err* or errors.Is(err, segment.ErrX) still works.
 var (
-	ErrOffsetNotFound = errors.New("offset not found")
-	ErrIndexNotFound  = errors.New("index not found")
+	ErrOffsetNotFound = errs.ErrSegmentOffsetNotFound
+	ErrIndexNotFound  = errs.ErrSegmentIndexNotFound
 )
 
-// ErrOffsetOutOfRange returns error when offset is out of segment range.
 func ErrOffsetOutOfRange(offset, base, next uint64) error {
-	return fmt.Errorf("offset %d out of range [%d, %d)", offset, base, next)
+	return errs.ErrSegmentOffsetOutOfRange(offset, base, next)
 }
-
-// ErrOffsetOutOfRangeSimple returns error for offset out of range (single offset).
 func ErrOffsetOutOfRangeSimple(offset uint64) error {
-	return fmt.Errorf("offset %d out of range", offset)
+	return errs.ErrSegmentOffsetOutOfRangeSimple(offset)
 }
-
-// ErrSeekFailed wraps seek failure.
-func ErrSeekFailed(err error) error { return fmt.Errorf("failed to seek: %w", err) }
-
-// ErrTruncateFailed wraps truncate failure.
-func ErrTruncateFailed(err error) error { return fmt.Errorf("truncate failed: %w", err) }
-
-// ErrIndexSyncFailed wraps index sync failure.
-func ErrIndexSyncFailed(err error) error { return fmt.Errorf("index sync failed: %w", err) }
+func ErrSeekFailed(err error) error       { return errs.ErrSeekFailed(err) }
+func ErrTruncateFailed(err error) error   { return errs.ErrTruncateFailed(err) }
+func ErrIndexSyncFailed(err error) error  { return errs.ErrIndexSyncFailed(err) }

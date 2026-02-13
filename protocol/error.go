@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Sentinel errors for protocol package.
+// Sentinel errors for protocol package (no dependency on errs to avoid import cycle).
 var (
 	ErrFrameTooLarge       = errors.New("protocol: frame exceeds max size")
 	ErrReplicationBatchCRC = errors.New("protocol: replication batch CRC mismatch")
