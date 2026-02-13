@@ -128,9 +128,14 @@ func (c *Coordinator) EnsureSelfInMetadata() error {
 }
 
 func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
-	c.WaitforRaftReadyWithRetryBackoff(2*time.Second, 5)
+	if !c.IsRaftReady() {
+		if err := c.WaitforRaftReady(10 * time.Second); err != nil {
+			c.Logger.Error("raft not ready, skipping join", zap.Error(err), zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+			return err
+		}
+	}
 	if !c.IsLeader() {
-		c.Logger.Debug("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+		c.Logger.Error("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 		return nil
 	}
 	c.Logger.Info("join requested", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
@@ -162,9 +167,14 @@ func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 }
 
 func (c *Coordinator) Leave(id string) error {
-	c.WaitforRaftReadyWithRetryBackoff(2*time.Second, 5)
+	if !c.IsRaftReady() {
+		if err := c.WaitforRaftReady(10 * time.Second); err != nil {
+			c.Logger.Error("raft not ready, skipping leave", zap.Error(err), zap.String("leaving_node_id", id))
+			return err
+		}
+	}
 	if !c.IsLeader() {
-		c.Logger.Debug("not leader, skipping leave", zap.String("leaving_node_id", id))
+		c.Logger.Error("not leader, skipping leave", zap.String("leaving_node_id", id))
 		return nil
 	}
 	c.Logger.Info("leave requested", zap.String("leaving_node_id", id))
@@ -187,38 +197,24 @@ func (c *Coordinator) GetRaftLeaderNodeID() (string, error) {
 	return string(id), nil
 }
 
-func (c *Coordinator) WaitForLeader(timeout time.Duration) error {
+func (c *Coordinator) WaitforRaftReady(timeout time.Duration) error {
 	timeoutc := time.After(timeout)
 	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
 	for {
 		select {
 		case <-timeoutc:
-			return fmt.Errorf("timed out waiting for leader")
+			return fmt.Errorf("timed out waiting for raft ready")
 		case <-ticker.C:
-			if c.IsLeader() {
+			c.Logger.Info("waiting for raft ready", zap.String("leader", string(c.raft.Leader())))
+			if c.raft.Leader() != "" {
 				return nil
 			}
 		}
 	}
 }
 
-func (c *Coordinator) WaitforRaftReadyWithRetryBackoff(timeout time.Duration, retryCount int) error {
-	timeoutc := time.After(timeout)
-	backoff := time.Duration(1 * time.Second)
-	for i := 0; i < retryCount; i++ {
-		select {
-		case <-timeoutc:
-			return fmt.Errorf("timed out waiting for leader")
-		default:
-			if c.raft.Leader() != "" {
-				return nil
-			}
-			time.Sleep(backoff)
-			backoff *= 2
-		}
-	}
-	return fmt.Errorf("timed out waiting for leader")
+func (c *Coordinator) IsRaftReady() bool {
+	return c.raft.Leader() != ""
 }
 
 func (c *Coordinator) Start() error {

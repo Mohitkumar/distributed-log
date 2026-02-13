@@ -74,8 +74,10 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 	cmdHelper.topicMgr = topicMgr
 
 	if cmdHelper.RaftConfig.Boostatrap {
-		if err := cmdHelper.coord.WaitForLeader(30 * time.Second); err != nil {
-			return fmt.Errorf("wait for leader: %w", err)
+		if !cmdHelper.coord.IsRaftReady() {
+			if err := cmdHelper.coord.WaitforRaftReady(30 * time.Second); err != nil {
+				return fmt.Errorf("wait for leader: %w", err)
+			}
 		}
 	}
 	if cmdHelper.coord.IsLeader() {
@@ -87,8 +89,10 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 }
 
 func (cmdHelper *CommandHelper) setupTopicManager() error {
-	if err := cmdHelper.coord.WaitforRaftReadyWithRetryBackoff(RaftReadyTimeout, 2); err != nil {
-		cmdHelper.coord.Logger.Warn("raft not ready before restore", zap.Error(err))
+	if !cmdHelper.coord.IsRaftReady() {
+		if err := cmdHelper.coord.WaitforRaftReady(RaftReadyTimeout); err != nil {
+			cmdHelper.coord.Logger.Warn("raft not ready before restore", zap.Error(err))
+		}
 	}
 	if err := cmdHelper.topicMgr.RestoreFromMetadata(); err != nil {
 		return fmt.Errorf("restore topic manager from metadata: %w", err)
