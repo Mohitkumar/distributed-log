@@ -174,17 +174,15 @@ func (tm *TopicManager) CreateTopic(ctx context.Context, req *protocol.CreateTop
 	}
 	tm.mu.RLock()
 	_, exists := tm.Topics[req.Topic]
+	tm.mu.RUnlock()
 	if exists {
-		tm.mu.RUnlock()
 		return nil, errs.ErrTopicExistsf(req.Topic)
 	}
 	leaderNodeID, err := tm.GetNodeIDWithLeastTopics()
 	if err != nil {
-		tm.mu.RUnlock()
 		return nil, err
 	}
 	replicaNodeIds, err := tm.pickReplicaNodeIds(leaderNodeID, int(req.ReplicaCount))
-	tm.mu.RUnlock()
 	if err != nil {
 		return nil, errs.ErrCreateTopic(err)
 	}
@@ -232,12 +230,14 @@ func (tm *TopicManager) GetNodeIDWithLeastTopics() (string, error) {
 
 // pickReplicaNodeIds returns up to replicaCount node IDs from the cluster, excluding leaderNodeID.
 func (tm *TopicManager) pickReplicaNodeIds(leaderNodeID string, replicaCount int) ([]string, error) {
+	tm.mu.RLock()
 	var otherNodes []*NodeMetadata
 	for _, node := range tm.Nodes {
 		if node != nil && node.NodeID != leaderNodeID {
 			otherNodes = append(otherNodes, node)
 		}
 	}
+	tm.mu.RUnlock()
 	if len(otherNodes) < replicaCount {
 		return nil, errs.ErrNotEnoughNodesf(replicaCount, len(otherNodes))
 	}
@@ -665,23 +665,15 @@ func (tm *TopicManager) waitForAllFollowersToCatchUp(ctx context.Context, t *Top
 }
 
 func (tm *TopicManager) maybeAdvanceHW(t *Topic) {
-	t.mu.RLock()
-	if t.Log == nil {
-		t.mu.RUnlock()
-		return
-	}
 	minOffset := t.Log.LEO()
 	for _, r := range t.Replicas {
 		if r != nil && uint64(r.LEO) < minOffset {
 			minOffset = uint64(r.LEO)
 		}
 	}
-	t.mu.RUnlock()
-	t.mu.Lock()
 	if t.Log != nil {
 		t.Log.SetHighWatermark(minOffset)
 	}
-	t.mu.Unlock()
 }
 
 func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
@@ -887,33 +879,27 @@ func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
 	if tm.coordinator == nil || !tm.coordinator.IsLeader() {
 		return
 	}
-	tm.mu.RLock()
 	topicsCopy := make(map[string]*Topic, len(tm.Topics))
 	for k, v := range tm.Topics {
 		topicsCopy[k] = v
 	}
-	tm.mu.RUnlock()
 
 	for topicName, t := range topicsCopy {
 		if t == nil || t.LeaderNodeID != nodeID {
 			continue
 		}
 		var newLeader string
-		t.mu.RLock()
 		for rid, rs := range t.Replicas {
 			if rid == nodeID || rs == nil || !rs.IsISR {
 				continue
 			}
-			tm.mu.RLock()
 			n := tm.Nodes[rid]
-			tm.mu.RUnlock()
 			if n == nil {
 				continue
 			}
 			newLeader = rid
 			break
 		}
-		t.mu.RUnlock()
 		if newLeader == "" {
 			tm.Logger.Warn("no ISR replica for leadership", zap.String("topic", topicName), zap.String("old_leader_node_id", nodeID))
 			continue

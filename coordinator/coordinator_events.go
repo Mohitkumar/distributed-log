@@ -116,6 +116,7 @@ func (c *Coordinator) ApplyNodeRemoveEvent(nodeID string) error {
 		c.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("node_id", nodeID))
 		return errs.ErrRaftApply(err)
 	}
+	c.Logger.Info("raft apply node remove successful", zap.String("node_id", nodeID))
 	return nil
 }
 
