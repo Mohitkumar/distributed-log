@@ -118,12 +118,12 @@ func (c *Coordinator) ApplyNodeRemoveEvent(nodeID string) error {
 	return nil
 }
 
-func (c *Coordinator) ApplyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool, leo int64) error {
+func (c *Coordinator) ApplyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool) error {
 	if c.raft.State() != raft.Leader {
 		c.Logger.Debug("not leader, skipping ISR update event", zap.String("topic", topic))
 		return nil
 	}
-	eventData, err := json.Marshal(protocol.IsrUpdateEvent{Topic: topic, ReplicaNodeID: replicaNodeID, Isr: isr, Leo: leo})
+	eventData, err := json.Marshal(protocol.IsrUpdateEvent{Topic: topic, ReplicaNodeID: replicaNodeID, Isr: isr})
 	if err != nil {
 		return err
 	}

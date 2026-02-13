@@ -5,7 +5,7 @@ package topic
 type TopicCoordinator interface {
 	ApplyCreateTopicEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error
 	ApplyDeleteTopicEventInternal(topic string) error
-	ApplyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool, leo int64) error
+	ApplyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool) error
 	ApplyLeaderChangeEvent(topic, leaderNodeID string, leaderEpoch int64) error
 	IsLeader() bool
 	GetRaftLeaderNodeID() (string, error)
@@ -34,7 +34,6 @@ type ApplyEvent struct {
 		Topic         string
 		ReplicaNodeID string
 		Isr           bool
-		Leo           int64
 	}
 }
 

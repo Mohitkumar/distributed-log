@@ -182,6 +182,25 @@ func (f *FakeTopicCoordinator) UpdateTopicReplicaLEO(topicName, replicaNodeID st
 	rs.IsISR = isr
 }
 
+// UpdateTopicReplicaISR updates only the Isr bit for a replica (used when applying ISR events that no longer carry LEO).
+func (f *FakeTopicCoordinator) UpdateTopicReplicaISR(topicName, replicaNodeID string, isr bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Replicas[topicName] == nil {
+		f.Replicas[topicName] = make(map[string]*common.ReplicaState)
+	}
+	rs := f.Replicas[topicName][replicaNodeID]
+	if rs == nil {
+		f.Replicas[topicName][replicaNodeID] = &common.ReplicaState{
+			ReplicaNodeID: replicaNodeID,
+			LEO:           0,
+			IsISR:         isr,
+		}
+		return
+	}
+	rs.IsISR = isr
+}
+
 func (f *FakeTopicCoordinator) GetNodeIDWithLeastTopics() (*common.Node, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -237,10 +256,10 @@ func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
 	return nil
 }
 
-func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool, leo int64) error {
-	f.UpdateTopicReplicaLEO(topicName, replicaNodeID, leo, isr)
+func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool) error {
+	f.UpdateTopicReplicaISR(topicName, replicaNodeID, isr)
 	if f.replicationTarget != nil {
-		eventData, _ := json.Marshal(protocol.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr, Leo: leo})
+		eventData, _ := json.Marshal(protocol.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr})
 		ev := &protocol.MetadataEvent{EventType: protocol.MetadataEventTypeIsrUpdate, Data: eventData}
 		_ = f.replicationTarget.Apply(ev)
 	}
@@ -261,10 +280,10 @@ func (f *FakeTopicCoordinator) ApplyDeleteTopicEventInternal(topicName string) e
 	return f.applyDeleteTopicEvent(topicName)
 }
 
-func (f *FakeTopicCoordinator) ApplyIsrUpdateEventInternal(topicName, replicaNodeID string, isr bool, leo int64) error {
+func (f *FakeTopicCoordinator) ApplyIsrUpdateEventInternal(topicName, replicaNodeID string, isr bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.applyIsrUpdateEvent(topicName, replicaNodeID, isr, leo)
+	return f.applyIsrUpdateEvent(topicName, replicaNodeID, isr)
 }
 
 func (f *FakeTopicCoordinator) ApplyLeaderChangeEvent(topicName, leaderNodeID string, leaderEpoch int64) error {
@@ -365,8 +384,7 @@ func (f *FakeTopicCoordinator) ApplyEvent(ev topic.ApplyEvent) {
 		}
 	case topic.ApplyEventIsrUpdate:
 		if ev.IsrUpdate != nil {
-			// UpdateTopicReplicaLEO already locks internally.
-			_ = f.applyIsrUpdateEvent(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr, ev.IsrUpdate.Leo)
+			_ = f.applyIsrUpdateEvent(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr)
 		}
 	}
 }

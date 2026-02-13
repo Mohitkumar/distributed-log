@@ -41,7 +41,6 @@ type IsrUpdateEvent struct {
 	Topic         string `json:"topic"`
 	ReplicaNodeID string `json:"replica_id"`
 	Isr           bool   `json:"isr"`
-	Leo           int64  `json:"leo"`
 }
 
 type AddNodeEvent struct {

@@ -80,12 +80,11 @@ type FindTopicLeaderResponse struct {
 	LeaderAddr string
 }
 
-// ApplyIsrUpdateEventRequest is sent to the Raft leader to apply an ISR/LEO update for a replica.
+// ApplyIsrUpdateEventRequest is sent to the Raft leader to apply an ISR update for a replica.
 type ApplyIsrUpdateEventRequest struct {
 	Topic         string
 	ReplicaNodeID string
 	Isr           bool
-	Leo           int64
 }
 type ApplyIsrUpdateEventResponse struct{}
 

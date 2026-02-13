@@ -483,7 +483,7 @@ func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName
 		t.Replicas[replicaNodeID] = &ReplicaState{
 			ReplicaNodeID: replicaNodeID,
 			LEO:           leo,
-			IsISR:         false,
+			IsISR:         true,
 		}
 		rs = t.Replicas[replicaNodeID]
 	} else {
@@ -501,7 +501,7 @@ func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName
 	if tm.coordinator == nil {
 		return nil
 	}
-	return tm.coordinator.ApplyIsrUpdateEventInternal(topicName, replicaNodeID, isr, leo)
+	return tm.coordinator.ApplyIsrUpdateEventInternal(topicName, replicaNodeID, isr)
 }
 
 // GetConsumerClient returns a consumer client to the given node (used for replication via Fetch).
@@ -682,15 +682,14 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 			rs := t.Replicas[e.ReplicaNodeID]
 			if rs != nil {
 				rs.IsISR = e.Isr
-				rs.LEO = e.Leo
 			} else {
-				// Replica not in map (e.g. node restarted, or event order); add so LEO is tracked on all nodes
+				// Replica not in map (e.g. node restarted, or event order); add with LEO 0 (updated on leader via Fetch)
 				if t.Replicas == nil {
 					t.Replicas = make(map[string]*ReplicaState)
 				}
 				t.Replicas[e.ReplicaNodeID] = &ReplicaState{
 					ReplicaNodeID: e.ReplicaNodeID,
-					LEO:           e.Leo,
+					LEO:           0,
 					IsISR:         e.Isr,
 				}
 			}
