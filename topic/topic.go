@@ -188,7 +188,7 @@ func (tm *TopicManager) CreateTopic(ctx context.Context, req *protocol.CreateTop
 	if err != nil {
 		return nil, errs.ErrCreateTopic(err)
 	}
-	tm.Logger.Info("applying create topic via Raft", zap.String("topic", req.Topic), zap.String("leader_node_id", leaderNodeID), zap.Strings("replica_node_ids", replicaNodeIds))
+	tm.Logger.Info("create topic via Raft", zap.String("topic", req.Topic), zap.String("leader_node_id", leaderNodeID), zap.Strings("replica_node_ids", replicaNodeIds))
 	if err := c.ApplyCreateTopicEvent(req.Topic, req.ReplicaCount, leaderNodeID, replicaNodeIds); err != nil {
 		return nil, err
 	}
@@ -264,7 +264,7 @@ func (tm *TopicManager) DeleteTopic(ctx context.Context, req *protocol.DeleteTop
 	if !exists {
 		return nil, errs.ErrTopicNotFoundf(req.Topic)
 	}
-	tm.Logger.Info("applying delete topic via Raft", zap.String("topic", req.Topic))
+	tm.Logger.Info("delete topic via Raft", zap.String("topic", req.Topic))
 	if err := c.ApplyDeleteTopicEventInternal(req.Topic); err != nil {
 		return nil, errs.ErrApplyDeleteTopic(err)
 	}
@@ -308,7 +308,7 @@ func (tm *TopicManager) RestoreFromMetadata() error {
 	if len(topicNames) == 0 {
 		return nil
 	}
-	tm.Logger.Info("restoring topic manager from metadata", zap.Int("topic_count", len(topicNames)), zap.Strings("topics", topicNames))
+	tm.Logger.Info("restore from metadata", zap.Int("topic_count", len(topicNames)), zap.Strings("topics", topicNames))
 	for _, topicName := range topicNames {
 		tm.mu.RLock()
 		t := tm.Topics[topicName]
@@ -351,7 +351,7 @@ func (tm *TopicManager) restoreLeaderTopic(topic string) error {
 		return errs.ErrCreateLog(err)
 	}
 	t.Log = logManager
-	tm.Logger.Info("restored leader topic from metadata", zap.String("topic", topic))
+	tm.Logger.Info("leader topic restored", zap.String("topic", topic))
 	return nil
 }
 
@@ -377,7 +377,7 @@ func (tm *TopicManager) restoreReplicaTopic(topic string, leaderId string) error
 		return errs.ErrCreateLogReplica(err)
 	}
 	topicObj.Log = logManager
-	tm.Logger.Info("replica created for topic", zap.String("topic", topic), zap.String("leader_id", leaderId))
+	tm.Logger.Info("replica topic restored", zap.String("topic", topic), zap.String("leader_id", leaderId))
 	return nil
 }
 
@@ -624,7 +624,7 @@ func (tm *TopicManager) waitForAllFollowersToCatchUp(ctx context.Context, t *Top
 			return ctx.Err()
 		case <-timeout:
 			if t.Logger != nil {
-				t.Logger.Warn("timeout waiting for followers to catch up", zap.String("topic", t.Name), zap.Uint64("required_offset", offset))
+				t.Logger.Warn("followers catch-up timeout", zap.String("topic", t.Name), zap.Uint64("required_offset", offset))
 			}
 			return errs.ErrTimeoutCatchUp
 		}
@@ -762,11 +762,11 @@ func (tm *TopicManager) ensureLocalLogForTopic(topicName, leaderNodeID string, r
 		if t.Log == nil {
 			logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
 			if err != nil {
-				tm.Logger.Warn("ensureLocalLog: open leader log failed", zap.String("topic", topicName), zap.Error(err))
+				tm.Logger.Warn("open leader log failed", zap.String("topic", topicName), zap.Error(err))
 				return
 			}
 			t.Log = logManager
-			tm.Logger.Info("opened leader log for topic", zap.String("topic", topicName))
+			tm.Logger.Debug("leader log opened", zap.String("topic", topicName))
 		}
 		return
 	}
@@ -775,11 +775,11 @@ func (tm *TopicManager) ensureLocalLogForTopic(topicName, leaderNodeID string, r
 			if t.Log == nil {
 				logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
 				if err != nil {
-					tm.Logger.Warn("ensureLocalLog: open replica log failed", zap.String("topic", topicName), zap.Error(err))
+					tm.Logger.Warn("open replica log failed", zap.String("topic", topicName), zap.Error(err))
 					return
 				}
 				t.Log = logManager
-				tm.Logger.Info("opened replica log for topic", zap.String("topic", topicName), zap.String("leader_id", leaderNodeID))
+				tm.Logger.Debug("replica log opened", zap.String("topic", topicName), zap.String("leader_id", leaderNodeID))
 			}
 			return
 		}
@@ -796,12 +796,12 @@ func (tm *TopicManager) ensureLocalLogAfterLeaderChange(topicName, newLeaderID s
 		if t.Log == nil {
 			logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
 			if err != nil {
-				tm.Logger.Warn("ensureLocalLogAfterLeaderChange: open leader log failed", zap.String("topic", topicName), zap.Error(err))
+				tm.Logger.Warn("open leader log failed", zap.String("topic", topicName), zap.Error(err))
 				return
 			}
 			t.Log = logManager
 		}
-		tm.Logger.Info("promoted to leader for topic", zap.String("topic", topicName))
+		tm.Logger.Info("promoted to leader", zap.String("topic", topicName))
 		return
 	}
 	if t.LeaderNodeID == tm.CurrentNodeID {
@@ -821,11 +821,11 @@ func (tm *TopicManager) ensureLocalLogAfterLeaderChange(topicName, newLeaderID s
 		t.LeaderNodeID = newLeaderID
 		logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
 		if err != nil {
-			tm.Logger.Warn("ensureLocalLogAfterLeaderChange: open replica log failed", zap.String("topic", topicName), zap.Error(err))
+			tm.Logger.Warn("open replica log failed", zap.String("topic", topicName), zap.Error(err))
 			return
 		}
 		t.Log = logManager
-		tm.Logger.Info("demoted to replica for topic", zap.String("topic", topicName), zap.String("leader_id", newLeaderID))
+		tm.Logger.Info("demoted to replica", zap.String("topic", topicName), zap.String("leader_id", newLeaderID))
 	}
 }
 
@@ -847,7 +847,7 @@ func (tm *TopicManager) removeTopicLocalLocked(topicName string) {
 	}
 	delete(tm.Topics, topicName)
 	_ = os.RemoveAll(filepath.Join(tm.BaseDir, topicName))
-	tm.Logger.Info("removed topic locally", zap.String("topic", topicName))
+	tm.Logger.Info("topic removed", zap.String("topic", topicName))
 }
 
 func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
@@ -882,12 +882,12 @@ func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
 		}
 		t.mu.RUnlock()
 		if newLeader == "" {
-			tm.Logger.Warn("no ISR replica available to take leadership", zap.String("topic", topicName), zap.String("old_leader_node_id", nodeID))
+			tm.Logger.Warn("no ISR replica for leadership", zap.String("topic", topicName), zap.String("old_leader_node_id", nodeID))
 			continue
 		}
 		nextEpoch := t.LeaderEpoch + 1
 		if err := tm.coordinator.ApplyLeaderChangeEvent(topicName, newLeader, nextEpoch); err != nil {
-			tm.Logger.Warn("apply leader change failed", zap.String("topic", topicName), zap.Error(err))
+			tm.Logger.Warn("leader change apply failed", zap.String("topic", topicName), zap.Error(err))
 		}
 	}
 }
@@ -914,7 +914,7 @@ func (tm *TopicManager) Restore(data []byte) error {
 			if t.Log == nil {
 				logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, name))
 				if err != nil {
-					tm.Logger.Warn("restore: open leader log failed", zap.String("topic", name), zap.Error(err))
+					tm.Logger.Warn("open leader log failed", zap.String("topic", name), zap.Error(err))
 					continue
 				}
 				t.Log = logManager
@@ -923,7 +923,7 @@ func (tm *TopicManager) Restore(data []byte) error {
 			if t.Log == nil {
 				logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, name))
 				if err != nil {
-					tm.Logger.Warn("restore: open replica log failed", zap.String("topic", name), zap.Error(err))
+					tm.Logger.Warn("open replica log failed", zap.String("topic", name), zap.Error(err))
 					continue
 				}
 				t.Log = logManager

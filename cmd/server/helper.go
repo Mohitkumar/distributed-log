@@ -88,7 +88,7 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 
 func (cmdHelper *CommandHelper) setupTopicManager() error {
 	if err := cmdHelper.coord.WaitforRaftReadyWithRetryBackoff(RaftReadyTimeout, 2); err != nil {
-		cmdHelper.coord.Logger.Warn("Raft not ready before restore (continuing anyway)", zap.Error(err))
+		cmdHelper.coord.Logger.Warn("raft not ready before restore", zap.Error(err))
 	}
 	if err := cmdHelper.topicMgr.RestoreFromMetadata(); err != nil {
 		return fmt.Errorf("restore topic manager from metadata: %w", err)

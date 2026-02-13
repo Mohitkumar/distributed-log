@@ -59,7 +59,7 @@ func (m *Membership) setupSerf() (err error) {
 	if m.StartJoinAddrs != nil {
 		_, err = m.serf.Join(m.StartJoinAddrs, true)
 		if err != nil {
-			m.logger.Error("serf join failed", zap.Error(err), zap.Strings("addrs", m.StartJoinAddrs))
+			m.logger.Warn("serf join failed", zap.Error(err), zap.Strings("addrs", m.StartJoinAddrs))
 		}
 	}
 	return nil

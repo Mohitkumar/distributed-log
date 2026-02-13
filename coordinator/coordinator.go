@@ -130,10 +130,10 @@ func (c *Coordinator) EnsureSelfInMetadata() error {
 func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 	c.WaitforRaftReadyWithRetryBackoff(2*time.Second, 5)
 	if !c.IsLeader() {
-		c.Logger.Error("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+		c.Logger.Debug("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 		return nil
 	}
-	c.Logger.Info("joining cluster", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+	c.Logger.Info("join requested", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	configFuture := c.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
 		return err
@@ -153,7 +153,7 @@ func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 	}
 	addFuture := c.raft.AddVoter(serverID, serverAddr, 0, 0)
 	if err := addFuture.Error(); err != nil {
-		c.Logger.Error("raft add voter failed", zap.Error(err))
+		c.Logger.Error("raft add voter failed", zap.Error(err), zap.String("node_id", id))
 		return err
 	}
 	c.ApplyNodeAddEvent(id, raftAddr, rpcAddr)
@@ -164,16 +164,17 @@ func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 func (c *Coordinator) Leave(id string) error {
 	c.WaitforRaftReadyWithRetryBackoff(2*time.Second, 5)
 	if !c.IsLeader() {
-		c.Logger.Error("not leader, skipping leave", zap.String("leaving_node_id", id))
+		c.Logger.Debug("not leader, skipping leave", zap.String("leaving_node_id", id))
 		return nil
 	}
-	c.Logger.Info("leaving cluster", zap.String("leaving_node_id", id))
+	c.Logger.Info("leave requested", zap.String("leaving_node_id", id))
 	removeFuture := c.raft.RemoveServer(raft.ServerID(id), 0, 0)
 	if err := removeFuture.Error(); err != nil {
-		c.Logger.Error("raft remove server failed", zap.Error(err))
+		c.Logger.Error("raft remove server failed", zap.Error(err), zap.String("node_id", id))
 		return err
 	}
 	c.ApplyNodeRemoveEvent(id)
+	c.Logger.Info("node left cluster", zap.String("left_node_id", id))
 	return nil
 }
 
@@ -228,7 +229,7 @@ func (c *Coordinator) Start() error {
 }
 
 func (c *Coordinator) Shutdown() error {
-	c.Logger.Info("node shutting down")
+	c.Logger.Info("coordinator shutting down")
 	f := c.raft.Shutdown()
 	return f.Error()
 }

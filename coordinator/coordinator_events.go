@@ -34,7 +34,7 @@ func (c *Coordinator) ApplyCreateTopicEvent(topic string, replicaCount uint32, l
 	if err != nil {
 		return err
 	}
-	c.Logger.Info("applying create topic event", zap.String("topic", topic), zap.String("leader_node_id", leaderNodeID))
+	c.Logger.Info("apply create topic event", zap.String("topic", topic), zap.String("leader_node_id", leaderNodeID))
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply create topic failed", zap.Error(err), zap.String("topic", topic))
@@ -60,7 +60,7 @@ func (c *Coordinator) ApplyDeleteTopicEventInternal(topic string) error {
 	if err != nil {
 		return err
 	}
-	c.Logger.Info("applying delete topic event", zap.String("topic", topic))
+	c.Logger.Info("apply delete topic event", zap.String("topic", topic))
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply delete topic failed", zap.Error(err), zap.String("topic", topic))
@@ -88,7 +88,7 @@ func (c *Coordinator) ApplyNodeAddEvent(nodeID, addr, rpcAddr string) error {
 	}
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		c.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("add_node_id", nodeID))
+		c.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("node_id", nodeID))
 		return errs.ErrRaftApply(err)
 	}
 	return nil
@@ -113,7 +113,7 @@ func (c *Coordinator) ApplyNodeRemoveEvent(nodeID string) error {
 	}
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		c.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("remove_node_id", nodeID))
+		c.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("node_id", nodeID))
 		return errs.ErrRaftApply(err)
 	}
 	return nil
@@ -170,7 +170,7 @@ func (c *Coordinator) ApplyLeaderChangeEvent(topic, leaderNodeID string, leaderE
 	if err != nil {
 		return err
 	}
-	c.Logger.Info("applying leader change event", zap.String("topic", topic), zap.String("new_leader_node_id", leaderNodeID), zap.Int64("leader_epoch", leaderEpoch))
+	c.Logger.Info("apply leader change event", zap.String("topic", topic), zap.String("new_leader_node_id", leaderNodeID), zap.Int64("leader_epoch", leaderEpoch))
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply leader change failed", zap.Error(err), zap.String("topic", topic))
