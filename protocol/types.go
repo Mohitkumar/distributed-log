@@ -32,10 +32,52 @@ type DeleteTopicResponse struct {
 	Topic string
 }
 
-// RPCErrorResponse is sent by the server when a handler returns an error, so the client gets the error message instead of EOF.
+// RPC error codes. Clients can switch on Code to handle specific errors (e.g. retry on NOT_TOPIC_LEADER).
+const (
+	CodeUnknown int32 = iota
+	CodeTopicRequired
+	CodeTopicNameRequired
+	CodeTopicNotFound
+	CodeNotTopicLeader
+	CodeValuesRequired
+	CodeReadOffset
+	CodeCommitOffset
+	CodeRecoverOffsets
+	CodeReplicaCountInvalid
+	CodeLeaderAddrRequired
+	CodeRaftLeaderUnavailable
+	CodeTopicExists
+	CodeNotEnoughNodes
+	CodeCannotReachLeader
+	CodeInvalidAckMode
+	CodeTimeoutCatchUp
+)
+
+// RPCErrorResponse is sent by the server when a handler returns an error.
+// Code allows the client to handle specific errors (e.g. find new leader on CodeNotTopicLeader).
 type RPCErrorResponse struct {
+	Code    int32  `json:"code"`
 	Message string `json:"message"`
 }
+
+// RPCError is returned by the transport client when the server sends an RPCErrorResponse.
+// Clients can check the code to decide action, e.g. find new leader on CodeNotTopicLeader:
+//
+//	var rpcErr *protocol.RPCError
+//	if errors.As(err, &rpcErr) {
+//	    switch rpcErr.Code {
+//	    case protocol.CodeNotTopicLeader, protocol.CodeTopicNotFound:
+//	        // re-resolve leader and retry
+//	    case protocol.CodeReadOffset:
+//	        // no more data (e.g. replica caught up)
+//	    }
+//	}
+type RPCError struct {
+	Code    int32
+	Message string
+}
+
+func (e *RPCError) Error() string { return e.Message }
 
 type ReplicateRequest struct {
 	Topic         string

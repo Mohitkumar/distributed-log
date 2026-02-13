@@ -2,13 +2,14 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
 
 func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*protocol.FetchResponse, error) {
 	if req.Topic == "" {
-		return nil, ErrTopicRequired
+		return nil, Err(protocol.CodeTopicRequired, "topic is required")
 	}
 	id := req.Id
 	if id == "" {
@@ -26,7 +27,7 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 
 	leaderLog, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
-		return nil, ErrTopicNotFound(req.Topic, err)
+		return nil, &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: fmt.Sprintf("topic %s not found: %v", req.Topic, err)}
 	}
 
 	var raw []byte
@@ -39,7 +40,7 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 		if req.ReplicaNodeID != "" {
 			_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, int64(req.Offset))
 		}
-		return nil, ErrReadOffset(off, err)
+		return nil, &protocol.RPCError{Code: protocol.CodeReadOffset, Message: fmt.Sprintf("failed to read offset %d: %v", off, err)}
 	}
 	// Segment returns [offset 8 bytes][value]; strip header for response
 	const offWidth = 8
@@ -57,7 +58,7 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 
 func (s *RpcServer) FetchBatch(ctx context.Context, req *protocol.FetchBatchRequest) (*protocol.FetchBatchResponse, error) {
 	if req.Topic == "" {
-		return nil, ErrTopicRequired
+		return nil, Err(protocol.CodeTopicRequired, "topic is required")
 	}
 	id := req.Id
 	if id == "" {
@@ -75,7 +76,7 @@ func (s *RpcServer) FetchBatch(ctx context.Context, req *protocol.FetchBatchRequ
 
 	leaderLog, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
-		return nil, ErrTopicNotFound(req.Topic, err)
+		return nil, &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: fmt.Sprintf("topic %s not found: %v", req.Topic, err)}
 	}
 
 	maxCount := req.MaxCount
@@ -118,7 +119,7 @@ func (s *RpcServer) FetchBatch(ctx context.Context, req *protocol.FetchBatchRequ
 
 func (s *RpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffsetRequest) (*protocol.CommitOffsetResponse, error) {
 	if req.Topic == "" {
-		return nil, ErrTopicRequired
+		return nil, Err(protocol.CodeTopicRequired, "topic is required")
 	}
 
 	id := req.Id
@@ -127,14 +128,14 @@ func (s *RpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffset
 	}
 
 	if err := s.consumerManager.CommitOffset(id, req.Topic, req.Offset); err != nil {
-		return nil, ErrCommitOffset(err)
+		return nil, &protocol.RPCError{Code: protocol.CodeCommitOffset, Message: fmt.Sprintf("commit offset failed: %v", err)}
 	}
 	return &protocol.CommitOffsetResponse{Success: true}, nil
 }
 
 func (s *RpcServer) FetchOffset(ctx context.Context, req *protocol.FetchOffsetRequest) (*protocol.FetchOffsetResponse, error) {
 	if req.Topic == "" {
-		return nil, ErrTopicRequired
+		return nil, Err(protocol.CodeTopicRequired, "topic is required")
 	}
 
 	id := req.Id
@@ -143,7 +144,7 @@ func (s *RpcServer) FetchOffset(ctx context.Context, req *protocol.FetchOffsetRe
 	}
 
 	if err := s.consumerManager.Recover(); err != nil {
-		return nil, ErrRecoverOffsets(err)
+		return nil, &protocol.RPCError{Code: protocol.CodeRecoverOffsets, Message: fmt.Sprintf("recover offsets failed: %v", err)}
 	}
 
 	off, err := s.consumerManager.GetOffset(id, req.Topic)
