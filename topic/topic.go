@@ -20,25 +20,11 @@ import (
 const defaultMetadataLogInterval = 30 * time.Second
 
 type NodeMetadata struct {
-	mu             sync.RWMutex              `json:"-"`
-	NodeID         string                    `json:"node_id"`
-	Addr           string                    `json:"addr"`
-	RpcAddr        string                    `json:"rpc_addr"`
-	remoteClient   *client.RemoteClient      `json:"-"`
-	consumerClient *client.ConsumerClient    `json:"-"`
-}
-
-func (n *NodeMetadata) GetRpcClient() (*client.RemoteClient, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.remoteClient == nil {
-		remoteClient, err := client.NewRemoteClient(n.RpcAddr)
-		if err != nil {
-			return nil, err
-		}
-		n.remoteClient = remoteClient
-	}
-	return n.remoteClient, nil
+	mu             sync.RWMutex           `json:"-"`
+	NodeID         string                 `json:"node_id"`
+	Addr           string                 `json:"addr"`
+	RpcAddr        string                 `json:"rpc_addr"`
+	consumerClient *client.ConsumerClient `json:"-"`
 }
 
 func (n *NodeMetadata) GetConsumerClient() (*client.ConsumerClient, error) {
@@ -513,16 +499,6 @@ func (tm *TopicManager) GetConsumerClient(nodeID string) (*client.ConsumerClient
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
 	return node.GetConsumerClient()
-}
-
-func (tm *TopicManager) GetRPCClient(nodeID string) (*client.RemoteClient, error) {
-	tm.mu.RLock()
-	node := tm.Nodes[nodeID]
-	tm.mu.RUnlock()
-	if node == nil {
-		return nil, fmt.Errorf("node %s not found", nodeID)
-	}
-	return node.GetRpcClient()
 }
 
 // HandleProduce appends to the topic log (leader only). For ACK_ALL, waits for replicas to catch up.
