@@ -43,19 +43,6 @@ func CodeFor(err error) int32 {
 	}
 }
 
-// Retriable returns true if the error is transient and the caller can retry (e.g. after re-resolving leader).
-func Retriable(err error) bool {
-	if err == nil {
-		return false
-	}
-	switch CodeFor(err) {
-	case protocol.CodeNotTopicLeader, protocol.CodeTopicNotFound, protocol.CodeRaftLeaderUnavailable, protocol.CodeCannotReachLeader:
-		return true
-	default:
-		return false
-	}
-}
-
 // FromError maps known errors to a *protocol.RPCError with the appropriate code.
 // Use for errors returned by topicManager or coordinator that should be propagated to the client with a code.
 func FromError(err error) error {

@@ -35,7 +35,6 @@ func TestSegmentReadWrite(t *testing.T) {
 		[]byte("second record"),
 		[]byte("third record"),
 	}
-	segment.Flush()
 
 	var offsets []uint64
 	for _, r := range records {
