@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/mohitkumar/mlog/client"
@@ -109,11 +108,9 @@ func main() {
 					Offset: currentOffset,
 				})
 				if err != nil {
-					// Handle leader failover: if the node we are connected to is no longer leader,
-					// re-resolve the topic leader via FindLeader and reconnect, then resume.
-					msg := err.Error()
-					if strings.Contains(msg, "not the topic leader") || strings.Contains(msg, "this node is not leader") {
-						fmt.Fprintln(os.Stderr, "current node is no longer the topic leader; looking up new leader...")
+					// On leader change or connection failure, re-resolve leader and reconnect.
+					if client.ShouldReconnect(err) {
+						fmt.Fprintln(os.Stderr, "reconnecting (leader change or connection issue)...")
 						leaderCtx, leaderCancel := context.WithTimeout(ctx, 5*time.Second)
 						leaderResp, findErr := remoteClient.FindTopicLeader(leaderCtx, &protocol.FindTopicLeaderRequest{Topic: topic})
 						leaderCancel()
@@ -130,10 +127,10 @@ func main() {
 						if findErr != nil {
 							return findErr
 						}
-						fmt.Fprintf(os.Stderr, "reconnected to new topic leader at %s\n", leaderAddr)
+						fmt.Fprintf(os.Stderr, "reconnected to topic leader at %s\n", leaderAddr)
 						continue
 					}
-					continue
+					return err
 				}
 				if resp.Entry == nil {
 					continue

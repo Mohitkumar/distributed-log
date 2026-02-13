@@ -40,6 +40,18 @@ func (n *NodeMetadata) GetConsumerClient() (*client.ConsumerClient, error) {
 	return n.consumerClient, nil
 }
 
+// InvalidateConsumerClient closes and clears the cached consumer client so the next
+// GetConsumerClient creates a fresh connection. Call when RPC fails with a reconnect-worthy
+// error (e.g. leader change, network failure) so replication or other callers get a new client.
+func (n *NodeMetadata) InvalidateConsumerClient() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.consumerClient != nil {
+		_ = n.consumerClient.Close()
+		n.consumerClient = nil
+	}
+}
+
 type ReplicaState struct {
 	ReplicaNodeID string `json:"replica_id"`
 	LEO           int64  `json:"leo"`
@@ -499,6 +511,18 @@ func (tm *TopicManager) GetConsumerClient(nodeID string) (*client.ConsumerClient
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
 	return node.GetConsumerClient()
+}
+
+// InvalidateConsumerClient closes and clears the cached consumer client for the given node.
+// Call when an RPC to that node fails with a reconnect-worthy error (e.g. protocol.ShouldReconnect).
+// The next GetConsumerClient(nodeID) will create a new connection.
+func (tm *TopicManager) InvalidateConsumerClient(nodeID string) {
+	tm.mu.RLock()
+	node := tm.Nodes[nodeID]
+	tm.mu.RUnlock()
+	if node != nil {
+		node.InvalidateConsumerClient()
+	}
 }
 
 // HandleProduce appends to the topic log (leader only). For ACK_ALL, waits for replicas to catch up.

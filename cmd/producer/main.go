@@ -151,9 +151,9 @@ func main() {
 						break
 					}
 
-					// If we got a leader error, re-resolve the leader and reconnect.
-					if strings.Contains(err.Error(), "not the topic leader") {
-						fmt.Fprintln(os.Stderr, "current node is no longer the topic leader; looking up new leader...")
+					// On leader change or connection failure, re-resolve leader and reconnect.
+					if client.ShouldReconnect(err) {
+						fmt.Fprintln(os.Stderr, "reconnecting (leader change or connection issue)...")
 						leaderCtx, cancelLeader := context.WithTimeout(ctx, 10*time.Second)
 						newLeaderAddr, findErr := findLeader(leaderCtx)
 						cancelLeader()
@@ -167,12 +167,10 @@ func main() {
 							return findErr
 						}
 
-						fmt.Fprintf(os.Stderr, "reconnected to new topic leader at %s\n", newLeaderAddr)
-						// Retry the message with the new leader.
+						fmt.Fprintf(os.Stderr, "reconnected to topic leader at %s\n", newLeaderAddr)
 						continue
 					}
 
-					// Any other error is returned to the caller.
 					return err
 				}
 			}

@@ -1,5 +1,10 @@
 package protocol
 
+import (
+	"errors"
+	"strings"
+)
+
 // LogEntry is a log record with offset and value (replaces api/common.LogEntry).
 type LogEntry struct {
 	Offset uint64
@@ -78,6 +83,34 @@ type RPCError struct {
 }
 
 func (e *RPCError) Error() string { return e.Message }
+
+// ShouldReconnect returns true if the error indicates the client should invalidate
+// the cached connection and reconnect (e.g. leader changed, topic not found, or network failure).
+// Use after RPC failures to decide whether to call InvalidateConsumerClient/InvalidateRpcClient
+// and retry on the next attempt.
+func ShouldReconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Server returned a structured RPC error code: reconnect on leader/topic/raft changes.
+	var rpcErr *RPCError
+	if errors.As(err, &rpcErr) {
+		switch rpcErr.Code {
+		case CodeNotTopicLeader, CodeTopicNotFound, CodeRaftLeaderUnavailable:
+			return true
+		default:
+			return false
+		}
+	}
+	// Low-level connection/network errors: reconnect.
+	s := err.Error()
+	return strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "i/o timeout") ||
+		strings.Contains(s, "EOF")
+}
 
 type ReplicateRequest struct {
 	Topic         string

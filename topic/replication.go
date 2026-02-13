@@ -2,8 +2,8 @@ package topic
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
@@ -116,8 +116,12 @@ func DoReplicateTopicsForLeader(
 			}
 			resp, err := consumerClient.FetchBatch(ctx, req)
 			if err != nil {
-				if isCaughtUpError(err) {
+				var rpcErr *protocol.RPCError
+				if errors.As(err, &rpcErr) && rpcErr.Code == protocol.CodeReadOffset {
 					continue
+				}
+				if protocol.ShouldReconnect(err) {
+					topicMgr.InvalidateConsumerClient(leaderNodeID)
 				}
 				stillReplicating = append(stillReplicating, topicName)
 				continue
@@ -143,8 +147,4 @@ func DoReplicateTopicsForLeader(
 		names = stillReplicating
 	}
 	return nil
-}
-
-func isCaughtUpError(err error) bool {
-	return err != nil && (strings.Contains(err.Error(), "out of range") || strings.Contains(err.Error(), "beyond"))
 }

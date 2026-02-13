@@ -110,6 +110,8 @@ func (s *RpcServer) FetchBatch(ctx context.Context, req *protocol.FetchBatchRequ
 		replicaLEO := int64(off)
 		if len(entries) == 0 {
 			replicaLEO = int64(req.Offset)
+			_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, replicaLEO)
+			return nil, &protocol.RPCError{Code: protocol.CodeReadOffset, Message: fmt.Sprintf("no data at offset %d (replica caught up)", req.Offset)}
 		}
 		_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, replicaLEO)
 	}
