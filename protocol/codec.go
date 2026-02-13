@@ -36,6 +36,12 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	case FetchResponse, *FetchResponse:
 		mType = MsgFetchResp
 		payload, err = json.Marshal(v)
+	case FetchBatchRequest, *FetchBatchRequest:
+		mType = MsgFetchBatch
+		payload, err = json.Marshal(v)
+	case FetchBatchResponse, *FetchBatchResponse:
+		mType = MsgFetchBatchResp
+		payload, err = json.Marshal(v)
 	case CommitOffsetRequest, *CommitOffsetRequest:
 		mType = MsgCommitOffset
 		payload, err = json.Marshal(v)
@@ -71,6 +77,12 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 		payload, err = json.Marshal(v)
 	case GetRaftLeaderResponse, *GetRaftLeaderResponse:
 		mType = MsgGetRaftLeaderResp
+		payload, err = json.Marshal(v)
+	case ApplyIsrUpdateEventRequest, *ApplyIsrUpdateEventRequest:
+		mType = MsgApplyIsrUpdateEvent
+		payload, err = json.Marshal(v)
+	case ApplyIsrUpdateEventResponse, *ApplyIsrUpdateEventResponse:
+		mType = MsgApplyIsrUpdateEventResp
 		payload, err = json.Marshal(v)
 	case RPCErrorResponse, *RPCErrorResponse:
 		mType = MsgRPCError
@@ -120,6 +132,14 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		return mType, msg, err
 	case MsgFetchResp:
 		var msg FetchResponse
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgFetchBatch:
+		var msg FetchBatchRequest
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgFetchBatchResp:
+		var msg FetchBatchResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	case MsgCommitOffset:

@@ -16,7 +16,7 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 	}
 
 	off := req.Offset
-	if off == 0 {
+	if off == 0 && req.ReplicaNodeID == "" {
 		if err := s.consumerManager.Recover(); err == nil {
 			if cached, err := s.consumerManager.GetOffset(id, req.Topic); err == nil {
 				off = cached
@@ -24,13 +24,21 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 		}
 	}
 
-	leaderNode, err := s.topicManager.GetLeader(req.Topic)
+	leaderLog, err := s.topicManager.GetLeader(req.Topic)
 	if err != nil {
 		return nil, ErrTopicNotFound(req.Topic, err)
 	}
 
-	raw, err := leaderNode.Log.Read(off)
+	var raw []byte
+	if req.ReplicaNodeID != "" {
+		raw, err = leaderLog.ReadUncommitted(off)
+	} else {
+		raw, err = leaderLog.Read(off)
+	}
 	if err != nil {
+		if req.ReplicaNodeID != "" {
+			_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, int64(req.Offset))
+		}
 		return nil, ErrReadOffset(off, err)
 	}
 	// Segment returns [offset 8 bytes][value]; strip header for response
@@ -39,9 +47,73 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 		raw = raw[offWidth:]
 	}
 
+	if req.ReplicaNodeID != "" {
+		_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, int64(off+1))
+	}
 	return &protocol.FetchResponse{
 		Entry: &protocol.LogEntry{Offset: off, Value: raw},
 	}, nil
+}
+
+func (s *RpcServer) FetchBatch(ctx context.Context, req *protocol.FetchBatchRequest) (*protocol.FetchBatchResponse, error) {
+	if req.Topic == "" {
+		return nil, ErrTopicRequired
+	}
+	id := req.Id
+	if id == "" {
+		id = "default"
+	}
+
+	off := req.Offset
+	if off == 0 && req.ReplicaNodeID == "" {
+		if err := s.consumerManager.Recover(); err == nil {
+			if cached, err := s.consumerManager.GetOffset(id, req.Topic); err == nil {
+				off = cached
+			}
+		}
+	}
+
+	leaderLog, err := s.topicManager.GetLeader(req.Topic)
+	if err != nil {
+		return nil, ErrTopicNotFound(req.Topic, err)
+	}
+
+	maxCount := req.MaxCount
+	if maxCount == 0 {
+		maxCount = 1
+	}
+
+	const offWidth = 8
+	var entries []*protocol.LogEntry
+	useUncommitted := req.ReplicaNodeID != ""
+
+	for n := uint32(0); n < maxCount; n++ {
+		var raw []byte
+		if useUncommitted {
+			raw, err = leaderLog.ReadUncommitted(off)
+		} else {
+			raw, err = leaderLog.Read(off)
+		}
+		if err != nil {
+			break
+		}
+		value := raw
+		if len(raw) >= offWidth {
+			value = raw[offWidth:]
+		}
+		entries = append(entries, &protocol.LogEntry{Offset: off, Value: value})
+		off++
+	}
+
+	if req.ReplicaNodeID != "" {
+		replicaLEO := int64(off)
+		if len(entries) == 0 {
+			replicaLEO = int64(req.Offset)
+		}
+		_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, replicaLEO)
+	}
+
+	return &protocol.FetchBatchResponse{Entries: entries}, nil
 }
 
 func (s *RpcServer) CommitOffset(ctx context.Context, req *protocol.CommitOffsetRequest) (*protocol.CommitOffsetResponse, error) {

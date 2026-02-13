@@ -30,10 +30,6 @@ func NewRpcServer(addr string, topicManager *topic.TopicManager, consumerManager
 
 // RegisterHandlers registers all RPC handlers on tr. Used by Start() and by tests that run the transport themselves.
 func (s *RpcServer) RegisterHandlers() {
-	s.transport.RegisterHandler(protocol.MsgReplicateStream, func(ctx context.Context, req any) (any, error) {
-		r := req.(protocol.ReplicateRequest)
-		return s.handleReplicate(&r)
-	})
 	// Producer
 	s.transport.RegisterHandler(protocol.MsgProduce, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.ProduceRequest)
@@ -47,6 +43,10 @@ func (s *RpcServer) RegisterHandlers() {
 	s.transport.RegisterHandler(protocol.MsgFetch, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.FetchRequest)
 		return s.Fetch(ctx, &r)
+	})
+	s.transport.RegisterHandler(protocol.MsgFetchBatch, func(ctx context.Context, req any) (any, error) {
+		r := req.(protocol.FetchBatchRequest)
+		return s.FetchBatch(ctx, &r)
 	})
 	s.transport.RegisterHandler(protocol.MsgCommitOffset, func(ctx context.Context, req any) (any, error) {
 		r := req.(protocol.CommitOffsetRequest)

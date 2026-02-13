@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"io"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
@@ -21,51 +20,27 @@ func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRe
 	return s.topicManager.DeleteTopic(ctx, req)
 }
 
-func (s *RpcServer) handleReplicate(req *protocol.ReplicateRequest) (any, error) {
-	leaderLog, err := s.topicManager.GetLeader(req.Topic)
-	if err != nil {
-		if topicObj, e := s.topicManager.GetTopic(req.Topic); e == nil && topicObj != nil && topicObj.Log != nil {
-			leaderLog = topicObj.Log
-			err = nil
-		}
+func (srv *RpcServer) FindLeader(ctx context.Context, req *protocol.FindLeaderRequest) (*protocol.FindLeaderResponse, error) {
+	if req.Topic == "" {
+		return nil, ErrTopicRequired
 	}
-	if leaderLog.LEO() <= req.Offset {
-		return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: nil, EndOfStream: true, LeaderLEO: int64(leaderLog.LEO())}, nil
-	}
-	reader, err := leaderLog.ReaderFrom(req.Offset)
 
+	leaderAddr, err := srv.topicManager.GetTopicLeaderRPCAddr(req.Topic)
+	if err != nil {
+		return nil, ErrTopicNotFound(req.Topic, err)
+	}
+
+	return &protocol.FindLeaderResponse{
+		LeaderAddr: leaderAddr,
+	}, nil
+}
+
+// GetRaftLeader returns the RPC address of the current Raft (metadata) leader.
+// Any node can answer; clients should send create-topic and other metadata ops to this address.
+func (srv *RpcServer) GetRaftLeader(ctx context.Context, req *protocol.GetRaftLeaderRequest) (*protocol.GetRaftLeaderResponse, error) {
+	addr, err := srv.topicManager.GetRaftLeaderRPCAddr()
 	if err != nil {
 		return nil, err
 	}
-
-	var batch []protocol.ReplicationRecord
-
-	var hitEOF bool
-	for len(batch) < int(req.BatchSize) {
-		offset, value, err := protocol.ReadRecordFromStream(reader)
-		if err == io.EOF {
-			hitEOF = true
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		batch = append(batch, protocol.ReplicationRecord{Offset: int64(offset), Value: value})
-	}
-	// EndOfStream when we reached end of log (EOF) or log was empty
-	endOfStream := hitEOF || len(batch) == 0
-	var rawChunk []byte
-	if len(batch) > 0 {
-		var encErr error
-		rawChunk, encErr = protocol.EncodeReplicationBatch(batch)
-		if encErr != nil {
-			return nil, encErr
-		}
-	}
-	leaderLEO := int64(0)
-	if endOfStream && leaderLog != nil {
-		leaderLEO = int64(leaderLog.LEO())
-	}
-	return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: rawChunk, EndOfStream: endOfStream, LeaderLEO: leaderLEO}, nil
+	return &protocol.GetRaftLeaderResponse{RaftLeaderAddr: addr}, nil
 }

@@ -27,6 +27,8 @@ const (
 	MsgProduceBatchResp
 	MsgFetch
 	MsgFetchResp
+	MsgFetchBatch
+	MsgFetchBatchResp
 	MsgFetchStream
 	MsgFetchStreamResp
 	MsgCommitOffset
@@ -42,4 +44,6 @@ const (
 	MsgFindLeaderResp
 	MsgGetRaftLeader
 	MsgGetRaftLeaderResp
+	MsgApplyIsrUpdateEvent
+	MsgApplyIsrUpdateEventResp
 )

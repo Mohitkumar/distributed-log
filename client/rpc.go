@@ -75,28 +75,3 @@ func (c *RemoteClient) GetRaftLeader(ctx context.Context, req *protocol.GetRaftL
 	return &r, nil
 }
 
-func (c *RemoteClient) Replicate(ctx context.Context, req *protocol.ReplicateRequest) (*protocol.ReplicateResponse, error) {
-	resp, err := c.tc.Call(*req)
-	if err != nil {
-		return nil, err
-	}
-	r := resp.(protocol.ReplicateResponse)
-	return &r, nil
-}
-
-func (c *RemoteClient) ReplicatePipeline(requests []protocol.ReplicateRequest) ([]protocol.ReplicateResponse, error) {
-	for i := range requests {
-		if err := c.tc.Write(requests[i]); err != nil {
-			return nil, err
-		}
-	}
-	responses := make([]protocol.ReplicateResponse, len(requests))
-	for i := range responses {
-		resp, err := c.tc.ReadResponse()
-		if err != nil {
-			return nil, err
-		}
-		responses[i] = resp.(protocol.ReplicateResponse)
-	}
-	return responses, nil
-}

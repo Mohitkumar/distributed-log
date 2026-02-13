@@ -80,6 +80,15 @@ type FindLeaderResponse struct {
 	LeaderAddr string
 }
 
+// ApplyIsrUpdateEventRequest is sent to the Raft leader to apply an ISR/LEO update for a replica.
+type ApplyIsrUpdateEventRequest struct {
+	Topic         string
+	ReplicaNodeID string
+	Isr           bool
+	Leo           int64
+}
+type ApplyIsrUpdateEventResponse struct{}
+
 // GetRaftLeader types are used by clients to discover the Raft (metadata) leader RPC address.
 // Any node can answer; create-topic and other metadata ops should be sent to the Raft leader.
 type GetRaftLeaderRequest struct{}
@@ -90,12 +99,26 @@ type GetRaftLeaderResponse struct {
 
 // Consumer types (replace api/consumer).
 type FetchRequest struct {
-	Topic  string
-	Id     string
-	Offset uint64
+	Topic         string
+	Id            string
+	Offset        uint64
+	ReplicaNodeID string // when set, leader uses ReadUncommitted and stores this offset as replica LEO
 }
 type FetchResponse struct {
 	Entry *LogEntry
+}
+
+// FetchBatchRequest fetches up to MaxCount records starting at Offset.
+// When ReplicaNodeID is set, leader uses ReadUncommitted and records replica LEO after the batch.
+type FetchBatchRequest struct {
+	Topic         string
+	Id            string
+	Offset        uint64
+	MaxCount      uint32
+	ReplicaNodeID string
+}
+type FetchBatchResponse struct {
+	Entries []*LogEntry
 }
 type CommitOffsetRequest struct {
 	Topic  string

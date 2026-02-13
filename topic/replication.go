@@ -2,6 +2,7 @@ package topic
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/mohitkumar/mlog/protocol"
@@ -75,7 +76,8 @@ func (tm *TopicManager) replicateAllTopics() {
 	}
 }
 
-// DoReplicateTopicsForLeader runs pipelined replication for topicNames from leaderNodeID.
+// DoReplicateTopicsForLeader replicates topicNames from leaderNodeID using the consumer FetchBatch API.
+// The consumer client is used with ReplicaNodeID set so the leader uses ReadUncommitted and records replica LEO.
 func DoReplicateTopicsForLeader(
 	ctx context.Context,
 	topicMgr *TopicManager,
@@ -90,47 +92,58 @@ func DoReplicateTopicsForLeader(
 	if batchSize == 0 {
 		batchSize = DefaultReplicationBatchSize
 	}
-	replClient, err := topicMgr.GetReplicationClient(leaderNodeID)
+	consumerClient, err := topicMgr.GetConsumerClient(leaderNodeID)
 	if err != nil {
 		return err
 	}
+	consumerClient.SetReplicaNodeID(currentNodeID)
+	defer consumerClient.SetReplicaNodeID("")
+
 	names := append([]string(nil), topicNames...)
 	for round := 0; round < ReplicateTopicsMaxRounds && len(names) > 0; round++ {
-		var requests []protocol.ReplicateRequest
-		for _, name := range names {
-			leo, ok := topicMgr.GetLEO(name)
+		stillReplicating := names[:0]
+		for _, topicName := range names {
+			leo, ok := topicMgr.GetLEO(topicName)
 			if !ok {
 				continue
 			}
-			requests = append(requests, protocol.ReplicateRequest{
-				Topic:         name,
-				Offset:        leo,
-				BatchSize:     batchSize,
-				ReplicaNodeID: currentNodeID,
-			})
-		}
-		if len(requests) == 0 {
-			break
-		}
-		responses, err := replClient.ReplicatePipeline(requests)
-		if err != nil {
-			return err
-		}
-		names = names[:0]
-		for _, resp := range responses {
-			topicName := resp.Topic
-			if topicName == "" {
+			req := &protocol.FetchBatchRequest{
+				Topic:    topicName,
+				Id:       "",
+				Offset:   leo,
+				MaxCount: batchSize,
+			}
+			resp, err := consumerClient.FetchBatch(ctx, req)
+			if err != nil {
+				if isCaughtUpError(err) {
+					continue
+				}
+				stillReplicating = append(stillReplicating, topicName)
 				continue
 			}
-			if len(resp.RawChunk) > 0 {
-				_ = topicMgr.ApplyChunk(topicName, resp.RawChunk)
+			applyErr := false
+			for _, entry := range resp.Entries {
+				if entry == nil {
+					continue
+				}
+				if err := topicMgr.ApplyRecord(topicName, entry.Value); err != nil {
+					stillReplicating = append(stillReplicating, topicName)
+					applyErr = true
+					break
+				}
 			}
-			if resp.EndOfStream {
+			if applyErr {
 				continue
-			} else {
-				names = append(names, topicName)
+			}
+			if uint32(len(resp.Entries)) >= batchSize {
+				stillReplicating = append(stillReplicating, topicName)
 			}
 		}
+		names = stillReplicating
 	}
 	return nil
+}
+
+func isCaughtUpError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "out of range") || strings.Contains(err.Error(), "beyond"))
 }

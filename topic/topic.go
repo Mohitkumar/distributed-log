@@ -20,12 +20,12 @@ import (
 const defaultMetadataLogInterval = 30 * time.Second
 
 type NodeMetadata struct {
-	mu                sync.RWMutex         `json:"-"`
-	NodeID            string               `json:"node_id"`
-	Addr              string               `json:"addr"`
-	RpcAddr           string               `json:"rpc_addr"`
-	remoteClient      *client.RemoteClient `json:"-"`
-	replicationClient *client.RemoteClient `json:"-"`
+	mu             sync.RWMutex              `json:"-"`
+	NodeID         string                    `json:"node_id"`
+	Addr           string                    `json:"addr"`
+	RpcAddr        string                    `json:"rpc_addr"`
+	remoteClient   *client.RemoteClient      `json:"-"`
+	consumerClient *client.ConsumerClient    `json:"-"`
 }
 
 func (n *NodeMetadata) GetRpcClient() (*client.RemoteClient, error) {
@@ -41,17 +41,17 @@ func (n *NodeMetadata) GetRpcClient() (*client.RemoteClient, error) {
 	return n.remoteClient, nil
 }
 
-func (n *NodeMetadata) GetReplicationClient() (*client.RemoteClient, error) {
+func (n *NodeMetadata) GetConsumerClient() (*client.ConsumerClient, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.replicationClient == nil {
-		replClient, err := client.NewRemoteClient(n.RpcAddr)
+	if n.consumerClient == nil {
+		consumerClient, err := client.NewConsumerClient(n.RpcAddr)
 		if err != nil {
 			return nil, err
 		}
-		n.replicationClient = replClient
+		n.consumerClient = consumerClient
 	}
-	return n.replicationClient, nil
+	return n.consumerClient, nil
 }
 
 type ReplicaState struct {
@@ -441,15 +441,78 @@ func (tm *TopicManager) ApplyChunk(topicName string, rawChunk []byte) error {
 	return nil
 }
 
-// GetReplicationClient returns a client to the given node (for replication); part of ReplicationTarget.
-func (tm *TopicManager) GetReplicationClient(nodeID string) (*client.RemoteClient, error) {
+// ApplyRecord appends a single record to the topic log (used by replica when replicating via Fetch).
+func (tm *TopicManager) ApplyRecord(topicName string, value []byte) error {
+	if len(value) == 0 {
+		return nil
+	}
+	tm.mu.RLock()
+	t := tm.Topics[topicName]
+	tm.mu.RUnlock()
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	log := t.Log
+	t.mu.RUnlock()
+	if log == nil {
+		return nil
+	}
+	_, err := log.Append(value)
+	return err
+}
+
+// RecordReplicaLEOFromFetch is called by the leader when it serves a Fetch from a replica (ReplicaNodeID set).
+// It updates the replica's LEO and applies an ISR update via Raft.
+func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName, replicaNodeID string, leo int64) error {
+	tm.mu.Lock()
+	t := tm.Topics[topicName]
+	if t == nil {
+		tm.mu.Unlock()
+		return nil
+	}
+	leaderLEO := uint64(0)
+	if t.Log != nil {
+		leaderLEO = t.Log.LEO()
+	}
+	if t.Replicas == nil {
+		t.Replicas = make(map[string]*ReplicaState)
+	}
+	rs := t.Replicas[replicaNodeID]
+	if rs == nil {
+		t.Replicas[replicaNodeID] = &ReplicaState{
+			ReplicaNodeID: replicaNodeID,
+			LEO:           leo,
+			IsISR:         false,
+		}
+		rs = t.Replicas[replicaNodeID]
+	} else {
+		rs.LEO = leo
+	}
+	var isr bool
+	if leaderLEO >= 100 {
+		isr = uint64(leo) >= leaderLEO-100
+	} else {
+		isr = uint64(leo) >= leaderLEO
+	}
+	rs.IsISR = isr
+	tm.mu.Unlock()
+	tm.maybeAdvanceHW(t)
+	if tm.coordinator == nil {
+		return nil
+	}
+	return tm.coordinator.ApplyIsrUpdateEventInternal(topicName, replicaNodeID, isr, leo)
+}
+
+// GetConsumerClient returns a consumer client to the given node (used for replication via Fetch).
+func (tm *TopicManager) GetConsumerClient(nodeID string) (*client.ConsumerClient, error) {
 	tm.mu.RLock()
 	node := tm.Nodes[nodeID]
 	tm.mu.RUnlock()
 	if node == nil {
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
-	return node.GetReplicationClient()
+	return node.GetConsumerClient()
 }
 
 func (tm *TopicManager) GetRPCClient(nodeID string) (*client.RemoteClient, error) {

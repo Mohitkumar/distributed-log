@@ -91,14 +91,14 @@ func (f *FakeTopicCoordinator) GetRpcClient(nodeID string) (*client.RemoteClient
 	return client.NewRemoteClient(n.RPCAddr)
 }
 
-func (f *FakeTopicCoordinator) GetReplicationClient(nodeID string) (*client.RemoteClient, error) {
+func (f *FakeTopicCoordinator) GetConsumerClient(nodeID string) (*client.ConsumerClient, error) {
 	f.mu.RLock()
 	n, ok := f.Nodes[nodeID]
 	f.mu.RUnlock()
 	if !ok || n == nil {
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
-	return client.NewRemoteClient(n.RPCAddr)
+	return client.NewConsumerClient(n.RPCAddr)
 }
 
 func (f *FakeTopicCoordinator) IsLeader() bool {
