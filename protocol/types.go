@@ -37,6 +37,26 @@ type DeleteTopicResponse struct {
 	Topic string
 }
 
+// ListTopics: any node can answer (metadata is replicated via Raft).
+type ListTopicsRequest struct{}
+
+type ReplicaInfo struct {
+	NodeID string
+	IsISR  bool
+	LEO    int64
+}
+
+type TopicInfo struct {
+	Name          string
+	LeaderNodeID  string
+	LeaderEpoch   int64
+	Replicas      []ReplicaInfo
+}
+
+type ListTopicsResponse struct {
+	Topics []TopicInfo
+}
+
 // RPC error codes. Clients can switch on Code to handle specific errors (e.g. retry on NOT_TOPIC_LEADER).
 const (
 	CodeUnknown int32 = iota

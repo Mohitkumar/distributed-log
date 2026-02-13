@@ -44,6 +44,8 @@ const (
 	MsgFindTopicLeaderResp
 	MsgFindRaftLeader
 	MsgFindRaftLeaderResp
+	MsgListTopics
+	MsgListTopicsResp
 	MsgApplyIsrUpdateEvent
 	MsgApplyIsrUpdateEventResp
 )

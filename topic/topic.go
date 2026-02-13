@@ -296,6 +296,39 @@ func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
 	return topicObj, nil
 }
 
+// ListTopics returns topic names with leader and replica info. Any node can serve this (metadata is replicated).
+func (tm *TopicManager) ListTopics() *protocol.ListTopicsResponse {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	out := make([]protocol.TopicInfo, 0, len(tm.Topics))
+	for name, t := range tm.Topics {
+		if t == nil {
+			continue
+		}
+		t.mu.RLock()
+		leaderID := t.LeaderNodeID
+		epoch := t.LeaderEpoch
+		replicas := make([]protocol.ReplicaInfo, 0, len(t.Replicas))
+		for _, rs := range t.Replicas {
+			if rs != nil {
+				replicas = append(replicas, protocol.ReplicaInfo{
+					NodeID: rs.ReplicaNodeID,
+					IsISR:  rs.IsISR,
+					LEO:    rs.LEO,
+				})
+			}
+		}
+		t.mu.RUnlock()
+		out = append(out, protocol.TopicInfo{
+			Name:         name,
+			LeaderNodeID: leaderID,
+			LeaderEpoch:  epoch,
+			Replicas:     replicas,
+		})
+	}
+	return &protocol.ListTopicsResponse{Topics: out}
+}
+
 // RestoreFromMetadata rebuilds local logs from in-memory metadata (Topics/Nodes).
 // Call after Restore() has populated Topics and Nodes from snapshot so local logs are opened where this node is leader or replica.
 func (tm *TopicManager) RestoreFromMetadata() error {

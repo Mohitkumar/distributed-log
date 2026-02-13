@@ -53,3 +53,8 @@ func (srv *RpcServer) FindRaftLeader(ctx context.Context, req *protocol.FindRaft
 	}
 	return &protocol.FindRaftLeaderResponse{RaftLeaderAddr: addr}, nil
 }
+
+// ListTopics returns all topics with leader and replica info. Any node can answer.
+func (srv *RpcServer) ListTopics(ctx context.Context, req *protocol.ListTopicsRequest) (*protocol.ListTopicsResponse, error) {
+	return srv.topicManager.ListTopics(), nil
+}

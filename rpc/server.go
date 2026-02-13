@@ -74,6 +74,10 @@ func (s *RpcServer) RegisterHandlers() {
 		r := req.(protocol.FindRaftLeaderRequest)
 		return s.FindRaftLeader(ctx, &r)
 	})
+	s.transport.RegisterHandler(protocol.MsgListTopics, func(ctx context.Context, req any) (any, error) {
+		r := req.(protocol.ListTopicsRequest)
+		return s.ListTopics(ctx, &r)
+	})
 }
 
 func (s *RpcServer) Start() error {

@@ -78,6 +78,12 @@ func (c *Codec) Encode(w io.Writer, msg any) error {
 	case FindRaftLeaderResponse, *FindRaftLeaderResponse:
 		mType = MsgFindRaftLeaderResp
 		payload, err = json.Marshal(v)
+	case ListTopicsRequest, *ListTopicsRequest:
+		mType = MsgListTopics
+		payload, err = json.Marshal(v)
+	case ListTopicsResponse, *ListTopicsResponse:
+		mType = MsgListTopicsResp
+		payload, err = json.Marshal(v)
 	case ApplyIsrUpdateEventRequest, *ApplyIsrUpdateEventRequest:
 		mType = MsgApplyIsrUpdateEvent
 		payload, err = json.Marshal(v)
@@ -196,6 +202,14 @@ func (c *Codec) Decode(r io.Reader) (MessageType, any, error) {
 		return mType, msg, err
 	case MsgFindRaftLeaderResp:
 		var msg FindRaftLeaderResponse
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgListTopics:
+		var msg ListTopicsRequest
+		err = json.Unmarshal(payload, &msg)
+		return mType, msg, err
+	case MsgListTopicsResp:
+		var msg ListTopicsResponse
 		err = json.Unmarshal(payload, &msg)
 		return mType, msg, err
 	case MsgRPCError:

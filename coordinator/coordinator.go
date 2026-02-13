@@ -183,9 +183,6 @@ func (c *Coordinator) IsLeader() bool {
 }
 
 func (c *Coordinator) GetRaftLeaderNodeID() (string, error) {
-	if !c.IsLeader() {
-		return "", fmt.Errorf("not leader")
-	}
 	_, id := c.raft.LeaderWithID()
 	return string(id), nil
 }

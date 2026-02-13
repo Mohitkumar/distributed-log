@@ -74,3 +74,13 @@ func (c *RemoteClient) FindRaftLeader(ctx context.Context, req *protocol.FindRaf
 	r := resp.(protocol.FindRaftLeaderResponse)
 	return &r, nil
 }
+
+// ListTopics returns all topics with leader and replica info. Any node can answer.
+func (c *RemoteClient) ListTopics(ctx context.Context, req *protocol.ListTopicsRequest) (*protocol.ListTopicsResponse, error) {
+	resp, err := c.tc.Call(*req)
+	if err != nil {
+		return nil, err
+	}
+	r := resp.(protocol.ListTopicsResponse)
+	return &r, nil
+}

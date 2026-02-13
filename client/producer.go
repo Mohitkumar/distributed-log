@@ -54,12 +54,3 @@ func (c *ProducerClient) ProduceBatch(ctx context.Context, req *protocol.Produce
 	r := resp.(protocol.ProduceBatchResponse)
 	return &r, nil
 }
-
-func (c *ProducerClient) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
-	resp, err := c.tc.Call(*req)
-	if err != nil {
-		return nil, err
-	}
-	r := resp.(protocol.CreateTopicResponse)
-	return &r, nil
-}
