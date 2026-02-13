@@ -35,7 +35,7 @@ type Coordinator struct {
 	metadataStore MetadataStore
 }
 
-// NewCoordinatorFromConfig creates a Coordinator from full config (replaces NewNodeFromConfig).
+// NewCoordinatorFromConfig creates a Coordinator from the given config.
 func NewCoordinatorFromConfig(cfg config.Config, metadataStore MetadataStore, logger *zap.Logger) (*Coordinator, error) {
 	if logger == nil {
 		logger = zap.NewNop()

@@ -7,12 +7,12 @@ import (
 	"github.com/mohitkumar/mlog/protocol"
 )
 
-// Err returns a *protocol.RPCError so the transport sends Code and Message to the client.
+// Err returns an RPCError with the given code and message; the transport sends it to the client.
 func Err(code int32, message string) error {
 	return &protocol.RPCError{Code: code, Message: message}
 }
 
-// CodeFor returns the protocol RPC code for the given error. Use when mapping errors to RPC responses.
+// CodeFor returns the protocol RPC code for the given error.
 func CodeFor(err error) int32 {
 	if err == nil {
 		return 0
@@ -43,8 +43,7 @@ func CodeFor(err error) int32 {
 	}
 }
 
-// FromError maps known errors to a *protocol.RPCError with the appropriate code.
-// Use for errors returned by topicManager or coordinator that should be propagated to the client with a code.
+// FromError converts an error to an RPCError with the appropriate code for the client.
 func FromError(err error) error {
 	if err == nil {
 		return nil

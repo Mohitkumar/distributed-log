@@ -314,7 +314,7 @@ func (s *Segment) Recover() error {
 
 	// 3. Truncate the log to the last confirmed valid byte
 	if err := s.logFile.Truncate(currPos); err != nil {
-		return ErrTruncateFailed(err)
+		return errs.ErrTruncateFailed(err)
 	}
 
 	// 4. Seek file to new EOF (truncate doesn't move the file offset)
@@ -329,7 +329,7 @@ func (s *Segment) Recover() error {
 	// 6. Clean index
 	// Remove any index entries that point to the truncated/corrupt area
 	if err := s.index.TruncateAfter(uint64(currPos)); err != nil {
-		return ErrIndexSyncFailed(err)
+		return errs.ErrIndexSyncFailed(err)
 	}
 
 	return nil

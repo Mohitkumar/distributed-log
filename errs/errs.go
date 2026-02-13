@@ -1,5 +1,5 @@
-// Package errs provides a single set of errors for the distributed log, grouped by layer.
-// Use errors.Is(err, errs.ErrX) to check errors. Use CodeFor(err) for RPC codes and Retriable(err) for retry.
+// Package errs provides shared errors for the distributed log, grouped by layer (segment, log, topic, raft, protocol, consumer).
+// Check errors with errors.Is(err, errs.ErrX). RPC code mapping lives in rpc.CodeFor.
 package errs
 
 import (
@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-// ============== Segment (storage) ==============
+// Segment errors (offset/index not found, seek/truncate/index sync failures).
 
 var (
 	ErrSegmentOffsetNotFound = errors.New("offset not found")
@@ -26,7 +26,7 @@ func ErrSeekFailed(err error) error  { return fmt.Errorf("failed to seek: %w", e
 func ErrTruncateFailed(err error) error { return fmt.Errorf("truncate failed: %w", err) }
 func ErrIndexSyncFailed(err error) error { return fmt.Errorf("index sync failed: %w", err) }
 
-// ============== Log (storage) ==============
+// Log errors (offset out of range or beyond high watermark).
 
 var (
 	ErrLogOffsetOutOfRange = errors.New("log: offset out of range")
@@ -41,7 +41,7 @@ func ErrLogOffsetBeyondHWf(offset, hw uint64) error {
 	return fmt.Errorf("offset %d is beyond high watermark %d (uncommitted data): %w", offset, hw, ErrLogOffsetBeyondHW)
 }
 
-// ============== Topic manager ==============
+// Topic manager errors (topic exists/not found, leader/replica, ack mode, etc.).
 
 var (
 	ErrTopicExists          = errors.New("topic already exists")
@@ -132,7 +132,7 @@ func ErrWaitFollowersCatchUp(err error) error {
 	return fmt.Errorf("failed to wait for all followers to catch up: %w", err)
 }
 
-// ============== Raft / Coordinator ==============
+// Raft / Coordinator errors (no leader, node/topic not found, apply/bootstrap failures).
 
 var (
 	ErrRaftNoLeader       = errors.New("raft leader not found")
@@ -160,7 +160,7 @@ func ErrNewRaft(err error) error { return fmt.Errorf("failed to create new raft:
 
 func ErrBootstrapCluster(err error) error { return fmt.Errorf("failed to bootstrap cluster: %w", err) }
 
-// ============== Protocol / Transport ==============
+// Protocol / transport errors (frame size, CRC, unknown message type).
 
 var (
 	ErrFrameTooLarge        = errors.New("protocol: frame exceeds max size")
@@ -171,7 +171,7 @@ func ErrUnknownMessageType(mType int) error {
 	return fmt.Errorf("protocol: unknown message type: %d", mType)
 }
 
-// ============== Consumer ==============
+// Consumer errors (offset not found for consumer id/topic).
 
 var ErrConsumerOffsetNotFound = errors.New("consumer: offset not found for id/topic")
 

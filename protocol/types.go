@@ -5,13 +5,13 @@ import (
 	"strings"
 )
 
-// LogEntry is a log record with offset and value (replaces api/common.LogEntry).
+// LogEntry is a log record with offset and value.
 type LogEntry struct {
 	Offset uint64
 	Value  []byte
 }
 
-// AckMode for producer acks (replaces api/producer.AckMode).
+// AckMode for producer acks.
 type AckMode int32
 
 const (
@@ -20,7 +20,7 @@ const (
 	AckAll    AckMode = 2
 )
 
-// Leader types (replace api/leader).
+// Create/delete topic request and response types.
 type CreateTopicRequest struct {
 	Topic                  string
 	ReplicaCount           uint32
@@ -125,7 +125,7 @@ type ReplicateResponse struct {
 	LeaderLEO   int64  // when EndOfStream, leader's LEO so replica can compute ISR and send IsrUpdateEvent
 }
 
-// Producer types (replace api/producer).
+// Producer request/response types.
 type ProduceRequest struct {
 	Topic string
 	Value []byte
@@ -145,8 +145,7 @@ type ProduceBatchResponse struct {
 	Count      uint32
 }
 
-// FindLeader types are used by clients to discover the topic leader RPC address.
-// Any node can answer this using its local metadata (kept in sync via Raft).
+// FindLeader: clients discover the topic leader RPC address; any node can answer using local metadata.
 type FindTopicLeaderRequest struct {
 	Topic string
 }
@@ -163,15 +162,14 @@ type ApplyIsrUpdateEventRequest struct {
 }
 type ApplyIsrUpdateEventResponse struct{}
 
-// GetRaftLeader types are used by clients to discover the Raft (metadata) leader RPC address.
-// Any node can answer; create-topic and other metadata ops should be sent to the Raft leader.
+// GetRaftLeader: clients discover the Raft (metadata) leader; create-topic and metadata ops go to this address.
 type FindRaftLeaderRequest struct{}
 
 type FindRaftLeaderResponse struct {
 	RaftLeaderAddr string
 }
 
-// Consumer types (replace api/consumer).
+// Consumer request/response types.
 type FetchRequest struct {
 	Topic         string
 	Id            string
