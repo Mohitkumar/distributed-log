@@ -2,16 +2,15 @@ package log
 
 import (
 	"io"
-	"sync"
+	"sync/atomic"
 
 	"github.com/mohitkumar/mlog/errs"
 )
 
 type LogManager struct {
-	mu sync.RWMutex
 	*Log
-	leo           uint64 // Log End Offset
-	highWatermark uint64
+	leo           atomic.Uint64 // Log End Offset
+	highWatermark atomic.Uint64
 }
 
 func NewLogManager(dir string) (*LogManager, error) {
@@ -27,60 +26,58 @@ func NewLogManager(dir string) (*LogManager, error) {
 	// Initialize LEO from the active segment's NextOffset (restart scenario)
 	// NextOffset is the next offset to write, which is exactly what LEO represents
 	if log.activeSegment != nil {
-		lm.leo = log.activeSegment.NextOffset
-	} else {
-		lm.leo = 0
+		lm.leo.Store(log.activeSegment.NextOffset)
 	}
 
 	return lm, nil
 }
 
 func (l *LogManager) LEO() uint64 {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.leo
+	return l.leo.Load()
 }
 
 func (l *LogManager) SetLEO(leo uint64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.leo = leo
+	l.leo.Store(leo)
 }
 
 func (l *LogManager) HighWatermark() uint64 {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.highWatermark
+	return l.highWatermark.Load()
 }
 
 func (l *LogManager) SetHighWatermark(highWatermark uint64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.highWatermark = highWatermark
+	l.highWatermark.Store(highWatermark)
 }
 
 // Append appends a log entry and automatically advances LEO
 func (l *LogManager) Append(value []byte) (uint64, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	offset, err := l.Log.Append(value)
 	if err != nil {
 		return 0, err
 	}
 
 	// LEO is the next offset to write, so after writing at offset N, LEO becomes N+1
-	l.leo = offset + 1
+	l.leo.Store(offset + 1)
 
 	return offset, nil
+}
+
+// AppendBatch writes multiple records and advances LEO past the entire batch.
+// Returns the base offset of the batch.
+func (l *LogManager) AppendBatch(values [][]byte) (uint64, error) {
+	baseOffset, err := l.Log.AppendBatch(values)
+	if err != nil {
+		return 0, err
+	}
+
+	l.leo.Store(baseOffset + uint64(len(values)))
+
+	return baseOffset, nil
 }
 
 // Read reads a log entry at the given offset, but only if it's within the high watermark
 // This ensures consumers can only read committed data (data replicated to all ISR followers)
 func (l *LogManager) Read(offset uint64) ([]byte, error) {
-	l.mu.RLock()
-	hw := l.highWatermark
-	l.mu.RUnlock()
+	hw := l.highWatermark.Load()
 	// Consumers should only be able to read up to (and including) the high watermark
 	if offset > hw {
 		return nil, errs.ErrLogOffsetBeyondHWf(offset, hw)

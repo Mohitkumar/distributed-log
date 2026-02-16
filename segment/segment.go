@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/mohitkumar/mlog/errs"
 )
@@ -34,8 +35,8 @@ type Segment struct {
 	logFile             *os.File
 	index               *Index
 	bytesSinceLastIndex uint64
-	writePos            int64 // current end-of-log position in bytes
-	mu                  sync.Mutex
+	writePos            atomic.Int64 // current end-of-log position in bytes
+	mu                  sync.Mutex   // protects writes (NextOffset, MaxOffset, bytesSinceLastIndex, index)
 }
 
 func NewSegment(baseOffset uint64, dir string) (*Segment, error) {
@@ -55,12 +56,11 @@ func NewSegment(baseOffset uint64, dir string) (*Segment, error) {
 		NextOffset: baseOffset,
 		logFile:    logFile,
 		index:      index,
-		writePos:   0,
 	}, nil
 }
 
 func LoadExistingSegment(baseOffset uint64, dir string) (*Segment, error) {
-	logFilePath := filepath.Join(dir, formatIndexFileName(baseOffset))
+	logFilePath := filepath.Join(dir, formatLogFileName(baseOffset))
 	logFile, err := os.OpenFile(logFilePath, os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
@@ -99,27 +99,83 @@ func (s *Segment) Append(value []byte) (uint64, error) {
 	defer s.mu.Unlock()
 
 	offset := s.NextOffset
-	header := make([]byte, offWidth+lenWidth)
-	endian.PutUint64(header[0:offWidth], offset)
-	endian.PutUint32(header[offWidth:totalHeaderWidth], uint32(len(value)))
-	if _, err := writeFull(s.logFile, header); err != nil {
-		return 0, err
-	}
-	if _, err := writeFull(s.logFile, value); err != nil {
+	buf := make([]byte, totalHeaderWidth+len(value))
+	endian.PutUint64(buf[0:offWidth], offset)
+	endian.PutUint32(buf[offWidth:totalHeaderWidth], uint32(len(value)))
+	copy(buf[totalHeaderWidth:], value)
+	if _, err := writeFull(s.logFile, buf); err != nil {
 		return 0, err
 	}
 
+	currWritePos := s.writePos.Load()
 	s.bytesSinceLastIndex += uint64(totalHeaderWidth + len(value))
 	if s.bytesSinceLastIndex >= IndexIntervalBytes || offset == s.BaseOffset {
-		if err := s.index.Write(uint32(offset-s.BaseOffset), uint64(s.writePos)); err != nil {
+		if err := s.index.Write(uint32(offset-s.BaseOffset), uint64(currWritePos)); err != nil {
 			return 0, err
 		}
 		s.bytesSinceLastIndex = 0
 	}
-	s.writePos += int64(totalHeaderWidth + len(value))
+	s.writePos.Add(int64(totalHeaderWidth + len(value)))
 	s.NextOffset++
 	s.MaxOffset = offset
 	return offset, nil
+}
+
+// AppendBatch writes multiple records in a single syscall and returns the base offset.
+// Offsets are sequential: baseOffset, baseOffset+1, ..., baseOffset+len(values)-1.
+func (s *Segment) AppendBatch(values [][]byte) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(values) == 0 {
+		return s.NextOffset, nil
+	}
+
+	baseOffset := s.NextOffset
+
+	// Calculate total buffer size
+	totalSize := 0
+	for _, v := range values {
+		totalSize += totalHeaderWidth + len(v)
+	}
+
+	// Build combined buffer — one allocation, one syscall
+	buf := make([]byte, totalSize)
+	pos := 0
+	for i, value := range values {
+		offset := baseOffset + uint64(i)
+		endian.PutUint64(buf[pos:pos+offWidth], offset)
+		endian.PutUint32(buf[pos+offWidth:pos+totalHeaderWidth], uint32(len(value)))
+		copy(buf[pos+totalHeaderWidth:], value)
+		pos += totalHeaderWidth + len(value)
+	}
+
+	// Single write syscall for the entire batch
+	if _, err := writeFull(s.logFile, buf); err != nil {
+		return 0, err
+	}
+
+	// Update index entries
+	currWritePos := s.writePos.Load()
+	pos = 0
+	for i, value := range values {
+		offset := baseOffset + uint64(i)
+		recordSize := totalHeaderWidth + len(value)
+		s.bytesSinceLastIndex += uint64(recordSize)
+		if s.bytesSinceLastIndex >= IndexIntervalBytes || offset == s.BaseOffset {
+			if err := s.index.Write(uint32(offset-s.BaseOffset), uint64(currWritePos+int64(pos))); err != nil {
+				return 0, err
+			}
+			s.bytesSinceLastIndex = 0
+		}
+		pos += recordSize
+	}
+
+	s.writePos.Add(int64(totalSize))
+	count := uint64(len(values))
+	s.NextOffset = baseOffset + count
+	s.MaxOffset = baseOffset + count - 1
+	return baseOffset, nil
 }
 
 func (s *Segment) Remove() error {
@@ -136,51 +192,48 @@ func (s *Segment) Remove() error {
 }
 
 func (s *Segment) Read(offset uint64) ([]byte, error) {
-	s.mu.Lock()
-	writePos := s.writePos
-	s.mu.Unlock()
+	writePos := s.writePos.Load()
 
 	if offset < s.BaseOffset || offset >= s.NextOffset {
 		return nil, errs.ErrSegmentOffsetOutOfRange(offset, s.BaseOffset, s.NextOffset)
 	}
 
-	// Start position: use index if we have an entry (sparse index gives position of record <= offset),
-	// otherwise start from the beginning of the segment file and do a full sequential search.
-	var currPos int64
+	// Use sparse index to find starting position (floor entry <= offset)
+	var startPos int64
 	relOffset := uint32(offset - s.BaseOffset)
 	if indexEntry, found := s.index.Find(relOffset); found {
-		currPos = int64(indexEntry.Position)
-	} else {
-		currPos = 0
+		startPos = int64(indexEntry.Position)
 	}
 
-	header := make([]byte, totalHeaderWidth)
-	for currPos < writePos {
-		// Read header: [Offset (8 bytes)][Len (4 bytes)]
-		n, err := s.logFile.ReadAt(header, currPos)
-		if err != nil {
-			return nil, err
-		}
-		if n < totalHeaderWidth {
-			return nil, io.ErrUnexpectedEOF
-		}
-		foundOffset := endian.Uint64(header[0:offWidth])
-		msgLen := endian.Uint32(header[offWidth:totalHeaderWidth])
+	// Bulk read the region from startPos to writePos into memory — one syscall
+	regionSize := writePos - startPos
+	region := make([]byte, regionSize)
+	n, err := s.logFile.ReadAt(region, startPos)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	region = region[:n]
+
+	// Scan in-memory buffer — no further syscalls
+	pos := 0
+	for pos+totalHeaderWidth <= len(region) {
+		foundOffset := endian.Uint64(region[pos : pos+offWidth])
+		msgLen := int(endian.Uint32(region[pos+offWidth : pos+totalHeaderWidth]))
 
 		if foundOffset == offset {
-			// Found the record: read and return value only
-			if currPos+int64(totalHeaderWidth)+int64(msgLen) > writePos {
+			end := pos + totalHeaderWidth + msgLen
+			if end > len(region) {
 				return nil, io.ErrUnexpectedEOF
 			}
 			value := make([]byte, offWidth+msgLen)
 			endian.PutUint64(value[0:offWidth], foundOffset)
-			_, err = s.logFile.ReadAt(value[offWidth:], currPos+totalHeaderWidth)
-			return value, err
+			copy(value[offWidth:], region[pos+totalHeaderWidth:end])
+			return value, nil
 		}
 		if foundOffset > offset {
 			return nil, errs.ErrSegmentOffsetNotFound
 		}
-		currPos += int64(totalHeaderWidth) + int64(msgLen)
+		pos += totalHeaderWidth + msgLen
 	}
 	return nil, io.EOF
 }
@@ -189,10 +242,7 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 // The stream format is: for each record, [Offset 8 bytes][Len 4 bytes][Value].
 // If the segment is empty, returns a reader that yields EOF.
 func (s *Segment) Reader() io.Reader {
-	s.mu.Lock()
-	next := s.NextOffset
-	s.mu.Unlock()
-	if s.BaseOffset >= next {
+	if s.BaseOffset >= s.NextOffset {
 		return bytes.NewReader(nil)
 	}
 	r, err := s.NewStreamingReader(s.BaseOffset)
@@ -206,9 +256,7 @@ func (s *Segment) Reader() io.Reader {
 // corresponding to startOffset. It will read until the current end-of-segment.
 // No flush is needed: writes go directly to the file, so the OS page cache is the only buffer.
 func (s *Segment) NewStreamingReader(startOffset uint64) (io.Reader, error) {
-	s.mu.Lock()
-	currentWritePos := s.writePos
-	s.mu.Unlock()
+	currentWritePos := s.writePos.Load()
 
 	//Range check
 	if startOffset < s.BaseOffset || startOffset >= s.NextOffset {
@@ -319,7 +367,7 @@ func (s *Segment) Recover() error {
 	}
 
 	// 5. Reset state
-	s.writePos = currPos
+	s.writePos.Store(currPos)
 	s.NextOffset = currOffset
 	if currOffset > s.BaseOffset {
 		s.MaxOffset = currOffset - 1
@@ -334,10 +382,7 @@ func (s *Segment) Recover() error {
 }
 
 func (s *Segment) IsFull() bool {
-	s.mu.Lock()
-	pos := s.writePos
-	s.mu.Unlock()
-	return pos >= MaxSegmentBytes
+	return s.writePos.Load() >= MaxSegmentBytes
 }
 
 // writeFull writes the entire buffer to f, retrying on short writes.

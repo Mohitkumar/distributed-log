@@ -69,6 +69,59 @@ func NewLog(dir string) (*Log, error) {
 	return log, nil
 }
 
+// findSegment returns the segment containing offset using binary search. O(log n).
+// Must be called with l.mu held (read or write).
+func (l *Log) findSegment(offset uint64) *segment.Segment {
+	n := len(l.segments)
+	if n == 0 {
+		return nil
+	}
+	// Binary search: find the last segment with BaseOffset <= offset
+	i := sort.Search(n, func(i int) bool {
+		return l.segments[i].BaseOffset > offset
+	}) - 1
+	if i < 0 {
+		return nil
+	}
+	seg := l.segments[i]
+	if offset >= seg.NextOffset {
+		return nil
+	}
+	return seg
+}
+
+// findSegmentIndex returns the index of the segment containing offset using binary search.
+// Returns -1 if not found. Must be called with l.mu held.
+func (l *Log) findSegmentIndex(offset uint64) int {
+	n := len(l.segments)
+	if n == 0 {
+		return -1
+	}
+	i := sort.Search(n, func(i int) bool {
+		return l.segments[i].BaseOffset > offset
+	}) - 1
+	if i < 0 {
+		return -1
+	}
+	if offset >= l.segments[i].NextOffset {
+		return -1
+	}
+	return i
+}
+
+// rollSegment creates a new active segment. The old segment stays open for reads;
+// it is only closed on Log.Close(), Delete(), or Truncate().
+// Must be called with l.mu held for writing.
+func (l *Log) rollSegment() error {
+	newSeg, err := segment.NewSegment(l.activeSegment.NextOffset, l.Dir)
+	if err != nil {
+		return err
+	}
+	l.segments = append(l.segments, newSeg)
+	l.activeSegment = newSeg
+	return nil
+}
+
 func (l *Log) Append(value []byte) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -77,37 +130,38 @@ func (l *Log) Append(value []byte) (uint64, error) {
 		return 0, err
 	}
 	if l.activeSegment.IsFull() {
-		err := l.activeSegment.Close()
-		if err != nil {
+		if err := l.rollSegment(); err != nil {
 			return 0, err
 		}
-		l.activeSegment, err = segment.NewSegment(l.activeSegment.NextOffset, l.Dir)
-		if err != nil {
-			return 0, err
-		}
-		l.segments = append(l.segments, l.activeSegment)
 	}
 	return off, nil
+}
+
+// AppendBatch writes multiple records and returns the base offset.
+// All records in the batch are written to the current segment in a single syscall.
+func (l *Log) AppendBatch(values [][]byte) (uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	baseOff, err := l.activeSegment.AppendBatch(values)
+	if err != nil {
+		return 0, err
+	}
+	if l.activeSegment.IsFull() {
+		if err := l.rollSegment(); err != nil {
+			return 0, err
+		}
+	}
+	return baseOff, nil
 }
 
 func (l *Log) Read(offset uint64) ([]byte, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	var targetSegment *segment.Segment
-	for _, seg := range l.segments {
-		if offset >= seg.BaseOffset && offset < seg.NextOffset {
-			targetSegment = seg
-			break
-		}
-	}
-	if targetSegment == nil {
+	seg := l.findSegment(offset)
+	if seg == nil {
 		return nil, errs.ErrLogOffsetOutOfRangef(offset)
 	}
-	r, err := targetSegment.Read(offset)
-	if err != nil {
-		return nil, err
-	}
-	return r, nil
+	return seg.Read(offset)
 }
 
 func (l *Log) LowestOffset() uint64 {
@@ -204,13 +258,7 @@ func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	if startOffset >= endOffset {
 		return bytes.NewReader(nil), nil
 	}
-	var targetIdx int = -1
-	for i, seg := range l.segments {
-		if startOffset >= seg.BaseOffset && startOffset < seg.NextOffset {
-			targetIdx = i
-			break
-		}
-	}
+	targetIdx := l.findSegmentIndex(startOffset)
 	if targetIdx < 0 {
 		return nil, errs.ErrLogOffsetOutOfRangef(startOffset)
 	}
