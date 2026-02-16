@@ -12,5 +12,5 @@ var (
 )
 
 func ErrUnknownMessageType(mType MessageType) error {
-	return fmt.Errorf("protocol: unknown message type: %d", mType)
+	return fmt.Errorf("protocol: can not encode type: %d", mType)
 }
