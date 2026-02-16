@@ -157,7 +157,7 @@ func (idx *Index) TruncateAfter(position uint64) error {
 		return nil
 	}
 	idx.size = truncateSize
-	return idx.file.Truncate(idx.size)
+	return nil
 }
 
 func (idx *Index) Size() int64 {
@@ -169,6 +169,9 @@ func (idx *Index) Close() error {
 		return err
 	}
 	if err := idx.file.Sync(); err != nil {
+		return err
+	}
+	if err := idx.mmap.UnsafeUnmap(); err != nil {
 		return err
 	}
 	if err := idx.file.Truncate(int64(idx.size)); err != nil {

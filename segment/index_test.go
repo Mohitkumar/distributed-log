@@ -2,20 +2,22 @@ package segment
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
 func setupTest(t *testing.T) (index *Index, teardown func()) {
 	t.Helper()
-
-	index, err := OpenIndex("/tmp/test.idx")
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "test.id")
+	index, err := OpenIndex(file)
 	if err != nil {
 		t.Fatalf("failed to create index: %v", err)
 	}
 
 	return index, func() {
 		index.Close()
-		os.Remove("/tmp/test.idx")
+		os.Remove(file)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/mohitkumar/mlog/errs"
@@ -38,12 +39,12 @@ type Segment struct {
 }
 
 func NewSegment(baseOffset uint64, dir string) (*Segment, error) {
-	logFilePath := dir + "/" + formatLogFileName(baseOffset)
+	logFilePath := filepath.Join(dir, formatLogFileName(baseOffset))
 	logFile, err := os.OpenFile(logFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
 	}
-	indexFilePath := dir + "/" + formatIndexFileName(baseOffset)
+	indexFilePath := filepath.Join(dir, formatIndexFileName(baseOffset))
 	index, err := OpenIndex(indexFilePath)
 	if err != nil {
 		logFile.Close()
@@ -59,13 +60,13 @@ func NewSegment(baseOffset uint64, dir string) (*Segment, error) {
 }
 
 func LoadExistingSegment(baseOffset uint64, dir string) (*Segment, error) {
-	logFilePath := dir + "/" + formatLogFileName(baseOffset)
+	logFilePath := filepath.Join(dir, formatIndexFileName(baseOffset))
 	logFile, err := os.OpenFile(logFilePath, os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
 	}
 
-	indexFilePath := dir + "/" + formatIndexFileName(baseOffset)
+	indexFilePath := filepath.Join(dir, formatIndexFileName(baseOffset))
 	index, err := OpenIndex(indexFilePath)
 	if err != nil {
 		logFile.Close()
@@ -153,9 +154,9 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 		currPos = 0
 	}
 
+	header := make([]byte, totalHeaderWidth)
 	for currPos < writePos {
 		// Read header: [Offset (8 bytes)][Len (4 bytes)]
-		header := make([]byte, totalHeaderWidth)
 		n, err := s.logFile.ReadAt(header, currPos)
 		if err != nil {
 			return nil, err
@@ -172,7 +173,7 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 				return nil, io.ErrUnexpectedEOF
 			}
 			value := make([]byte, offWidth+msgLen)
-			endian.PutUint64(header[0:offWidth], foundOffset)
+			endian.PutUint64(value[0:offWidth], foundOffset)
 			_, err = s.logFile.ReadAt(value[offWidth:], currPos+totalHeaderWidth)
 			return value, err
 		}
@@ -264,11 +265,10 @@ func (s *Segment) Recover() error {
 
 	// 1. Start from the last healthy index entry
 	lastEntry, ok := s.index.Last()
-	if !ok {
-		return errs.ErrSegmentIndexNotFound
+	if ok {
+		startPos = int64(lastEntry.Position)
+		nextOffset = s.BaseOffset + uint64(lastEntry.RelativeOffset)
 	}
-	startPos = int64(lastEntry.Position)
-	nextOffset = s.BaseOffset + uint64(lastEntry.RelativeOffset)
 
 	// 2. Seek to the checkpoint
 	if _, err := s.logFile.Seek(startPos, io.SeekStart); err != nil {
@@ -302,8 +302,6 @@ func (s *Segment) Recover() error {
 		// Calculate total size of this entry
 		entrySize := int64(12 + recLen)
 
-		// Verification: Can we actually read the full payload?
-		// We use Discard to advance the reader without allocating memory for the payload
 		if _, err := reader.Discard(int(entrySize)); err != nil {
 			break // Partial record at end of file
 		}
@@ -312,12 +310,10 @@ func (s *Segment) Recover() error {
 		currOffset++
 	}
 
-	// 3. Truncate the log to the last confirmed valid byte
 	if err := s.logFile.Truncate(currPos); err != nil {
 		return errs.ErrTruncateFailed(err)
 	}
 
-	// 4. Seek file to new EOF (truncate doesn't move the file offset)
 	if _, err := s.logFile.Seek(currPos, io.SeekStart); err != nil {
 		return err
 	}
@@ -325,7 +321,9 @@ func (s *Segment) Recover() error {
 	// 5. Reset state
 	s.writePos = currPos
 	s.NextOffset = currOffset
-
+	if currOffset > s.BaseOffset {
+		s.MaxOffset = currOffset - 1
+	}
 	// 6. Clean index
 	// Remove any index entries that point to the truncated/corrupt area
 	if err := s.index.TruncateAfter(uint64(currPos)); err != nil {

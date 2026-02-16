@@ -100,7 +100,7 @@ func (l *Log) Read(offset uint64) ([]byte, error) {
 			break
 		}
 	}
-	if targetSegment == nil || offset < targetSegment.BaseOffset || offset >= targetSegment.NextOffset {
+	if targetSegment == nil {
 		return nil, errs.ErrLogOffsetOutOfRangef(offset)
 	}
 	r, err := targetSegment.Read(offset)
@@ -141,6 +141,8 @@ func (l *Log) HighestOffset() uint64 {
 }
 
 func (l *Log) SegmentCount() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return len(l.segments)
 }
 
@@ -159,7 +161,11 @@ func (l *Log) Truncate(lowest uint64) error {
 	}
 	l.segments = segments
 	if len(segments) == 0 {
-		l.activeSegment = nil
+		newSeg, err := segment.NewSegment(lowest+1, l.Dir)
+		if err != nil {
+			return err
+		}
+		l.activeSegment = newSeg
 	} else {
 		l.activeSegment = segments[len(segments)-1]
 	}
@@ -190,12 +196,12 @@ func (l *Log) Reader() io.Reader {
 
 func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	l.mu.RLock()
+	defer l.mu.RUnlock()
 	endOffset := uint64(0)
 	if l.activeSegment != nil {
 		endOffset = l.activeSegment.NextOffset
 	}
 	if startOffset >= endOffset {
-		l.mu.RUnlock()
 		return bytes.NewReader(nil), nil
 	}
 	var targetIdx int = -1
@@ -206,17 +212,14 @@ func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 		}
 	}
 	if targetIdx < 0 {
-		l.mu.RUnlock()
 		return nil, errs.ErrLogOffsetOutOfRangef(startOffset)
 	}
 	seg := l.segments[targetIdx]
 	r, err := seg.NewStreamingReader(startOffset)
 	if err != nil {
-		l.mu.RUnlock()
 		return nil, err
 	}
 	if targetIdx == len(l.segments)-1 {
-		l.mu.RUnlock()
 		return r, nil
 	}
 	readers := make([]io.Reader, 0, len(l.segments)-targetIdx)
@@ -224,7 +227,6 @@ func (l *Log) ReaderFrom(startOffset uint64) (io.Reader, error) {
 	for i := targetIdx + 1; i < len(l.segments); i++ {
 		readers = append(readers, l.segments[i].Reader())
 	}
-	l.mu.RUnlock()
 	return io.MultiReader(readers...), nil
 }
 
@@ -233,7 +235,10 @@ func (l *Log) Delete() error {
 	defer l.mu.Unlock()
 	// Close file handles first
 	for _, seg := range l.segments {
-		seg.Close()
+		err := seg.Close()
+		if err != nil {
+			return err
+		}
 	}
 	// Remove the whole directory recursively
 	err := os.RemoveAll(l.Dir)
