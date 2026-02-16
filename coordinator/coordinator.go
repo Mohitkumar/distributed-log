@@ -128,12 +128,6 @@ func (c *Coordinator) EnsureSelfInMetadata() error {
 }
 
 func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
-	if !c.IsRaftReady() {
-		if err := c.WaitforRaftReady(10 * time.Second); err != nil {
-			c.Logger.Error("raft not ready, skipping join", zap.Error(err), zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
-			return err
-		}
-	}
 	if !c.IsLeader() {
 		c.Logger.Error("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 		return nil
@@ -167,12 +161,6 @@ func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 }
 
 func (c *Coordinator) Leave(id string) error {
-	if !c.IsRaftReady() {
-		if err := c.WaitforRaftReady(10 * time.Second); err != nil {
-			c.Logger.Error("raft not ready, skipping leave", zap.Error(err), zap.String("leaving_node_id", id))
-			return err
-		}
-	}
 	if !c.IsLeader() {
 		c.Logger.Error("not leader, skipping leave", zap.String("leaving_node_id", id))
 		return nil
@@ -195,6 +183,19 @@ func (c *Coordinator) IsLeader() bool {
 func (c *Coordinator) GetRaftLeaderNodeID() (string, error) {
 	_, id := c.raft.LeaderWithID()
 	return string(id), nil
+}
+
+// RaftServerIDs returns the current Raft cluster server IDs (for reconciliation with Serf).
+func (c *Coordinator) RaftServerIDs() ([]string, error) {
+	f := c.raft.GetConfiguration()
+	if err := f.Error(); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(f.Configuration().Servers))
+	for _, s := range f.Configuration().Servers {
+		ids = append(ids, string(s.ID))
+	}
+	return ids, nil
 }
 
 func (c *Coordinator) WaitforRaftReady(timeout time.Duration) error {
