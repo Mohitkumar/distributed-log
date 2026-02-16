@@ -81,7 +81,7 @@ func syncFakeNodesToTopicManager(topicMgr *topic.TopicManager, fake *FakeTopicCo
 		if n == nil {
 			continue
 		}
-		data, _ := json.Marshal(protocol.AddNodeEvent{NodeID: n.NodeID, Addr: n.RPCAddr, RpcAddr: n.RPCAddr})
+		data, _ := json.Marshal(protocol.AddNodeEvent{NodeID: n.NodeID, Addr: n.Addr, RpcAddr: n.RpcAddr})
 		_ = topicMgr.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeAddNode, Data: data})
 	}
 }
@@ -255,6 +255,12 @@ func (h *TwoNodeTestHelper) Cleanup() {
 		h.server2.Cleanup()
 	}
 }
+
+// Server1 returns the leader test server (server1).
+func (h *TwoNodeTestHelper) Server1() *TestServer { return h.server1 }
+
+// Server2 returns the follower test server (server2).
+func (h *TwoNodeTestHelper) Server2() *TestServer { return h.server2 }
 
 // GetLeaderAddr returns the RPC address of the logical leader (server1).
 func (h *TwoNodeTestHelper) GetLeaderAddr() string {

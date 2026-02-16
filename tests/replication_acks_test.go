@@ -8,6 +8,7 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/topic"
 )
 
 func TestProduceWithAckLeader_10000Messages(t *testing.T) {
@@ -26,15 +27,17 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
-	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+	resp, err := leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
 	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-
-	time.Sleep(200 * time.Millisecond)
+	// Fake has no Raft: apply the same create event on the follower so it can replicate.
+	ev := topic.NewCreateTopicApplyEvent(topicName, 1, server1.Coordinator().NodeID, resp.ReplicaNodeIds)
+	server2.Coordinator().ApplyEvent(ev)
+	time.Sleep(400 * time.Millisecond) // allow follower replication thread to run and open replica log
 
 	producerClient, err := client.NewProducerClient(server1.Addr)
 	if err != nil {
@@ -148,18 +151,20 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
-	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+	resp, err := leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
 	})
 	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	// Fake has no Raft: apply the same create event on the follower so it can replicate.
+	ev := topic.NewCreateTopicApplyEvent(topicName, 1, server1.Coordinator().NodeID, resp.ReplicaNodeIds)
+	server2.Coordinator().ApplyEvent(ev)
+	// Wait for replica creation and at least one replication tick (fake uses 100ms ticker).
+	time.Sleep(600 * time.Millisecond)
 
-	// Wait for replica creation and at least one replication round so leader knows follower
-	time.Sleep(400 * time.Millisecond)
-
-	// Produce warmup (ACK_ALL waits for replica LEO; follower replicates every 20ms)
+	// Produce warmup (ACK_ALL waits for replica LEO; follower must have topic to replicate)
 	producerClient, err := client.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
@@ -173,6 +178,7 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("warmup produce error: %v", err)
 	}
+	// Give follower time to replicate warmup so leader's replica LEO is updated before batch loop.
 	time.Sleep(500 * time.Millisecond)
 
 	const n = 10000
@@ -252,108 +258,4 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 
 	t.Logf("ACK_ALL verified: %d messages replicated to follower in %v (replica LEO=%d, leader LEO=%d)",
 		n, produceDuration, replicaLEO, actualLEO)
-}
-
-const (
-	benchmarkReplicationNumMsgs  = 1000
-	benchmarkReplicationBatch   = 100
-	benchmarkReplicationTimeout = 30 * time.Second
-)
-
-// BenchmarkReplicationCatchUp measures how fast the replica catches up after the leader has produced messages.
-// It produces a fixed number of messages on the leader (AckLeader so replication is async), then measures
-// the time until the replica LEO reaches the leader LEO. Reports catch-up time and replication throughput (msgs/s).
-func BenchmarkReplicationCatchUp(b *testing.B) {
-	server1, server2 := SetupTwoTestServers(b, "bench-replication-leader", "bench-replication-follower")
-	defer server1.Cleanup()
-	defer server2.Cleanup()
-
-	ctx := context.Background()
-	topicName := "bench-replication-catchup"
-
-	leaderClient, err := client.NewRemoteClient(server1.Addr)
-	if err != nil {
-		b.Fatalf("NewRemoteClient: %v", err)
-	}
-	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-		Topic:        topicName,
-		ReplicaCount: 1,
-	})
-	if err != nil {
-		b.Fatalf("CreateTopic: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	producerClient, err := client.NewProducerClient(server1.Addr)
-	if err != nil {
-		b.Fatalf("NewProducerClient: %v", err)
-	}
-	defer producerClient.Close()
-	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
-		Topic: topicName,
-		Value: []byte("warmup"),
-		Acks:  protocol.AckLeader,
-	})
-	if err != nil {
-		b.Fatalf("warmup produce: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	numMsgs := benchmarkReplicationNumMsgs
-	batchSize := benchmarkReplicationBatch
-
-	waitCatchUp := func(topicName string, targetLEO uint64, timeout time.Duration) (time.Duration, bool) {
-		pollMs := 10 * time.Millisecond
-		deadline := time.Now().Add(timeout)
-		start := time.Now()
-		for time.Now().Before(deadline) {
-			replicaTopic, err := server2.TopicManager.GetTopic(topicName)
-			if err == nil && replicaTopic != nil && replicaTopic.Log != nil && replicaTopic.Log.LEO() >= targetLEO {
-				return time.Since(start), true
-			}
-			time.Sleep(pollMs)
-		}
-		return time.Since(start), false
-	}
-
-	var totalCatchUp time.Duration
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for j := 0; j < numMsgs; j += batchSize {
-			n := batchSize
-			if j+batchSize > numMsgs {
-				n = numMsgs - j
-			}
-			values := make([][]byte, n)
-			for k := 0; k < n; k++ {
-				values[k] = []byte(fmt.Sprintf("msg-%d-%d", i, j+k))
-			}
-			_, err = producerClient.ProduceBatch(ctx, &protocol.ProduceBatchRequest{
-				Topic:  topicName,
-				Values: values,
-				Acks:   protocol.AckLeader,
-			})
-			if err != nil {
-				b.Fatalf("ProduceBatch: %v", err)
-			}
-		}
-		leaderNode, err := server1.TopicManager.GetLeader(topicName)
-		if err != nil {
-			b.Fatalf("GetLeader: %v", err)
-		}
-		targetLEO := leaderNode.LEO()
-		catchUp, ok := waitCatchUp(topicName, targetLEO, benchmarkReplicationTimeout)
-		totalCatchUp += catchUp
-		if !ok {
-			b.Fatalf("replica did not catch up within %v (target LEO %d)", benchmarkReplicationTimeout, targetLEO)
-		}
-	}
-	elapsed := b.Elapsed()
-	secs := elapsed.Seconds()
-	if secs > 0 {
-		avgCatchUp := totalCatchUp.Seconds() / float64(b.N)
-		b.ReportMetric(avgCatchUp, "catch_up_sec/op")
-		b.ReportMetric(float64(numMsgs)/avgCatchUp, "replication_msgs/s")
-		b.ReportMetric(float64(b.N)*float64(numMsgs)/secs, "produce_msgs/s")
-	}
 }

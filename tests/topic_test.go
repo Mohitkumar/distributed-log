@@ -9,6 +9,7 @@ import (
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/topic"
 )
 
 func TestCreateTopic(t *testing.T) {
@@ -22,6 +23,7 @@ func TestCreateTopic(t *testing.T) {
 	}
 
 	topicName := "test-topic-1"
+	leaderCoord := servers.Server1().Coordinator()
 	resp, err := replClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
 		ReplicaCount: 1,
@@ -32,6 +34,9 @@ func TestCreateTopic(t *testing.T) {
 	if resp.Topic != topicName {
 		t.Fatalf("expected topic %s, got %s", topicName, resp.Topic)
 	}
+	// Fake has no Raft: apply the same create event on the follower so its TopicManager gets the topic.
+	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leaderCoord.NodeID, resp.ReplicaNodeIds)
+	servers.Server2().Coordinator().ApplyEvent(ev)
 
 	if _, err := os.Stat(filepath.Join(servers.Server1BaseDir(), topicName)); os.IsNotExist(err) {
 		t.Fatalf("expected topic directory %s to exist on leader, got error: %v", topicName, err)

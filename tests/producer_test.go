@@ -47,7 +47,7 @@ func (s *producerTestServers) getTopicLeaderAddr(ctx context.Context, topicName 
 		return "", err
 	}
 	defer discClient.Close()
-	resp, err := discClient.FindLeader(ctx, &protocol.FindLeaderRequest{Topic: topicName})
+	resp, err := discClient.FindTopicLeader(ctx, &protocol.FindTopicLeaderRequest{Topic: topicName})
 	if err != nil {
 		return "", err
 	}
