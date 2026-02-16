@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/hashicorp/raft"
+	"github.com/mohitkumar/mlog/errs"
 	"github.com/mohitkumar/mlog/log"
 )
 
@@ -44,7 +45,7 @@ const segmentOffsetPrefix = 8
 
 func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	if index < 1 {
-		return ErrRaftLogIndex(index)
+		return errs.ErrRaftLogIndex(index)
 	}
 	offset := index - 1
 	in, err := l.Read(offset)
@@ -52,7 +53,7 @@ func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 		return err
 	}
 	if len(in) < segmentOffsetPrefix {
-		return ErrLogRecordTooShort(offset)
+		return errs.ErrLogRecordTooShort(offset)
 	}
 	payload := in[segmentOffsetPrefix:]
 	if err := json.Unmarshal(payload, out); err != nil {

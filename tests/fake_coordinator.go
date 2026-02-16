@@ -2,13 +2,14 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/common"
-	"github.com/mohitkumar/mlog/coordinator"
+	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/topic"
 )
 
@@ -27,7 +28,7 @@ type FakeTopicCoordinator struct {
 	Topics   map[string]*fakeTopicMeta                  // topic -> meta
 	Replicas map[string]map[string]*common.ReplicaState // topic -> replicaNodeID -> state
 
-	replicationTarget topic.ReplicationTarget
+	replicationTarget *topic.TopicManager
 	stopReplication   chan struct{}
 }
 
@@ -90,14 +91,14 @@ func (f *FakeTopicCoordinator) GetRpcClient(nodeID string) (*client.RemoteClient
 	return client.NewRemoteClient(n.RPCAddr)
 }
 
-func (f *FakeTopicCoordinator) GetReplicationClient(nodeID string) (*client.RemoteClient, error) {
+func (f *FakeTopicCoordinator) GetConsumerClient(nodeID string) (*client.ConsumerClient, error) {
 	f.mu.RLock()
 	n, ok := f.Nodes[nodeID]
 	f.mu.RUnlock()
 	if !ok || n == nil {
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
-	return client.NewRemoteClient(n.RPCAddr)
+	return client.NewConsumerClient(n.RPCAddr)
 }
 
 func (f *FakeTopicCoordinator) IsLeader() bool {
@@ -181,6 +182,25 @@ func (f *FakeTopicCoordinator) UpdateTopicReplicaLEO(topicName, replicaNodeID st
 	rs.IsISR = isr
 }
 
+// UpdateTopicReplicaISR updates only the Isr bit for a replica (used when applying ISR events that no longer carry LEO).
+func (f *FakeTopicCoordinator) UpdateTopicReplicaISR(topicName, replicaNodeID string, isr bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Replicas[topicName] == nil {
+		f.Replicas[topicName] = make(map[string]*common.ReplicaState)
+	}
+	rs := f.Replicas[topicName][replicaNodeID]
+	if rs == nil {
+		f.Replicas[topicName][replicaNodeID] = &common.ReplicaState{
+			ReplicaNodeID: replicaNodeID,
+			LEO:           0,
+			IsISR:         isr,
+		}
+		return
+	}
+	rs.IsISR = isr
+}
+
 func (f *FakeTopicCoordinator) GetNodeIDWithLeastTopics() (*common.Node, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -192,6 +212,11 @@ func (f *FakeTopicCoordinator) GetNodeIDWithLeastTopics() (*common.Node, error) 
 }
 
 func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
+	// For tests, when replicaCount == 0 (no replicas), treat the local node as the topic leader
+	// so that single-node producer tests can always talk to the local node as leader.
+	if replicaCount == 0 {
+		leaderNodeID = f.NodeID
+	}
 	f.Topics[topicName] = &fakeTopicMeta{
 		LeaderNodeID: leaderNodeID,
 		ReplicaIDs:   replicaNodeIds,
@@ -204,18 +229,79 @@ func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCo
 			IsISR:         true,
 		}
 	}
+	// Push event to TopicManager (metadata store) so it creates the topic locally, mirroring Raft FSM Apply.
+	if f.replicationTarget != nil {
+		eventData, _ := json.Marshal(protocol.CreateTopicEvent{
+			Topic:          topicName,
+			ReplicaCount:   replicaCount,
+			LeaderNodeID:   leaderNodeID,
+			LeaderEpoch:    1,
+			ReplicaNodeIds: replicaNodeIds,
+		})
+		ev := &protocol.MetadataEvent{EventType: protocol.MetadataEventTypeCreateTopic, Data: eventData}
+		_ = f.replicationTarget.Apply(ev)
+	}
 	return nil
 }
 
 func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
 	delete(f.Topics, topicName)
 	delete(f.Replicas, topicName)
+	// Push event to TopicManager so it deletes the topic locally, mirroring Raft FSM Apply.
+	if f.replicationTarget != nil {
+		eventData, _ := json.Marshal(protocol.DeleteTopicEvent{Topic: topicName})
+		ev := &protocol.MetadataEvent{EventType: protocol.MetadataEventTypeDeleteTopic, Data: eventData}
+		_ = f.replicationTarget.Apply(ev)
+	}
 	return nil
 }
 
-func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool, leo int64) error {
-	f.UpdateTopicReplicaLEO(topicName, replicaNodeID, leo, isr)
+func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool) error {
+	f.UpdateTopicReplicaISR(topicName, replicaNodeID, isr)
+	if f.replicationTarget != nil {
+		eventData, _ := json.Marshal(protocol.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr})
+		ev := &protocol.MetadataEvent{EventType: protocol.MetadataEventTypeIsrUpdate, Data: eventData}
+		_ = f.replicationTarget.Apply(ev)
+	}
 	return nil
+}
+
+// TopicCoordinator interface: apply events (update in-memory state for tests).
+
+func (f *FakeTopicCoordinator) ApplyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.applyCreateTopicEvent(topicName, replicaCount, leaderNodeID, replicaNodeIds)
+}
+
+func (f *FakeTopicCoordinator) ApplyDeleteTopicEventInternal(topicName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.applyDeleteTopicEvent(topicName)
+}
+
+func (f *FakeTopicCoordinator) ApplyIsrUpdateEventInternal(topicName, replicaNodeID string, isr bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.applyIsrUpdateEvent(topicName, replicaNodeID, isr)
+}
+
+func (f *FakeTopicCoordinator) ApplyLeaderChangeEvent(topicName, leaderNodeID string, leaderEpoch int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if meta := f.Topics[topicName]; meta != nil {
+		meta.LeaderNodeID = leaderNodeID
+	}
+	return nil
+}
+
+func (f *FakeTopicCoordinator) GetRaftLeaderNodeID() (string, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.IsRaftLeader {
+		return f.NodeID, nil
+	}
+	return "", fmt.Errorf("not raft leader")
 }
 
 // AddNode adds a node to the fake cluster (for multi-node tests without Raft).
@@ -225,7 +311,7 @@ func (f *FakeTopicCoordinator) AddNode(nodeID, rpcAddr string) {
 	f.Nodes[nodeID] = &common.Node{NodeID: nodeID, RPCAddr: rpcAddr}
 }
 
-func (f *FakeTopicCoordinator) SetReplicationTarget(t topic.ReplicationTarget) {
+func (f *FakeTopicCoordinator) SetReplicationTarget(t *topic.TopicManager) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.replicationTarget = t
@@ -278,7 +364,7 @@ func (f *FakeTopicCoordinator) replicateAllTopics() {
 	}
 	ctx := context.Background()
 	for leaderID, topicNames := range leaderToTopics {
-		_ = coordinator.DoReplicateTopicsForLeader(ctx, target, f.GetReplicationClient, f.NodeID, leaderID, topicNames, 5000)
+		_ = topic.DoReplicateTopicsForLeader(ctx, target, f.NodeID, leaderID, topicNames, 5000)
 	}
 }
 
@@ -298,8 +384,7 @@ func (f *FakeTopicCoordinator) ApplyEvent(ev topic.ApplyEvent) {
 		}
 	case topic.ApplyEventIsrUpdate:
 		if ev.IsrUpdate != nil {
-			// UpdateTopicReplicaLEO already locks internally.
-			_ = f.applyIsrUpdateEvent(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr, ev.IsrUpdate.Leo)
+			_ = f.applyIsrUpdateEvent(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr)
 		}
 	}
 }

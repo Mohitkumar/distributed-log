@@ -1,9 +1,6 @@
 package consumer
 
-import (
-	"fmt"
-)
+import "github.com/mohitkumar/mlog/errs"
 
-func ErrOffsetNotFoundForID(id, topic string) error {
-	return fmt.Errorf("offset not found for id: %s and topic: %s", id, topic)
-}
+// ErrOffsetNotFoundForID returns an error when no stored offset exists for the given consumer id and topic.
+func ErrOffsetNotFoundForID(id, topic string) error { return errs.ErrOffsetNotFoundForID(id, topic) }

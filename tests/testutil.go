@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"encoding/json"
 	"net"
 	"path"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	consumermgr "github.com/mohitkumar/mlog/consumer"
+	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
@@ -69,6 +71,21 @@ func (ts *TestServer) Cleanup() {
 	_ = ts.srv.Stop()
 }
 
+// syncFakeNodesToTopicManager applies AddNode events to topicMgr for each node in the fake
+// so that TopicManager.Nodes is populated (CreateTopic uses tm.Nodes).
+func syncFakeNodesToTopicManager(topicMgr *topic.TopicManager, fake *FakeTopicCoordinator) {
+	fake.mu.RLock()
+	defer fake.mu.RUnlock()
+	topicMgr.SetCurrentNodeID(fake.NodeID)
+	for _, n := range fake.Nodes {
+		if n == nil {
+			continue
+		}
+		data, _ := json.Marshal(protocol.AddNodeEvent{NodeID: n.NodeID, Addr: n.RPCAddr, RpcAddr: n.RPCAddr})
+		_ = topicMgr.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeAddNode, Data: data})
+	}
+}
+
 // StartSingleNode starts a single-node server backed by a FakeTopicCoordinator.
 func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	t.Helper()
@@ -98,6 +115,8 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	// Update fake coordinator with the actual bound RPC address.
 	fakeCoord.RPCAddr = srv.Addr
 	fakeCoord.AddNode(fakeCoord.NodeID, srv.Addr)
+	syncFakeNodesToTopicManager(topicMgr, fakeCoord)
+	fakeCoord.SetReplicationTarget(topicMgr) // so ApplyCreateTopicEvent also applies to TopicManager
 
 	return &TestServer{
 		TestServerComponents: &TestServerComponents{
@@ -176,13 +195,18 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	fake2.AddNode("node-1", server1RpcSrv.Addr)
 	fake2.AddNode("node-2", server2RpcSrv.Addr)
 
+	// Sync fake nodes into each TopicManager so CreateTopic and replication see the cluster.
+	syncFakeNodesToTopicManager(server1TopicMgr, fake1)
+	syncFakeNodesToTopicManager(server2TopicMgr, fake2)
+	fake1.SetReplicationTarget(server1TopicMgr)
+	fake2.SetReplicationTarget(server2TopicMgr)
+
 	// Deterministically treat server1 as "leader" for tests that care.
 	fake1.IsRaftLeader = true
 	fake2.IsRaftLeader = false
 
-	// Follower runs replication thread (pipelined replication from leader).
-	fake2.SetReplicationTarget(server2TopicMgr)
-	fake2.StartReplicationThread()
+	// TopicManager owns its replication thread; start it for the follower so it replicates from leader.
+	server2TopicMgr.StartReplicationThread()
 
 	server1 := &TestServer{
 		TestServerComponents: &TestServerComponents{

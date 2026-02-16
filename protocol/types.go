@@ -1,12 +1,17 @@
 package protocol
 
-// LogEntry is a log record with offset and value (replaces api/common.LogEntry).
+import (
+	"errors"
+	"strings"
+)
+
+// LogEntry is a log record with offset and value.
 type LogEntry struct {
 	Offset uint64
 	Value  []byte
 }
 
-// AckMode for producer acks (replaces api/producer.AckMode).
+// AckMode for producer acks.
 type AckMode int32
 
 const (
@@ -15,7 +20,7 @@ const (
 	AckAll    AckMode = 2
 )
 
-// Leader types (replace api/leader).
+// Create/delete topic request and response types.
 type CreateTopicRequest struct {
 	Topic                  string
 	ReplicaCount           uint32
@@ -32,32 +37,101 @@ type DeleteTopicResponse struct {
 	Topic string
 }
 
-// ApplyDeleteTopicEventRequest is sent to the Raft leader to apply DeleteTopicEvent to the log.
-type ApplyDeleteTopicEventRequest struct {
-	Topic string
-}
-type ApplyDeleteTopicEventResponse struct{}
+// ListTopics: any node can answer (metadata is replicated via Raft).
+type ListTopicsRequest struct{}
 
-// ApplyIsrUpdateEventRequest is sent to the Raft leader to apply IsrUpdateEvent to the log.
-type ApplyIsrUpdateEventRequest struct {
-	Topic         string
-	ReplicaNodeID string
-	Isr           bool
-	Leo           int64
+type ReplicaInfo struct {
+	NodeID string
+	IsISR  bool
+	LEO    int64
 }
-type ApplyIsrUpdateEventResponse struct{}
 
-// RPCErrorResponse is sent by the server when a handler returns an error, so the client gets the error message instead of EOF.
+type TopicInfo struct {
+	Name          string
+	LeaderNodeID  string
+	LeaderEpoch   int64
+	Replicas      []ReplicaInfo
+}
+
+type ListTopicsResponse struct {
+	Topics []TopicInfo
+}
+
+// RPC error codes. Clients can switch on Code to handle specific errors (e.g. retry on NOT_TOPIC_LEADER).
+const (
+	CodeUnknown int32 = iota
+	CodeTopicRequired
+	CodeTopicNameRequired
+	CodeTopicNotFound
+	CodeNotTopicLeader
+	CodeValuesRequired
+	CodeReadOffset
+	CodeCommitOffset
+	CodeRecoverOffsets
+	CodeReplicaCountInvalid
+	CodeLeaderAddrRequired
+	CodeRaftLeaderUnavailable
+	CodeTopicExists
+	CodeNotEnoughNodes
+	CodeCannotReachLeader
+	CodeInvalidAckMode
+	CodeTimeoutCatchUp
+)
+
+// RPCErrorResponse is sent by the server when a handler returns an error.
+// Code allows the client to handle specific errors (e.g. find new leader on CodeNotTopicLeader).
 type RPCErrorResponse struct {
+	Code    int32  `json:"code"`
 	Message string `json:"message"`
 }
 
-type RecordLEORequest struct {
-	NodeID string
-	Topic  string
-	Leo    int64
+// RPCError is returned by the transport client when the server sends an RPCErrorResponse.
+// Clients can check the code to decide action, e.g. find new leader on CodeNotTopicLeader:
+//
+//	var rpcErr *protocol.RPCError
+//	if errors.As(err, &rpcErr) {
+//	    switch rpcErr.Code {
+//	    case protocol.CodeNotTopicLeader, protocol.CodeTopicNotFound:
+//	        // re-resolve leader and retry
+//	    case protocol.CodeReadOffset:
+//	        // no more data (e.g. replica caught up)
+//	    }
+//	}
+type RPCError struct {
+	Code    int32
+	Message string
 }
-type RecordLEOResponse struct{}
+
+func (e *RPCError) Error() string { return e.Message }
+
+// ShouldReconnect returns true if the error indicates the client should invalidate
+// the cached connection and reconnect (e.g. leader changed, topic not found, or network failure).
+// Use after RPC failures to decide whether to call InvalidateConsumerClient/InvalidateRpcClient
+// and retry on the next attempt.
+func ShouldReconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Server returned a structured RPC error code: reconnect on leader/topic/raft changes.
+	var rpcErr *RPCError
+	if errors.As(err, &rpcErr) {
+		switch rpcErr.Code {
+		case CodeNotTopicLeader, CodeTopicNotFound, CodeRaftLeaderUnavailable:
+			return true
+		default:
+			return false
+		}
+	}
+	// Low-level connection/network errors: reconnect.
+	s := err.Error()
+	return strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "i/o timeout") ||
+		strings.Contains(s, "EOF")
+}
+
 type ReplicateRequest struct {
 	Topic         string
 	Offset        uint64 // replica LEO; leader streams from this offset
@@ -67,23 +141,11 @@ type ReplicateRequest struct {
 type ReplicateResponse struct {
 	Topic       string
 	RawChunk    []byte // raw segment-format records: [Offset 8][Len 4][Value]...
-	EndOfStream bool   // when true, leader has sent all data for this round; replica can send RecordLEO and next ReplicateRequest
+	EndOfStream bool   // when true, leader has sent all data for this round; replica reports LEO via Raft event
+	LeaderLEO   int64  // when EndOfStream, leader's LEO so replica can compute ISR and send IsrUpdateEvent
 }
 
-// Replication types (replace api/replication).
-type CreateReplicaRequest struct {
-	Topic    string
-	LeaderId string
-}
-type CreateReplicaResponse struct {
-	Topic string
-}
-type DeleteReplicaRequest struct {
-	Topic string
-}
-type DeleteReplicaResponse struct{}
-
-// Producer types (replace api/producer).
+// Producer request/response types.
 type ProduceRequest struct {
 	Topic string
 	Value []byte
@@ -103,24 +165,52 @@ type ProduceBatchResponse struct {
 	Count      uint32
 }
 
-// FindLeader types are used by clients to discover the topic leader RPC address.
-// Any node can answer this using its local metadata (kept in sync via Raft).
-type FindLeaderRequest struct {
+// FindLeader: clients discover the topic leader RPC address; any node can answer using local metadata.
+type FindTopicLeaderRequest struct {
 	Topic string
 }
 
-type FindLeaderResponse struct {
+type FindTopicLeaderResponse struct {
 	LeaderAddr string
 }
 
-// Consumer types (replace api/consumer).
+// ApplyIsrUpdateEventRequest is sent to the Raft leader to apply an ISR update for a replica.
+type ApplyIsrUpdateEventRequest struct {
+	Topic         string
+	ReplicaNodeID string
+	Isr           bool
+}
+type ApplyIsrUpdateEventResponse struct{}
+
+// GetRaftLeader: clients discover the Raft (metadata) leader; create-topic and metadata ops go to this address.
+type FindRaftLeaderRequest struct{}
+
+type FindRaftLeaderResponse struct {
+	RaftLeaderAddr string
+}
+
+// Consumer request/response types.
 type FetchRequest struct {
-	Topic  string
-	Id     string
-	Offset uint64
+	Topic         string
+	Id            string
+	Offset        uint64
+	ReplicaNodeID string // when set, leader uses ReadUncommitted and stores this offset as replica LEO
 }
 type FetchResponse struct {
 	Entry *LogEntry
+}
+
+// FetchBatchRequest fetches up to MaxCount records starting at Offset.
+// When ReplicaNodeID is set, leader uses ReadUncommitted and records replica LEO after the batch.
+type FetchBatchRequest struct {
+	Topic         string
+	Id            string
+	Offset        uint64
+	MaxCount      uint32
+	ReplicaNodeID string
+}
+type FetchBatchResponse struct {
+	Entries []*LogEntry
 }
 type CommitOffsetRequest struct {
 	Topic  string

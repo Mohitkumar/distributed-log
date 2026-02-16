@@ -16,7 +16,7 @@ import (
 
 func main() {
 	var (
-		addr  string
+		addrs string
 		topic string
 		acks  int32
 	)
@@ -26,79 +26,46 @@ func main() {
 		Short: "Producer client for mlog",
 	}
 
-	rootCmd.PersistentFlags().StringVar(&addr, "addr", "127.0.0.1:9094", "RPC server address (use 9094 for node1; when cluster in Docker, use localhost:9094)")
+	rootCmd.PersistentFlags().StringVar(&addrs, "addrs", "127.0.0.1:9094", "Comma-separated RPC addresses to try for discovery (tried in order until one connects)")
 	rootCmd.PersistentFlags().StringVar(&topic, "topic", "", "topic name (required)")
 	rootCmd.PersistentFlags().Int32Var(&acks, "acks", int32(protocol.AckLeader), "acks: 0=none,1=leader,2=all")
 
 	viper.SetEnvPrefix("mlog")
 	viper.AutomaticEnv()
-	viper.BindPFlag("addr", rootCmd.PersistentFlags().Lookup("addr"))
-	if viper.IsSet("addr") {
-		addr = viper.GetString("addr")
+	viper.BindPFlag("addrs", rootCmd.PersistentFlags().Lookup("addrs"))
+	if viper.IsSet("addrs") {
+		addrs = viper.GetString("addrs")
 	}
 
 	rootCmd.MarkPersistentFlagRequired("topic")
 
-	var createTopicName string
-	var replicas uint32
-	createTopicCmd := &cobra.Command{
-		Use:   "create-topic",
-		Short: "Create a topic on the cluster (request goes to addr; node forwards to leader → topic leader)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			producerClient, err := client.NewProducerClient(addr)
-			if err != nil {
-				return err
-			}
-			defer producerClient.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			resp, err := producerClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
-				Topic:        createTopicName,
-				ReplicaCount: replicas,
-			})
-			if err != nil {
-				return err
-			}
-			fmt.Printf("topic=%s\n", resp.Topic)
-			return nil
-		},
-	}
-	createTopicCmd.Flags().StringVar(&createTopicName, "topic", "", "topic name (required)")
-	createTopicCmd.Flags().Uint32Var(&replicas, "replicas", 1, "replica count")
-	createTopicCmd.MarkFlagRequired("topic")
-	rootCmd.AddCommand(createTopicCmd)
+	addrList := func() []string { return strings.Split(addrs, ",") }
 
 	connectCmd := &cobra.Command{
 		Use:   "connect",
 		Short: "Connect to the topic leader and produce messages from stdin",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Remote client talks to the node specified by --addr for discovery (FindLeader).
-			remoteClient, err := client.NewRemoteClient(addr)
-			if err != nil {
-				return err
-			}
-			defer remoteClient.Close()
-
 			ackMode := protocol.AckMode(acks)
 			if ackMode != protocol.AckNone && ackMode != protocol.AckLeader && ackMode != protocol.AckAll {
 				ackMode = protocol.AckLeader
 			}
 
-			// Helper to resolve the current topic leader RPC address.
+			// Resolve topic leader by trying each --addrs until one returns the leader.
 			findLeader := func(ctx context.Context) (string, error) {
-				resp, err := remoteClient.FindLeader(ctx, &protocol.FindLeaderRequest{Topic: topic})
-				if err != nil {
-					return "", err
-				}
-				if resp.LeaderAddr == "" {
-					return "", fmt.Errorf("empty leader address returned for topic %s", topic)
-				}
-				return resp.LeaderAddr, nil
+				return client.TryAddrs(ctx, addrList(), func(c *client.RemoteClient) (string, error) {
+					resp, err := c.FindTopicLeader(ctx, &protocol.FindTopicLeaderRequest{Topic: topic})
+					if err != nil {
+						return "", err
+					}
+					if resp.LeaderAddr == "" {
+						return "", fmt.Errorf("empty leader address returned for topic %s", topic)
+					}
+					return resp.LeaderAddr, nil
+				})
 			}
 
 			ctx := context.Background()
 
-			// Initial leader discovery and connection.
 			leaderCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			leaderAddr, err := findLeader(leaderCtx)
 			cancel()
@@ -137,9 +104,9 @@ func main() {
 						break
 					}
 
-					// If we got a leader error, re-resolve the leader and reconnect.
-					if strings.Contains(err.Error(), "not the topic leader") {
-						fmt.Fprintln(os.Stderr, "current node is no longer the topic leader; looking up new leader...")
+					// On leader change or connection failure, try addrs again and re-resolve leader.
+					if client.ShouldReconnect(err) {
+						fmt.Fprintln(os.Stderr, "reconnecting (leader change or connection issue)...")
 						leaderCtx, cancelLeader := context.WithTimeout(ctx, 10*time.Second)
 						newLeaderAddr, findErr := findLeader(leaderCtx)
 						cancelLeader()
@@ -153,12 +120,10 @@ func main() {
 							return findErr
 						}
 
-						fmt.Fprintf(os.Stderr, "reconnected to new topic leader at %s\n", newLeaderAddr)
-						// Retry the message with the new leader.
+						fmt.Fprintf(os.Stderr, "reconnected to topic leader at %s\n", newLeaderAddr)
 						continue
 					}
 
-					// Any other error is returned to the caller.
 					return err
 				}
 			}

@@ -6,20 +6,12 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
+	"github.com/mohitkumar/mlog/errs"
 	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
 )
 
-func (c *Coordinator) ApplyEvent(ev topic.ApplyEvent) {
-	select {
-	case <-c.stopApply:
-		c.Logger.Error("coordinator stopped, skipping apply event", zap.Any("event", ev))
-	case c.applyCh <- ev:
-	}
-}
-
-func (c *Coordinator) applyCreateTopicEventInternal(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
+func (c *Coordinator) ApplyCreateTopicEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
 	if c.raft.State() != raft.Leader {
 		c.Logger.Debug("not leader, skipping create topic event", zap.String("topic", topic))
 		return nil
@@ -42,16 +34,16 @@ func (c *Coordinator) applyCreateTopicEventInternal(topic string, replicaCount u
 	if err != nil {
 		return err
 	}
-	c.Logger.Info("applying create topic event", zap.String("topic", topic), zap.String("leader_node_id", leaderNodeID))
+	c.Logger.Info("apply create topic event", zap.String("topic", topic), zap.String("leader_node_id", leaderNodeID))
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply create topic failed", zap.Error(err), zap.String("topic", topic))
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
 
-func (c *Coordinator) applyDeleteTopicEventInternal(topic string) error {
+func (c *Coordinator) ApplyDeleteTopicEventInternal(topic string) error {
 	if c.raft.State() != raft.Leader {
 		c.Logger.Debug("not leader, skipping delete topic event", zap.String("topic", topic))
 		return nil
@@ -68,11 +60,11 @@ func (c *Coordinator) applyDeleteTopicEventInternal(topic string) error {
 	if err != nil {
 		return err
 	}
-	c.Logger.Info("applying delete topic event", zap.String("topic", topic))
+	c.Logger.Info("apply delete topic event", zap.String("topic", topic))
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply delete topic failed", zap.Error(err), zap.String("topic", topic))
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
@@ -96,8 +88,8 @@ func (c *Coordinator) ApplyNodeAddEvent(nodeID, addr, rpcAddr string) error {
 	}
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		c.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("add_node_id", nodeID))
-		return ErrRaftApply(err)
+		c.Logger.Error("raft apply node add failed", zap.Error(err), zap.String("node_id", nodeID))
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
@@ -121,18 +113,19 @@ func (c *Coordinator) ApplyNodeRemoveEvent(nodeID string) error {
 	}
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
-		c.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("remove_node_id", nodeID))
-		return ErrRaftApply(err)
+		c.Logger.Error("raft apply node remove failed", zap.Error(err), zap.String("node_id", nodeID))
+		return errs.ErrRaftApply(err)
 	}
+	c.Logger.Info("raft apply node remove successful", zap.String("node_id", nodeID))
 	return nil
 }
 
-func (c *Coordinator) applyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool, leo int64) error {
+func (c *Coordinator) ApplyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool) error {
 	if c.raft.State() != raft.Leader {
 		c.Logger.Debug("not leader, skipping ISR update event", zap.String("topic", topic))
 		return nil
 	}
-	eventData, err := json.Marshal(protocol.IsrUpdateEvent{Topic: topic, ReplicaNodeID: replicaNodeID, Isr: isr, Leo: leo})
+	eventData, err := json.Marshal(protocol.IsrUpdateEvent{Topic: topic, ReplicaNodeID: replicaNodeID, Isr: isr})
 	if err != nil {
 		return err
 	}
@@ -152,7 +145,7 @@ func (c *Coordinator) applyIsrUpdateEventInternal(topic, replicaNodeID string, i
 		} else {
 			c.Logger.Error("raft apply ISR update failed", zap.Error(err))
 		}
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }
@@ -178,11 +171,11 @@ func (c *Coordinator) ApplyLeaderChangeEvent(topic, leaderNodeID string, leaderE
 	if err != nil {
 		return err
 	}
-	c.Logger.Info("applying leader change event", zap.String("topic", topic), zap.String("new_leader_node_id", leaderNodeID), zap.Int64("leader_epoch", leaderEpoch))
+	c.Logger.Info("apply leader change event", zap.String("topic", topic), zap.String("new_leader_node_id", leaderNodeID), zap.Int64("leader_epoch", leaderEpoch))
 	f := c.raft.Apply(data, 5*time.Second)
 	if err := f.Error(); err != nil {
 		c.Logger.Error("raft apply leader change failed", zap.Error(err), zap.String("topic", topic))
-		return ErrRaftApply(err)
+		return errs.ErrRaftApply(err)
 	}
 	return nil
 }

@@ -11,7 +11,7 @@ import (
 
 func TestFetch(t *testing.T) {
 	ts := StartTestServer(t, "leader")
-	if _, err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	defer ts.Cleanup()
@@ -96,7 +96,7 @@ func TestFetch_InvalidArguments(t *testing.T) {
 
 func TestCommitOffset(t *testing.T) {
 	ts := StartTestServer(t, "leader")
-	if _, err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	defer ts.Cleanup()
@@ -141,7 +141,7 @@ func TestCommitOffset_InvalidArguments(t *testing.T) {
 
 func TestFetchOffset(t *testing.T) {
 	ts := StartTestServer(t, "leader")
-	if _, err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	defer ts.Cleanup()
@@ -205,7 +205,7 @@ func TestFetchOffset_InvalidArguments(t *testing.T) {
 
 func TestFetch_WithCachedOffset(t *testing.T) {
 	ts := StartTestServer(t, "leader")
-	if _, err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	defer ts.Cleanup()
@@ -265,7 +265,7 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 
 func BenchmarkFetch(b *testing.B) {
 	ts := StartTestServer(b, "leader")
-	if _, err := ts.TopicManager.CreateTopic("test-topic", 0); err != nil {
+	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		b.Fatalf("CreateTopic: %v", err)
 	}
 	defer ts.Cleanup()

@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
@@ -9,40 +10,42 @@ import (
 func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest) (*protocol.ProduceResponse, error) {
 	topicObj, err := srv.topicManager.GetTopic(req.Topic)
 	if err != nil {
-		return nil, ErrTopicNotFound(req.Topic, err)
+		return nil, &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: fmt.Sprintf("topic %s not found: %v", req.Topic, err)}
 	}
-	if !srv.topicManager.IsLeader(req.Topic) {
-		return nil, ErrNotTopicLeader
+	isLeader, _ := srv.topicManager.IsLeader(req.Topic)
+	if !isLeader {
+		return nil, Err(protocol.CodeNotTopicLeader, "this node is not the topic leader; produce to the topic leader")
 	}
 
 	offset, err := srv.topicManager.HandleProduce(ctx, topicObj, &protocol.LogEntry{
 		Value: req.Value,
 	}, req.Acks)
 	if err != nil {
-		return nil, err
+		return nil, FromError(err)
 	}
-	return &protocol.ProduceResponse{Offset: offset}, err
+	return &protocol.ProduceResponse{Offset: offset}, nil
 }
 
 func (srv *RpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBatchRequest) (*protocol.ProduceBatchResponse, error) {
 	if req.Topic == "" {
-		return nil, ErrTopicRequired
+		return nil, Err(protocol.CodeTopicRequired, "topic is required")
 	}
 	if len(req.Values) == 0 {
-		return nil, ErrValuesRequired
+		return nil, Err(protocol.CodeValuesRequired, "values are required")
 	}
 
 	topicObj, err := srv.topicManager.GetTopic(req.Topic)
 	if err != nil {
-		return nil, ErrTopicNotFound(req.Topic, err)
+		return nil, &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: fmt.Sprintf("topic %s not found: %v", req.Topic, err)}
 	}
-	if !srv.topicManager.IsLeader(req.Topic) {
-		return nil, ErrNotTopicLeader
+	isLeader, _ := srv.topicManager.IsLeader(req.Topic)
+	if !isLeader {
+		return nil, Err(protocol.CodeNotTopicLeader, "this node is not the topic leader; produce to the topic leader")
 	}
 
 	base, last, err := srv.topicManager.HandleProduceBatch(ctx, topicObj, req.Values, req.Acks)
 	if err != nil {
-		return nil, err
+		return nil, FromError(err)
 	}
 	return &protocol.ProduceBatchResponse{
 		BaseOffset: base,

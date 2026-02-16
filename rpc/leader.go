@@ -2,91 +2,59 @@ package rpc
 
 import (
 	"context"
-	"io"
-	"time"
+	"fmt"
 
 	"github.com/mohitkumar/mlog/protocol"
 )
 
 func (s *RpcServer) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	if req.Topic == "" {
-		return nil, ErrTopicNameRequired
+		return nil, Err(protocol.CodeTopicNameRequired, "topic name is required")
 	}
-	if req.ReplicaCount < 1 {
-		return nil, ErrReplicaCountInvalid
+	resp, err := s.topicManager.CreateTopic(ctx, req)
+	if err != nil {
+		return nil, FromError(err)
 	}
-	return s.topicManager.CreateTopicWithForwarding(ctx, req)
+	return resp, nil
 }
 
 func (s *RpcServer) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
 	if req.Topic == "" {
-		return nil, ErrTopicNameRequired
+		return nil, Err(protocol.CodeTopicNameRequired, "topic name is required")
 	}
-	return s.topicManager.DeleteTopicWithForwarding(ctx, req)
-}
-
-// ApplyDeleteTopicEvent applies DeleteTopicEvent to the Raft log. Call on the Raft leader (e.g. from topic leader via RPC).
-func (s *RpcServer) ApplyDeleteTopicEvent(ctx context.Context, req *protocol.ApplyDeleteTopicEventRequest) (*protocol.ApplyDeleteTopicEventResponse, error) {
-	s.topicManager.ApplyDeleteTopicEvent(req.Topic)
-	return &protocol.ApplyDeleteTopicEventResponse{}, nil
-}
-
-// ApplyIsrUpdateEvent applies IsrUpdateEvent to the Raft log. Call on the Raft leader (e.g. from replica/leader via RPC).
-func (s *RpcServer) ApplyIsrUpdateEvent(ctx context.Context, req *protocol.ApplyIsrUpdateEventRequest) (*protocol.ApplyIsrUpdateEventResponse, error) {
-	s.topicManager.ApplyIsrUpdateEvent(req.Topic, req.ReplicaNodeID, req.Isr, req.Leo)
-	return &protocol.ApplyIsrUpdateEventResponse{}, nil
-}
-
-// RecordLEO records the Log End Offset (LEO) of a replica
-func (s *RpcServer) RecordLEO(ctx context.Context, req *protocol.RecordLEORequest) (*protocol.RecordLEOResponse, error) {
-	err := s.topicManager.RecordLEORemote(req.NodeID, req.Topic, uint64(req.Leo), time.Now())
+	resp, err := s.topicManager.DeleteTopic(ctx, req)
 	if err != nil {
-		return nil, ErrTopicNotFound(req.Topic, err)
+		return nil, FromError(err)
 	}
-	return &protocol.RecordLEOResponse{}, nil
+	return resp, nil
 }
 
-func (s *RpcServer) handleReplicate(req *protocol.ReplicateRequest) (any, error) {
-	leaderLog, err := s.topicManager.GetLeader(req.Topic)
+func (srv *RpcServer) FindTopicLeader(ctx context.Context, req *protocol.FindTopicLeaderRequest) (*protocol.FindTopicLeaderResponse, error) {
+	if req.Topic == "" {
+		return nil, Err(protocol.CodeTopicRequired, "topic is required")
+	}
+
+	leaderAddr, err := srv.topicManager.GetTopicLeaderRPCAddr(req.Topic)
 	if err != nil {
-		if topicObj, e := s.topicManager.GetTopic(req.Topic); e == nil && topicObj != nil && topicObj.Log != nil {
-			leaderLog = topicObj.Log
-			err = nil
-		}
+		return nil, &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: fmt.Sprintf("topic %s not found: %v", req.Topic, err)}
 	}
-	if leaderLog.LEO() <= req.Offset {
-		return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: nil, EndOfStream: true}, nil
-	}
-	reader, err := leaderLog.ReaderFrom(req.Offset)
 
+	return &protocol.FindTopicLeaderResponse{
+		LeaderAddr: leaderAddr,
+	}, nil
+}
+
+// FindRaftLeader returns the RPC address of the current Raft (metadata) leader.
+// Any node can answer; clients should send create-topic and other metadata ops to this address.
+func (srv *RpcServer) FindRaftLeader(ctx context.Context, req *protocol.FindRaftLeaderRequest) (*protocol.FindRaftLeaderResponse, error) {
+	addr, err := srv.topicManager.GetRaftLeaderRPCAddr()
 	if err != nil {
-		return nil, err
+		return nil, &protocol.RPCError{Code: protocol.CodeRaftLeaderUnavailable, Message: err.Error()}
 	}
+	return &protocol.FindRaftLeaderResponse{RaftLeaderAddr: addr}, nil
+}
 
-	var batch []protocol.ReplicationRecord
-
-	var hitEOF bool
-	for len(batch) < int(req.BatchSize) {
-		offset, value, err := protocol.ReadRecordFromStream(reader)
-		if err == io.EOF {
-			hitEOF = true
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		batch = append(batch, protocol.ReplicationRecord{Offset: int64(offset), Value: value})
-	}
-	// EndOfStream when we reached end of log (EOF) or log was empty
-	endOfStream := hitEOF || len(batch) == 0
-	var rawChunk []byte
-	if len(batch) > 0 {
-		var encErr error
-		rawChunk, encErr = protocol.EncodeReplicationBatch(batch)
-		if encErr != nil {
-			return nil, encErr
-		}
-	}
-	return protocol.ReplicateResponse{Topic: req.Topic, RawChunk: rawChunk, EndOfStream: endOfStream}, nil
+// ListTopics returns all topics with leader and replica info. Any node can answer.
+func (srv *RpcServer) ListTopics(ctx context.Context, req *protocol.ListTopicsRequest) (*protocol.ListTopicsResponse, error) {
+	return srv.topicManager.ListTopics(), nil
 }

@@ -17,16 +17,44 @@ type producerTestServers struct {
 }
 
 func (s *producerTestServers) getLeaderAddr() string {
-	// With fake coordinators we deterministically treat server1 as the leader.
+	// With fake coordinators we deterministically treat server1 as the Raft leader.
 	return s.server1.Addr
 }
 
 // getTopicLeaderTopicMgr returns the TopicManager of the node that is the topic leader for topicName (from metadata).
 // Use this for verification when the topic leader may be different from the Raft leader.
 func (s *producerTestServers) getTopicLeaderTopicMgr(topicName string) *topic.TopicManager {
-	// FakeTopicCoordinator always chooses the local node as topic leader,
-	// so the topic leader is on server1 in these tests.
+	// Look up the topic on each server and return the TopicManager
+	// whose CurrentNodeID matches the topic's LeaderNodeID.
+	for _, srv := range []*TestServer{s.server1, s.server2} {
+		tm := srv.TopicManager
+		t, err := tm.GetTopic(topicName)
+		if err != nil || t == nil {
+			continue
+		}
+		if t.LeaderNodeID == tm.CurrentNodeID {
+			return tm
+		}
+	}
+	// Fallback to server1 if we couldn't resolve; tests will fail in that case.
 	return s.server1.TopicManager
+}
+
+// getTopicLeaderAddr resolves the current topic leader RPC address via FindLeader.
+func (s *producerTestServers) getTopicLeaderAddr(ctx context.Context, topicName string) (string, error) {
+	discClient, err := client.NewRemoteClient(s.getLeaderAddr())
+	if err != nil {
+		return "", err
+	}
+	defer discClient.Close()
+	resp, err := discClient.FindLeader(ctx, &protocol.FindLeaderRequest{Topic: topicName})
+	if err != nil {
+		return "", err
+	}
+	if resp.LeaderAddr == "" {
+		return "", fmt.Errorf("empty leader address for topic %q", topicName)
+	}
+	return resp.LeaderAddr, nil
 }
 
 // TestProducer runs all producer tests with a single two-node cluster setup.
@@ -45,14 +73,19 @@ func TestProducer(t *testing.T) {
 		}
 		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 			Topic:        "test-topic",
-			ReplicaCount: 1,
+			ReplicaCount: 0,
 		})
 		if err != nil {
 			t.Fatalf("CreateTopic: %v", err)
 		}
 		remoteClient.Close()
 
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		leaderAddr, err := servers.getTopicLeaderAddr(ctx, "test-topic")
+		if err != nil {
+			t.Fatalf("getTopicLeaderAddr: %v", err)
+		}
+
+		producerClient, err := client.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -125,14 +158,19 @@ func TestProducer(t *testing.T) {
 		}
 		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 			Topic:        "test-topic-ack",
-			ReplicaCount: 1,
+			ReplicaCount: 0,
 		})
 		if err != nil {
 			t.Fatalf("CreateTopic: %v", err)
 		}
 		remoteClient.Close()
 
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		leaderAddr, err := servers.getTopicLeaderAddr(ctx, "test-topic-ack")
+		if err != nil {
+			t.Fatalf("getTopicLeaderAddr: %v", err)
+		}
+
+		producerClient, err := client.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -158,14 +196,19 @@ func TestProducer(t *testing.T) {
 		}
 		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 			Topic:        "test-topic-verify",
-			ReplicaCount: 1,
+			ReplicaCount: 0,
 		})
 		if err != nil {
 			t.Fatalf("CreateTopic: %v", err)
 		}
 		remoteClient.Close()
 
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		leaderAddr, err := servers.getTopicLeaderAddr(ctx, "test-topic-verify")
+		if err != nil {
+			t.Fatalf("getTopicLeaderAddr: %v", err)
+		}
+
+		producerClient, err := client.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -193,14 +236,19 @@ func TestProducer(t *testing.T) {
 		}
 		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 			Topic:        "test-topic-ackall",
-			ReplicaCount: 1,
+			ReplicaCount: 0,
 		})
 		if err != nil {
 			t.Fatalf("CreateTopic: %v", err)
 		}
 		remoteClient.Close()
 
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		leaderAddr, err := servers.getTopicLeaderAddr(ctx, "test-topic-ackall")
+		if err != nil {
+			t.Fatalf("getTopicLeaderAddr: %v", err)
+		}
+
+		producerClient, err := client.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -235,14 +283,19 @@ func TestProducerBatch(t *testing.T) {
 		}
 		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 			Topic:        "test-topic",
-			ReplicaCount: 1,
+			ReplicaCount: 0,
 		})
 		if err != nil {
 			t.Fatalf("CreateTopic: %v", err)
 		}
 		remoteClient.Close()
 
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		leaderAddr, err := servers.getTopicLeaderAddr(ctx, "test-topic")
+		if err != nil {
+			t.Fatalf("getTopicLeaderAddr: %v", err)
+		}
+
+		producerClient, err := client.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -271,14 +324,19 @@ func TestProducerBatch(t *testing.T) {
 		}
 		_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 			Topic:        "test-topic-batch",
-			ReplicaCount: 1,
+			ReplicaCount: 0,
 		})
 		if err != nil {
 			t.Fatalf("CreateTopic: %v", err)
 		}
 		remoteClient.Close()
 
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		leaderAddr, err := servers.getTopicLeaderAddr(ctx, "test-topic-batch")
+		if err != nil {
+			t.Fatalf("getTopicLeaderAddr: %v", err)
+		}
+
+		producerClient, err := client.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -374,14 +432,19 @@ func BenchmarkProduce(b *testing.B) {
 	}
 	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        "test-topic",
-		ReplicaCount: 1,
+		ReplicaCount: 0,
 	})
 	if err != nil {
 		b.Fatalf("CreateTopic: %v", err)
 	}
 	remoteClient.Close()
 
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+	leaderAddr, err := servers.getTopicLeaderAddr(ctx, "test-topic")
+	if err != nil {
+		b.Fatalf("getTopicLeaderAddr: %v", err)
+	}
+
+	producerClient, err := client.NewProducerClient(leaderAddr)
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
@@ -418,14 +481,19 @@ func BenchmarkProduceBatch(b *testing.B) {
 	}
 	_, err = remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        "test-topic",
-		ReplicaCount: 1,
+		ReplicaCount: 0,
 	})
 	if err != nil {
 		b.Fatalf("CreateTopic: %v", err)
 	}
 	remoteClient.Close()
 
-	producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+	leaderAddr, err := servers.getTopicLeaderAddr(ctx, "test-topic")
+	if err != nil {
+		b.Fatalf("getTopicLeaderAddr: %v", err)
+	}
+
+	producerClient, err := client.NewProducerClient(leaderAddr)
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}

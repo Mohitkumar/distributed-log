@@ -42,30 +42,31 @@ func TestCreateTopic(t *testing.T) {
 }
 
 func TestDeleteTopic(t *testing.T) {
-	servers := StartTwoNodesForTests(t, "topic-delete-leader", "topic-delete-follower")
-	defer servers.Cleanup()
+	// Single node: CreateTopic and DeleteTopic both go to Raft leader; topic is created/deleted via Raft events.
+	ts := StartTestServer(t, "topic-delete-single")
+	defer ts.Cleanup()
 
 	ctx := context.Background()
-	leaderClient, err := client.NewRemoteClient(servers.GetLeaderAddr())
+	raftLeaderClient, err := client.NewRemoteClient(ts.Addr)
 	if err != nil {
-		t.Fatalf("NewReplicationClient: %v", err)
+		t.Fatalf("NewRemoteClient: %v", err)
 	}
-	producerClient, err := client.NewProducerClient(servers.GetLeaderAddr())
+	producerClient, err := client.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
 	defer producerClient.Close()
 
 	topicName := "test-delete-topic"
-	_, err = leaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+	_, err = raftLeaderClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
 		Topic:        topicName,
-		ReplicaCount: 1,
+		ReplicaCount: 0,
 	})
 	if err != nil {
 		t.Fatalf("CreateTopic error: %v", err)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
 		Topic: topicName,
@@ -76,19 +77,12 @@ func TestDeleteTopic(t *testing.T) {
 		t.Fatalf("Produce error: %v", err)
 	}
 
-	time.Sleep(500 * time.Millisecond)
-
-	leaderTopicDir := filepath.Join(servers.Server1BaseDir(), topicName)
-	followerTopicDir := filepath.Join(servers.Server2BaseDir(), topicName)
-
-	if _, err := os.Stat(leaderTopicDir); os.IsNotExist(err) {
-		t.Fatalf("expected leader topic directory %s to exist before deletion", leaderTopicDir)
-	}
-	if _, err := os.Stat(followerTopicDir); os.IsNotExist(err) {
-		t.Fatalf("expected replica directory %s to exist before deletion", followerTopicDir)
+	topicDir := filepath.Join(ts.BaseDir, topicName)
+	if _, err := os.Stat(topicDir); os.IsNotExist(err) {
+		t.Fatalf("expected topic directory %s to exist before deletion", topicDir)
 	}
 
-	deleteResp, err := leaderClient.DeleteTopic(ctx, &protocol.DeleteTopicRequest{Topic: topicName})
+	deleteResp, err := raftLeaderClient.DeleteTopic(ctx, &protocol.DeleteTopicRequest{Topic: topicName})
 	if err != nil {
 		t.Fatalf("DeleteTopic error: %v", err)
 	}
@@ -96,16 +90,10 @@ func TestDeleteTopic(t *testing.T) {
 		t.Fatalf("expected deleted topic %s, got %s", topicName, deleteResp.Topic)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	if _, err := os.Stat(leaderTopicDir); !os.IsNotExist(err) {
-		t.Fatalf("expected leader topic directory %s to be deleted, but it still exists", leaderTopicDir)
-	}
-	if _, err := os.Stat(followerTopicDir); !os.IsNotExist(err) {
-		t.Fatalf("expected follower topic directory %s to be deleted, but it still exists", followerTopicDir)
-	}
-	if _, err := os.Stat(followerTopicDir); !os.IsNotExist(err) {
-		t.Fatalf("expected replica directory %s to be deleted, but it still exists", followerTopicDir)
+	if _, err := os.Stat(topicDir); !os.IsNotExist(err) {
+		t.Fatalf("expected topic directory %s to be deleted, but it still exists", topicDir)
 	}
 
 	_, err = producerClient.Produce(ctx, &protocol.ProduceRequest{
@@ -117,7 +105,7 @@ func TestDeleteTopic(t *testing.T) {
 		t.Fatalf("expected Produce to fail for deleted topic, but it succeeded")
 	}
 
-	_, err = leaderClient.DeleteTopic(ctx, &protocol.DeleteTopicRequest{Topic: "non-existent-topic"})
+	_, err = raftLeaderClient.DeleteTopic(ctx, &protocol.DeleteTopicRequest{Topic: "non-existent-topic"})
 	if err == nil {
 		t.Fatalf("expected DeleteTopic to fail for non-existent topic, but it succeeded")
 	}

@@ -2,37 +2,51 @@ package rpc
 
 import (
 	"errors"
-	"fmt"
+
+	"github.com/mohitkumar/mlog/errs"
+	"github.com/mohitkumar/mlog/protocol"
 )
 
-// Sentinel errors for rpc package. Use errors.Is to check.
-var (
-	ErrTopicNameRequired   = errors.New("topic name is required")
-	ErrReplicaCountInvalid = errors.New("replica count must be at least 1")
-	ErrTopicRequired       = errors.New("topic is required")
-	ErrLeaderAddrRequired  = errors.New("leader_addr is required")
-	ErrValuesRequired      = errors.New("values are required")
-	ErrNotTopicLeader      = errors.New("this node is not the topic leader; produce to the topic leader")
-)
-
-// ErrTopicNotFound wraps a topic-manager error for topic not found.
-func ErrTopicNotFound(topic string, err error) error {
-	return fmt.Errorf("topic %s not found: %w", topic, err)
+// Err returns an RPCError with the given code and message; the transport sends it to the client.
+func Err(code int32, message string) error {
+	return &protocol.RPCError{Code: code, Message: message}
 }
 
-// ErrCreateReplica wraps CreateReplica failure.
-func ErrCreateReplica(err error) error { return fmt.Errorf("failed to create replica: %w", err) }
-
-// ErrDeleteReplica wraps DeleteReplica failure.
-func ErrDeleteReplica(err error) error { return fmt.Errorf("failed to delete replica: %w", err) }
-
-// ErrReadOffset wraps read offset failure.
-func ErrReadOffset(off uint64, err error) error {
-	return fmt.Errorf("failed to read offset %d: %w", off, err)
+// CodeFor returns the protocol RPC code for the given error.
+func CodeFor(err error) int32 {
+	if err == nil {
+		return 0
+	}
+	switch {
+	case errors.Is(err, errs.ErrTopicNotFound):
+		return protocol.CodeTopicNotFound
+	case errors.Is(err, errs.ErrTopicExists):
+		return protocol.CodeTopicExists
+	case errors.Is(err, errs.ErrNotEnoughNodes):
+		return protocol.CodeNotEnoughNodes
+	case errors.Is(err, errs.ErrCannotReachLeader):
+		return protocol.CodeCannotReachLeader
+	case errors.Is(err, errs.ErrThisNodeNotLeader):
+		return protocol.CodeNotTopicLeader
+	case errors.Is(err, errs.ErrInvalidAckMode):
+		return protocol.CodeInvalidAckMode
+	case errors.Is(err, errs.ErrTimeoutCatchUp):
+		return protocol.CodeTimeoutCatchUp
+	case errors.Is(err, errs.ErrValuesEmpty):
+		return protocol.CodeValuesRequired
+	case errors.Is(err, errs.ErrLogOffsetOutOfRange), errors.Is(err, errs.ErrSegmentOffsetNotFound):
+		return protocol.CodeReadOffset
+	case errors.Is(err, errs.ErrRaftNoLeader), errors.Is(err, errs.ErrRaftNodeNotFound):
+		return protocol.CodeRaftLeaderUnavailable
+	default:
+		return protocol.CodeUnknown
+	}
 }
 
-// ErrCommitOffset wraps commit offset failure.
-func ErrCommitOffset(err error) error { return fmt.Errorf("commit offset failed: %w", err) }
-
-// ErrRecoverOffsets wraps recover offsets failure.
-func ErrRecoverOffsets(err error) error { return fmt.Errorf("recover offsets failed: %w", err) }
+// FromError converts an error to an RPCError with the appropriate code for the client.
+func FromError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &protocol.RPCError{Code: CodeFor(err), Message: err.Error()}
+}

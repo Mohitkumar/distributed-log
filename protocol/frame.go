@@ -19,20 +19,16 @@ const frameHeaderSize = messageTypeSize + messageSizeSize
 const MaxFrameSize = 4 * 1024 * 1024
 
 const (
-	MsgCreateReplica MessageType = iota
-	MsgCreateReplicaResp
-	MsgDeleteReplica
-	MsgDeleteReplicaResp
-	MsgReplicateStream
+	MsgReplicateStream MessageType = iota
 	MsgReplicateResp
-	MsgRecordLEO
-	MsgRecordLEOResp
 	MsgProduce
 	MsgProduceResp
 	MsgProduceBatch
 	MsgProduceBatchResp
 	MsgFetch
 	MsgFetchResp
+	MsgFetchBatch
+	MsgFetchBatchResp
 	MsgFetchStream
 	MsgFetchStreamResp
 	MsgCommitOffset
@@ -43,11 +39,13 @@ const (
 	MsgCreateTopicResp
 	MsgDeleteTopic
 	MsgDeleteTopicResp
-	MsgApplyDeleteTopicEvent
-	MsgApplyDeleteTopicEventResp
+	MsgRPCError
+	MsgFindTopicLeader
+	MsgFindTopicLeaderResp
+	MsgFindRaftLeader
+	MsgFindRaftLeaderResp
+	MsgListTopics
+	MsgListTopicsResp
 	MsgApplyIsrUpdateEvent
 	MsgApplyIsrUpdateEventResp
-	MsgRPCError
-	MsgFindLeader
-	MsgFindLeaderResp
 )

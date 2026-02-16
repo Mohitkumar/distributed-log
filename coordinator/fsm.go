@@ -13,11 +13,11 @@ var _ raft.FSM = (*MetadataFSM)(nil)
 
 type MetadataFSM struct {
 	mu            sync.RWMutex
-	metadataStore *MetadataStore
+	metadataStore MetadataStore
 	BaseDir       string
 }
 
-func NewCoordinatorFSM(baseDir string, metadataStore *MetadataStore) (*MetadataFSM, error) {
+func NewCoordinatorFSM(baseDir string, metadataStore MetadataStore) (*MetadataFSM, error) {
 	return &MetadataFSM{
 		metadataStore: metadataStore,
 		BaseDir:       baseDir,
@@ -48,19 +48,14 @@ func (c *MetadataFSM) Restore(r io.ReadCloser) error {
 	if err != nil {
 		return err
 	}
-	var decoded MetadataStore
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	// Replace state in place so the same store (and its callbacks) is preserved.
-	c.metadataStore.RestoreState(decoded.Topics, decoded.Nodes)
+	c.metadataStore.Restore(data)
 	return nil
 }
 
 var _ raft.FSMSnapshot = (*metadataSnapshot)(nil)
 
 type metadataSnapshot struct {
-	metadataStore *MetadataStore
+	metadataStore MetadataStore
 }
 
 func (c *metadataSnapshot) Persist(sink raft.SnapshotSink) error {
