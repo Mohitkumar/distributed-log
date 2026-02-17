@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/coordinator"
 	"github.com/mohitkumar/mlog/errs"
 	"github.com/mohitkumar/mlog/log"
@@ -26,36 +25,10 @@ const (
 )
 
 type NodeMetadata struct {
-	mu             sync.RWMutex           `json:"-"`
-	NodeID         string                 `json:"node_id"`
-	Addr           string                 `json:"addr"`
-	RpcAddr        string                 `json:"rpc_addr"`
-	consumerClient *client.ConsumerClient `json:"-"`
-}
-
-func (n *NodeMetadata) GetConsumerClient() (*client.ConsumerClient, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.consumerClient == nil {
-		consumerClient, err := client.NewConsumerClient(n.RpcAddr)
-		if err != nil {
-			return nil, err
-		}
-		n.consumerClient = consumerClient
-	}
-	return n.consumerClient, nil
-}
-
-// InvalidateConsumerClient closes and clears the cached consumer client so the next
-// GetConsumerClient creates a fresh connection. Call when RPC fails with a reconnect-worthy
-// error (e.g. leader change, network failure) so replication or other callers get a new client.
-func (n *NodeMetadata) InvalidateConsumerClient() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.consumerClient != nil {
-		_ = n.consumerClient.Close()
-		n.consumerClient = nil
-	}
+	mu      sync.RWMutex `json:"-"`
+	NodeID  string       `json:"node_id"`
+	Addr    string       `json:"addr"`
+	RpcAddr string       `json:"rpc_addr"`
 }
 
 type ReplicaState struct {
@@ -502,6 +475,27 @@ func (tm *TopicManager) ApplyRecord(topicName string, value []byte) error {
 	return err
 }
 
+// ApplyRecordBatch appends multiple records to the topic log in one batch (used by replication).
+func (tm *TopicManager) ApplyRecordBatch(topicName string, values [][]byte) error {
+	if len(values) == 0 {
+		return nil
+	}
+	tm.mu.RLock()
+	t := tm.Topics[topicName]
+	tm.mu.RUnlock()
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	l := t.Log
+	t.mu.RUnlock()
+	if l == nil {
+		return nil
+	}
+	_, err := l.AppendBatch(values)
+	return err
+}
+
 // RecordReplicaLEOFromFetch is called by the leader when it serves a Fetch from a replica (ReplicaNodeID set).
 // It updates the replica's LEO and applies an ISR update via Raft.
 func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName, replicaNodeID string, leo int64) error {
@@ -546,29 +540,6 @@ func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName
 		return nil
 	}
 	return tm.coordinator.ApplyIsrUpdateEventInternal(topicName, replicaNodeID, isr)
-}
-
-// GetConsumerClient returns a consumer client to the given node (used for replication via Fetch).
-func (tm *TopicManager) GetConsumerClient(nodeID string) (*client.ConsumerClient, error) {
-	tm.mu.RLock()
-	node := tm.Nodes[nodeID]
-	tm.mu.RUnlock()
-	if node == nil {
-		return nil, fmt.Errorf("node %s not found", nodeID)
-	}
-	return node.GetConsumerClient()
-}
-
-// InvalidateConsumerClient closes and clears the cached consumer client for the given node.
-// Call when an RPC to that node fails with a reconnect-worthy error (e.g. protocol.ShouldReconnect).
-// The next GetConsumerClient(nodeID) will create a new connection.
-func (tm *TopicManager) InvalidateConsumerClient(nodeID string) {
-	tm.mu.RLock()
-	node := tm.Nodes[nodeID]
-	tm.mu.RUnlock()
-	if node != nil {
-		node.InvalidateConsumerClient()
-	}
 }
 
 // HandleProduce appends to the topic log (leader only). For ACK_ALL, waits for replicas to catch up.
