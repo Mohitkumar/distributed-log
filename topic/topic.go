@@ -641,13 +641,15 @@ func (tm *TopicManager) waitForAllFollowersToCatchUp(ctx context.Context, t *Top
 	}
 }
 
+// maybeAdvanceHW sets HW = min(leader LEO, all ISR replicas' LEO).
+// Non-ISR replicas are excluded — a dead/lagging replica must not hold back consumer visibility.
 func (tm *TopicManager) maybeAdvanceHW(t *Topic) {
 	if t.Log == nil {
 		return
 	}
 	minOffset := t.Log.LEO()
 	for _, r := range t.Replicas {
-		if r != nil && uint64(r.LEO) < minOffset {
+		if r != nil && r.IsISR && uint64(r.LEO) < minOffset {
 			minOffset = uint64(r.LEO)
 		}
 	}
@@ -676,7 +678,10 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 			t.LeaderEpoch = e.LeaderEpoch
 			// New leader is no longer a replica; old leader becomes a replica.
 			delete(t.Replicas, e.LeaderNodeID)
-			if oldLeaderID != e.LeaderNodeID && oldLeaderID != "" {
+			// Only add the old leader as a replica if it's still a live node in the cluster.
+			// If the old leader was removed (node killed), it was already cleaned up from Replicas
+			// by the RemoveNode handler. Adding a dead node would pin HW at 0.
+			if oldLeaderID != e.LeaderNodeID && oldLeaderID != "" && tm.Nodes[oldLeaderID] != nil {
 				if t.Replicas == nil {
 					t.Replicas = make(map[string]*ReplicaState)
 				}
@@ -733,6 +738,12 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 			return err
 		}
 		delete(tm.Nodes, e.NodeID)
+		// Remove the dead node from all topics' replica sets so it doesn't hold back HW.
+		for _, t := range tm.Topics {
+			if t != nil {
+				delete(t.Replicas, e.NodeID)
+			}
+		}
 		tm.maybeReassignTopicLeaders(e.NodeID)
 	case protocol.MetadataEventTypeUpdateNode:
 		e := protocol.UpdateNodeEvent{}
