@@ -143,13 +143,13 @@ func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 			if srv.ID == serverID && srv.Address == serverAddr {
 				return nil
 			}
-			removeFuture := c.raft.RemoveServer(serverID, 0, 0)
+			removeFuture := c.raft.RemoveServer(serverID, 0, 5*time.Second)
 			if err := removeFuture.Error(); err != nil {
 				return err
 			}
 		}
 	}
-	addFuture := c.raft.AddVoter(serverID, serverAddr, 0, 0)
+	addFuture := c.raft.AddVoter(serverID, serverAddr, 0, 5*time.Second)
 	if err := addFuture.Error(); err != nil {
 		c.Logger.Error("raft add voter failed", zap.Error(err), zap.String("node_id", id))
 		return err
@@ -168,7 +168,7 @@ func (c *Coordinator) Leave(id string) error {
 		return nil
 	}
 	c.Logger.Info("leave requested", zap.String("leaving_node_id", id))
-	removeFuture := c.raft.RemoveServer(raft.ServerID(id), 0, 0)
+	removeFuture := c.raft.RemoveServer(raft.ServerID(id), 0, 5*time.Second)
 	if err := removeFuture.Error(); err != nil {
 		c.Logger.Error("raft remove server failed", zap.Error(err), zap.String("node_id", id))
 		return err
