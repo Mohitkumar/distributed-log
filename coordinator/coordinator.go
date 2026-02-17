@@ -2,7 +2,6 @@ package coordinator
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -77,23 +76,23 @@ func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, error) {
 
 	advertiseAddr, err := net.ResolveTCPAddr("tcp", raftAdvertiseAddr)
 	if err != nil {
-		log.Fatalf("failed to resolve Raft advertise address %s: %s", raftAdvertiseAddr, err)
+		return nil, fmt.Errorf("failed to resolve Raft advertise address %s: %w", raftAdvertiseAddr, err)
 	}
 	transport, err := raft.NewTCPTransport(raftBindAddr, advertiseAddr, 3, 10*time.Second, os.Stderr)
 	if err != nil {
-		log.Fatalf("failed to make TCP transport bind %s advertise %s: %s", raftBindAddr, raftAdvertiseAddr, err.Error())
+		return nil, fmt.Errorf("failed to make TCP transport bind %s advertise %s: %w", raftBindAddr, raftAdvertiseAddr, err)
 	}
 	snapshots, err := raft.NewFileSnapshotStore(cfg.Dir, RetainSnapshotCount, os.Stderr)
 	if err != nil {
-		log.Fatalf("failed to create snapshot store at %s: %s", cfg.Dir, err.Error())
+		return nil, fmt.Errorf("failed to create snapshot store at %s: %w", cfg.Dir, err)
 	}
 	boltDB, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, "raft.db"))
 	if err != nil {
-		log.Fatalf("failed to create new bolt store: %s", err)
+		return nil, fmt.Errorf("failed to create bolt store: %w", err)
 	}
 	logStore, err := NewLogStore(cfg.Dir)
 	if err != nil {
-		log.Fatalf("failed to create log store: %s", err)
+		return nil, fmt.Errorf("failed to create log store: %w", err)
 	}
 	ra, err := raft.NewRaft(raftConfig, fsm, logStore, boltDB, snapshots, transport)
 	if err != nil {
@@ -155,7 +154,10 @@ func (c *Coordinator) Join(id, raftAddr, rpcAddr string) error {
 		c.Logger.Error("raft add voter failed", zap.Error(err), zap.String("node_id", id))
 		return err
 	}
-	c.ApplyNodeAddEvent(id, raftAddr, rpcAddr)
+	if err := c.ApplyNodeAddEvent(id, raftAddr, rpcAddr); err != nil {
+		c.Logger.Error("failed to apply node add event", zap.Error(err), zap.String("node_id", id))
+		return err
+	}
 	c.Logger.Info("node joined cluster", zap.String("joined_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 	return nil
 }
@@ -171,7 +173,10 @@ func (c *Coordinator) Leave(id string) error {
 		c.Logger.Error("raft remove server failed", zap.Error(err), zap.String("node_id", id))
 		return err
 	}
-	c.ApplyNodeRemoveEvent(id)
+	if err := c.ApplyNodeRemoveEvent(id); err != nil {
+		c.Logger.Error("failed to apply node remove event", zap.Error(err), zap.String("node_id", id))
+		return err
+	}
 	c.Logger.Info("node left cluster", zap.String("left_node_id", id))
 	return nil
 }
