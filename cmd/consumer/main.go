@@ -115,21 +115,30 @@ func main() {
 					Offset: currentOffset,
 				})
 				if err != nil {
-					// On leader change or connection failure, re-resolve leader.
+					// On leader change or connection failure, re-resolve leader with retries.
 					if client.ShouldReconnect(err) {
 						fmt.Fprintln(os.Stderr, "reconnecting (leader change or connection issue)...")
-						leaderCtx, leaderCancel := context.WithTimeout(ctx, 5*time.Second)
-						newLeaderAddr, findErr := findLeader(leaderCtx)
-						leaderCancel()
-						if findErr != nil {
-							return findErr
-						}
-						leaderAddr = newLeaderAddr
-
 						_ = consumerClient.Close()
-						consumerClient, findErr = client.NewConsumerClient(leaderAddr)
-						if findErr != nil {
-							return findErr
+
+						var newAddr string
+						for attempt := 0; attempt < 10; attempt++ {
+							leaderCtx, leaderCancel := context.WithTimeout(ctx, 5*time.Second)
+							newAddr, err = findLeader(leaderCtx)
+							leaderCancel()
+							if err == nil {
+								break
+							}
+							fmt.Fprintf(os.Stderr, "find leader attempt %d failed: %v\n", attempt+1, err)
+							time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+						}
+						if err != nil {
+							return fmt.Errorf("failed to find new leader after retries: %w", err)
+						}
+						leaderAddr = newAddr
+
+						consumerClient, err = client.NewConsumerClient(leaderAddr)
+						if err != nil {
+							return err
 						}
 						fmt.Fprintf(os.Stderr, "reconnected to topic leader at %s\n", leaderAddr)
 						continue

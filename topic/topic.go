@@ -882,16 +882,23 @@ func (tm *TopicManager) removeTopicLocalLocked(topicName string) {
 	tm.Logger.Info("topic removed", zap.String("topic", topicName))
 }
 
+// maybeReassignTopicLeaders is called from Apply() (FSM goroutine) when a node is removed.
+// It must NOT call raft.Apply synchronously — that would deadlock the FSM goroutine
+// (FSM.Apply waits for the new entry to be applied, but the FSM is blocked in the current Apply).
+// Instead, it collects the needed changes and applies them asynchronously in a goroutine.
 func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
 	if tm.coordinator == nil || !tm.coordinator.IsLeader() {
 		return
 	}
-	topicsCopy := make(map[string]*Topic, len(tm.Topics))
-	for k, v := range tm.Topics {
-		topicsCopy[k] = v
-	}
 
-	for topicName, t := range topicsCopy {
+	type leaderChange struct {
+		topic     string
+		newLeader string
+		epoch     int64
+	}
+	var changes []leaderChange
+
+	for topicName, t := range tm.Topics {
 		if t == nil || t.LeaderNodeID != nodeID {
 			continue
 		}
@@ -911,11 +918,25 @@ func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
 			tm.Logger.Warn("no ISR replica for leadership", zap.String("topic", topicName), zap.String("old_leader_node_id", nodeID))
 			continue
 		}
-		nextEpoch := t.LeaderEpoch + 1
-		if err := tm.coordinator.ApplyLeaderChangeEvent(topicName, newLeader, nextEpoch); err != nil {
-			tm.Logger.Warn("leader change apply failed", zap.String("topic", topicName), zap.Error(err))
-		}
+		changes = append(changes, leaderChange{
+			topic:     topicName,
+			newLeader: newLeader,
+			epoch:     t.LeaderEpoch + 1,
+		})
 	}
+
+	if len(changes) == 0 {
+		return
+	}
+
+	// Apply leader changes asynchronously so the FSM's current Apply() can return first.
+	go func() {
+		for _, ch := range changes {
+			if err := tm.coordinator.ApplyLeaderChangeEvent(ch.topic, ch.newLeader, ch.epoch); err != nil {
+				tm.Logger.Warn("leader change apply failed", zap.String("topic", ch.topic), zap.Error(err))
+			}
+		}
+	}()
 }
 
 func (tm *TopicManager) Restore(data []byte) error {
