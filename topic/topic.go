@@ -39,13 +39,14 @@ type ReplicaState struct {
 
 // In memory representation of a topic
 type Topic struct {
-	mu           sync.RWMutex             `json:"-"`
-	Name         string                   `json:"name"`
-	LeaderNodeID string                   `json:"leader_id"`
-	LeaderEpoch  int64                    `json:"leader_epoch"`
-	Replicas     map[string]*ReplicaState `json:"replicas"`
-	Log          *log.LogManager          `json:"-"`
-	Logger       *zap.Logger              `json:"-"`
+	mu                  sync.RWMutex             `json:"-"`
+	Name                string                   `json:"name"`
+	LeaderNodeID        string                   `json:"leader_id"`
+	LeaderEpoch         int64                    `json:"leader_epoch"`
+	DesiredReplicaCount int                      `json:"desired_replica_count"` // from CreateTopic; used to re-add replicas when nodes rejoin
+	Replicas            map[string]*ReplicaState `json:"replicas"`
+	Log                 *log.LogManager          `json:"-"`
+	Logger              *zap.Logger              `json:"-"`
 }
 
 var _ coordinator.MetadataStore = (*TopicManager)(nil)
@@ -732,18 +733,17 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 			Addr:    e.Addr,
 			RpcAddr: e.RpcAddr,
 		}
+		// When a node (re)joins, add it as a replica for topics that are below their
+		// desired replica count and where this node is not already leader or replica.
+		tm.maybeAddReplicasForNode(e.NodeID)
 	case protocol.MetadataEventTypeRemoveNode:
 		e := protocol.RemoveNodeEvent{}
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
 		}
 		delete(tm.Nodes, e.NodeID)
-		// Remove the dead node from all topics' replica sets so it doesn't hold back HW.
-		for _, t := range tm.Topics {
-			if t != nil {
-				delete(t.Replicas, e.NodeID)
-			}
-		}
+		// Dead node stays in Replicas so it can resume replication when it comes back.
+		// HW is not affected because maybeAdvanceHW only considers ISR replicas.
 		tm.maybeReassignTopicLeaders(e.NodeID)
 	case protocol.MetadataEventTypeUpdateNode:
 		e := protocol.UpdateNodeEvent{}
@@ -765,11 +765,12 @@ func (tm *TopicManager) createTopicFromEvent(topicName, leaderNodeID string, lea
 		return
 	}
 	t := &Topic{
-		Name:         topicName,
-		LeaderNodeID: leaderNodeID,
-		LeaderEpoch:  leaderEpoch,
-		Replicas:     make(map[string]*ReplicaState),
-		Logger:       tm.Logger,
+		Name:                topicName,
+		LeaderNodeID:        leaderNodeID,
+		LeaderEpoch:         leaderEpoch,
+		DesiredReplicaCount: len(replicaNodeIds),
+		Replicas:            make(map[string]*ReplicaState),
+		Logger:              tm.Logger,
 	}
 	for _, replica := range replicaNodeIds {
 		t.Replicas[replica] = &ReplicaState{
@@ -919,6 +920,36 @@ func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
 			}
 		}
 	}()
+}
+
+// maybeAddReplicasForNode is called from Apply() (AddNode) when a node (re)joins the cluster.
+// For each topic below its desired replica count where this node is not leader or already a replica,
+// add the node as a non-ISR replica. Since this runs inside FSM.Apply(), the change is Raft-replicated.
+// The node will open its local log via Restore/ensureLocalLogForTopic and start replicating.
+func (tm *TopicManager) maybeAddReplicasForNode(nodeID string) {
+	for _, t := range tm.Topics {
+		if t == nil || t.LeaderNodeID == nodeID {
+			continue
+		}
+		if _, already := t.Replicas[nodeID]; already {
+			continue
+		}
+		if len(t.Replicas) >= t.DesiredReplicaCount {
+			continue
+		}
+		if t.Replicas == nil {
+			t.Replicas = make(map[string]*ReplicaState)
+		}
+		t.Replicas[nodeID] = &ReplicaState{
+			ReplicaNodeID: nodeID,
+			LEO:           0,
+			IsISR:         false,
+		}
+		tm.Logger.Info("added rejoined node as replica",
+			zap.String("topic", t.Name),
+			zap.String("node_id", nodeID),
+		)
+	}
 }
 
 func (tm *TopicManager) Restore(data []byte) error {
