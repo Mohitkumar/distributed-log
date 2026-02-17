@@ -85,8 +85,8 @@ type TopicManager struct {
 	Nodes                map[string]*NodeMetadata `json:"nodes"`
 	CurrentNodeID        string                   `json:"-"` // Local node ID from config; not persisted in Raft snapshot.
 	coordinator          TopicCoordinator         `json:"-"`
-	stopPeriodic         chan struct{}             `json:"-"`
-	stopReplication      chan struct{}             `json:"-"`
+	stopPeriodic         chan struct{}            `json:"-"`
+	stopReplication      chan struct{}            `json:"-"`
 	replicationBatchSize uint32                   `json:"-"`
 	ISRLagThreshold      uint64                   `json:"-"` // max record lag for ISR membership
 }
@@ -977,7 +977,7 @@ func (tm *TopicManager) periodicLog(interval time.Duration) {
 				tm.Logger.Warn("metadata periodic log marshal error", zap.Error(err))
 				continue
 			}
-			tm.Logger.Debug("metadata store", zap.String("state", string(b)))
+			tm.Logger.Info("metadata store", zap.String("state", string(b)))
 		}
 	}
 }

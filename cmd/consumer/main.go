@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -105,6 +106,7 @@ func main() {
 			}
 
 			currentOffset := startOffset
+			pollInterval := 500 * time.Millisecond
 
 			for {
 				resp, err := consumerClient.Fetch(ctx, &protocol.FetchRequest{
@@ -113,7 +115,7 @@ func main() {
 					Offset: currentOffset,
 				})
 				if err != nil {
-					// On leader change or connection failure, try addrs again and re-resolve leader.
+					// On leader change or connection failure, re-resolve leader.
 					if client.ShouldReconnect(err) {
 						fmt.Fprintln(os.Stderr, "reconnecting (leader change or connection issue)...")
 						leaderCtx, leaderCancel := context.WithTimeout(ctx, 5*time.Second)
@@ -132,9 +134,16 @@ func main() {
 						fmt.Fprintf(os.Stderr, "reconnected to topic leader at %s\n", leaderAddr)
 						continue
 					}
+					// Offset out of range means we've caught up; back off and poll.
+					var rpcErr *protocol.RPCError
+					if errors.As(err, &rpcErr) && rpcErr.Code == protocol.CodeReadOffset {
+						time.Sleep(pollInterval)
+						continue
+					}
 					return err
 				}
 				if resp.Entry == nil {
+					time.Sleep(pollInterval)
 					continue
 				}
 
@@ -144,11 +153,13 @@ func main() {
 				currentOffset = resp.Entry.Offset + 1
 
 				commitCtx, commitCancel := context.WithTimeout(ctx, 5*time.Second)
-				_, _ = consumerClient.CommitOffset(commitCtx, &protocol.CommitOffsetRequest{
+				if _, err := consumerClient.CommitOffset(commitCtx, &protocol.CommitOffsetRequest{
 					Id:     id,
 					Topic:  topic,
 					Offset: currentOffset,
-				})
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: commit offset %d failed: %v\n", currentOffset, err)
+				}
 				commitCancel()
 			}
 		},
