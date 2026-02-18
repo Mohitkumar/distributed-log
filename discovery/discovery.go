@@ -83,7 +83,7 @@ func (m *Membership) eventHandler() {
 		case serf.EventMemberLeave, serf.EventMemberFailed:
 			for _, member := range e.(serf.MemberEvent).Members {
 				if m.isLocal(member) {
-					return
+					continue
 				}
 				m.handleLeave(member)
 			}
@@ -129,6 +129,28 @@ func (m *Membership) AliveMembers() []string {
 		}
 	}
 	return names
+}
+
+// NodeInfo holds identity and address information for a cluster member.
+type NodeInfo struct {
+	Name     string
+	RaftAddr string
+	RpcAddr  string
+}
+
+// AliveNodeDetails returns identity and address info for Serf members currently alive.
+func (m *Membership) AliveNodeDetails() []NodeInfo {
+	var nodes []NodeInfo
+	for _, member := range m.serf.Members() {
+		if member.Status == serf.StatusAlive {
+			nodes = append(nodes, NodeInfo{
+				Name:     member.Name,
+				RaftAddr: member.Tags["raft_addr"],
+				RpcAddr:  member.Tags["rpc_addr"],
+			})
+		}
+	}
+	return nodes
 }
 
 func (m *Membership) Leave() error {

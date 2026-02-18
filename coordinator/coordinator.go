@@ -24,10 +24,11 @@ const (
 	RetainSnapshotCount = 10
 )
 
-// MemberLister returns the names of cluster members currently alive (as seen by Serf).
-// Used by the Coordinator to reconcile Raft voters after a leadership change.
+// MemberLister returns information about cluster members currently alive (as seen by Serf).
+// Used by the Coordinator to reconcile Raft voters with Serf membership.
 type MemberLister interface {
 	AliveMembers() []string
+	AliveNodeDetails() []discovery.NodeInfo
 }
 
 // Coordinator handles cluster-wide responsibility: Raft, metadata store, and membership (Join/Leave, Apply* events).
@@ -243,27 +244,37 @@ func (c *Coordinator) Start() error {
 	return nil
 }
 
-// runLeadershipWatcher watches for Raft leadership transitions. When this node
-// becomes leader, it reconciles the Raft voter list against Serf alive members
-// after a short delay (to let Serf propagate any pending failure events).
+// runLeadershipWatcher watches for Raft leadership transitions and runs periodic
+// reconciliation. When this node becomes leader, it reconciles the Raft voter list
+// against Serf alive members after a short delay. It also runs reconciliation
+// periodically to catch any missed joins or leaves.
 func (c *Coordinator) runLeadershipWatcher() {
 	leaderCh := c.raft.LeaderCh()
+	reconcileTicker := time.NewTicker(30 * time.Second)
+	defer reconcileTicker.Stop()
+
 	for {
-		isLeader, ok := <-leaderCh
-		if !ok {
-			return // raft shut down
-		}
-		if isLeader {
-			// Delay so Serf has time to propagate failure events for the old leader.
-			time.Sleep(5 * time.Second)
-			c.reconcileRaftVoters()
+		select {
+		case isLeader, ok := <-leaderCh:
+			if !ok {
+				return // raft shut down
+			}
+			if isLeader {
+				// Delay so Serf has time to propagate failure events for the old leader.
+				time.Sleep(5 * time.Second)
+				c.reconcileRaftVoters()
+			}
+		case <-reconcileTicker.C:
+			if c.IsLeader() {
+				c.reconcileRaftVoters()
+			}
 		}
 	}
 }
 
-// reconcileRaftVoters removes Raft voters that are no longer alive in Serf.
-// This handles the case where the old Raft leader died and the Serf leave event
-// was missed because no Raft leader existed at the time.
+// reconcileRaftVoters ensures Raft voters and Serf alive members are in sync.
+// It removes Raft voters that are no longer alive in Serf, and adds Serf alive
+// members that are missing from the Raft voter list.
 func (c *Coordinator) reconcileRaftVoters() {
 	if !c.IsLeader() {
 		return
@@ -275,10 +286,10 @@ func (c *Coordinator) reconcileRaftVoters() {
 		return
 	}
 
-	alive := ml.AliveMembers()
-	aliveSet := make(map[string]struct{}, len(alive))
-	for _, name := range alive {
-		aliveSet[name] = struct{}{}
+	details := ml.AliveNodeDetails()
+	aliveSet := make(map[string]discovery.NodeInfo, len(details))
+	for _, info := range details {
+		aliveSet[info.Name] = info
 	}
 
 	f := c.raft.GetConfiguration()
@@ -288,8 +299,10 @@ func (c *Coordinator) reconcileRaftVoters() {
 	}
 
 	localID := c.cfg.RaftConfig.ID
+	raftSet := make(map[string]struct{})
 	for _, server := range f.Configuration().Servers {
 		id := string(server.ID)
+		raftSet[id] = struct{}{}
 		if id == localID {
 			continue // never remove self
 		}
@@ -297,6 +310,21 @@ func (c *Coordinator) reconcileRaftVoters() {
 			c.Logger.Info("reconcile: removing stale raft voter", zap.String("node_id", id))
 			if err := c.Leave(id); err != nil {
 				c.Logger.Warn("reconcile: leave failed", zap.String("node_id", id), zap.Error(err))
+			}
+		}
+	}
+
+	// Add Serf alive members that are missing from Raft voters.
+	for _, info := range details {
+		if info.Name == localID {
+			continue
+		}
+		if _, ok := raftSet[info.Name]; !ok {
+			c.Logger.Info("reconcile: adding missing raft voter",
+				zap.String("node_id", info.Name),
+				zap.String("raft_addr", info.RaftAddr))
+			if err := c.Join(info.Name, info.RaftAddr, info.RpcAddr); err != nil {
+				c.Logger.Warn("reconcile: join failed", zap.String("node_id", info.Name), zap.Error(err))
 			}
 		}
 	}
