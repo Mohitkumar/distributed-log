@@ -2,18 +2,24 @@ package tests
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
 	"path"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/mohitkumar/mlog/config"
 	consumermgr "github.com/mohitkumar/mlog/consumer"
+	"github.com/mohitkumar/mlog/coordinator"
+	"github.com/mohitkumar/mlog/discovery"
 	"github.com/mohitkumar/mlog/protocol"
 	"github.com/mohitkumar/mlog/rpc"
 	"github.com/mohitkumar/mlog/topic"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // testLogger returns a zap logger for tests (development style, with node_id). Use for node and topic manager.
@@ -306,4 +312,324 @@ func (h *TwoNodeTestHelper) WaitReplicaCatchUp(topicName string, targetLEO uint6
 func StartTwoNodesForTests(tb testing.TB, server1Suffix, server2Suffix string) *TwoNodeTestHelper {
 	server1, server2 := StartTwoNodes(tb, server1Suffix, server2Suffix)
 	return &TwoNodeTestHelper{server1: server1, server2: server2}
+}
+
+// testLoggerSilent returns a silent zap logger for tests with real coordinators (avoid log spam).
+func testLoggerSilent(nodeID string) *zap.Logger {
+	enc := zapcore.NewConsoleEncoder(zap.NewProductionEncoderConfig())
+	core := zapcore.NewCore(enc, zapcore.AddSync(os.Stderr), zapcore.ErrorLevel)
+	return zap.New(core).With(zap.String("node_id", nodeID))
+}
+
+// RealTestServer represents a test server with a real coordinator.
+type RealTestServer struct {
+	NodeID         string
+	Coordinator    *coordinator.Coordinator
+	TopicManager   *topic.TopicManager
+	ConsumerMgr    *consumermgr.ConsumerManager
+	RpcServer      *rpc.RpcServer
+	Membership     *discovery.Membership
+	BaseDir        string
+	Addr           string
+	raftAddr       string
+	cancelShutdown func()
+}
+
+// Cleanup stops the server and cleans up resources.
+func (rts *RealTestServer) Cleanup() error {
+	var errs []error
+	if rts.cancelShutdown != nil {
+		rts.cancelShutdown()
+	}
+	if rts.Membership != nil {
+		if err := rts.Membership.Leave(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rts.RpcServer != nil {
+		if err := rts.RpcServer.Stop(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rts.Coordinator != nil {
+		if err := rts.Coordinator.Shutdown(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("cleanup errors: %v", errs)
+	}
+	return nil
+}
+
+// StartRealThreeNodeCluster starts a 3-node cluster with real coordinators using Raft consensus.
+// Node1 bootstraps the cluster, nodes 2 and 3 join. Returns the three servers and a function to cleanup all.
+func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestServer, *RealTestServer, *RealTestServer, func()) {
+	t.Helper()
+
+	// Allocate ports for all 3 nodes (each node needs: Serf bind, Raft addr, RPC port)
+	ports := allocPorts(9) // 3 ports per node
+	basePort := ports[0]
+
+	// Node 1: bootstrap node
+	serf1 := basePort
+	raft1 := basePort + 1
+	rpc1 := basePort + 2
+
+	// Node 2
+	serf2 := basePort + 3
+	raft2 := basePort + 4
+	rpc2 := basePort + 5
+
+	// Node 3
+	serf3 := basePort + 6
+	raft3 := basePort + 7
+	rpc3 := basePort + 8
+
+	baseDirs := [3]string{
+		path.Join(t.TempDir(), baseDirPrefix+"-node1"),
+		path.Join(t.TempDir(), baseDirPrefix+"-node2"),
+		path.Join(t.TempDir(), baseDirPrefix+"-node3"),
+	}
+
+	nodeConfigs := []struct {
+		nodeID    string
+		basePath  string
+		serfPort  int
+		raftPort  int
+		rpcPort   int
+		bootstrap bool
+		joinAddrs []string
+	}{
+		{
+			nodeID:    "node-1",
+			basePath:  baseDirs[0],
+			serfPort:  serf1,
+			raftPort:  raft1,
+			rpcPort:   rpc1,
+			bootstrap: true,
+			joinAddrs: nil,
+		},
+		{
+			nodeID:    "node-2",
+			basePath:  baseDirs[1],
+			serfPort:  serf2,
+			raftPort:  raft2,
+			rpcPort:   rpc2,
+			bootstrap: false,
+			joinAddrs: []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(serf1))},
+		},
+		{
+			nodeID:    "node-3",
+			basePath:  baseDirs[2],
+			serfPort:  serf3,
+			raftPort:  raft3,
+			rpcPort:   rpc3,
+			bootstrap: false,
+			joinAddrs: []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(serf1))},
+		},
+	}
+
+	servers := make([]*RealTestServer, 3)
+	var allCleanup []func()
+
+	// Start node 1 (bootstrap)
+	for i := 0; i < 1; i++ {
+		nc := nodeConfigs[i]
+		cfg := config.Config{
+			BindAddr:       net.JoinHostPort("127.0.0.1", strconv.Itoa(nc.serfPort)),
+			AdvertiseAddr:  "127.0.0.1",
+			StartJoinAddrs: nc.joinAddrs,
+			NodeConfig: config.NodeConfig{
+				ID:      nc.nodeID,
+				RPCPort: nc.rpcPort,
+				DataDir: nc.basePath,
+			},
+			RaftConfig: config.RaftConfig{
+				ID:          nc.nodeID,
+				Address:     net.JoinHostPort("127.0.0.1", strconv.Itoa(nc.raftPort)),
+				BindAddress: net.JoinHostPort("127.0.0.1", strconv.Itoa(nc.raftPort)),
+				Dir:         nc.basePath,
+				Boostatrap:  nc.bootstrap,
+			},
+		}
+
+		logger := testLoggerSilent(nc.nodeID)
+
+		// Create topic manager first (implements MetadataStore)
+		tm, err := topic.NewTopicManager(nc.basePath, nil, logger)
+		if err != nil {
+			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
+		}
+
+		// Create coordinator
+		coord, err := coordinator.NewCoordinatorFromConfig(cfg, tm, logger)
+		if err != nil {
+			t.Fatalf("NewCoordinator %s: %v", nc.nodeID, err)
+		}
+		tm.SetCoordinator(coord)
+		tm.SetCurrentNodeID(nc.nodeID)
+
+		// Start coordinator for bootstrap
+		if err := coord.Start(); err != nil {
+			t.Fatalf("coord.Start %s: %v", nc.nodeID, err)
+		}
+
+		// Wait for Raft to be ready
+		if err := coord.WaitforRaftReady(10 * time.Second); err != nil {
+			t.Fatalf("bootstrap node %s: raft not ready: %v", nc.nodeID, err)
+		}
+		if err := coord.EnsureSelfInMetadata(); err != nil {
+			t.Fatalf("bootstrap node %s: ensure self in metadata: %v", nc.nodeID, err)
+		}
+
+		// Restore topic manager state
+		if err := tm.RestoreFromMetadata(); err != nil {
+			t.Fatalf("RestoreFromMetadata %s: %v", nc.nodeID, err)
+		}
+		tm.StartReplicationThread()
+
+		// Create consumer manager
+		consumerMgr, err := consumermgr.NewConsumerManager(nc.basePath)
+		if err != nil {
+			t.Fatalf("NewConsumerManager %s: %v", nc.nodeID, err)
+		}
+
+		// Create and start RPC server
+		rpcAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(nc.rpcPort))
+		rpcSrv := rpc.NewRpcServer(rpcAddr, tm, consumerMgr)
+		if err := rpcSrv.Start(); err != nil {
+			t.Fatalf("RpcServer Start %s: %v", nc.nodeID, err)
+		}
+
+		// Create membership discovery
+		membership, err := discovery.New(coord, cfg)
+		if err != nil {
+			t.Fatalf("discovery.New %s: %v", nc.nodeID, err)
+		}
+		coord.SetMemberLister(membership)
+
+		servers[i] = &RealTestServer{
+			NodeID:       nc.nodeID,
+			Coordinator:  coord,
+			TopicManager: tm,
+			ConsumerMgr:  consumerMgr,
+			RpcServer:    rpcSrv,
+			Membership:   membership,
+			BaseDir:      nc.basePath,
+			Addr:         rpcSrv.Addr,
+			raftAddr:     cfg.RaftConfig.Address,
+		}
+
+		allCleanup = append(allCleanup, func(s *RealTestServer) func() {
+			return func() { _ = s.Cleanup() }
+		}(servers[i]))
+	}
+
+	// Give bootstrap node time to stabilize
+	time.Sleep(1 * time.Second)
+
+	// Start nodes 2 and 3 (join nodes)
+	for i := 1; i < 3; i++ {
+		nc := nodeConfigs[i]
+		cfg := config.Config{
+			BindAddr:       net.JoinHostPort("127.0.0.1", strconv.Itoa(nc.serfPort)),
+			AdvertiseAddr:  "127.0.0.1",
+			StartJoinAddrs: nc.joinAddrs,
+			NodeConfig: config.NodeConfig{
+				ID:      nc.nodeID,
+				RPCPort: nc.rpcPort,
+				DataDir: nc.basePath,
+			},
+			RaftConfig: config.RaftConfig{
+				ID:          nc.nodeID,
+				Address:     net.JoinHostPort("127.0.0.1", strconv.Itoa(nc.raftPort)),
+				BindAddress: net.JoinHostPort("127.0.0.1", strconv.Itoa(nc.raftPort)),
+				Dir:         nc.basePath,
+				Boostatrap:  nc.bootstrap,
+			},
+		}
+
+		logger := testLoggerSilent(nc.nodeID)
+
+		// Create topic manager first (implements MetadataStore)
+		tm, err := topic.NewTopicManager(nc.basePath, nil, logger)
+		if err != nil {
+			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
+		}
+
+		// Create coordinator
+		coord, err := coordinator.NewCoordinatorFromConfig(cfg, tm, logger)
+		if err != nil {
+			t.Fatalf("NewCoordinator %s: %v", nc.nodeID, err)
+		}
+		tm.SetCoordinator(coord)
+		tm.SetCurrentNodeID(nc.nodeID)
+
+		// Create consumer manager
+		consumerMgr, err := consumermgr.NewConsumerManager(nc.basePath)
+		if err != nil {
+			t.Fatalf("NewConsumerManager %s: %v", nc.nodeID, err)
+		}
+
+		// Create and start RPC server
+		rpcAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(nc.rpcPort))
+		rpcSrv := rpc.NewRpcServer(rpcAddr, tm, consumerMgr)
+		if err := rpcSrv.Start(); err != nil {
+			t.Fatalf("RpcServer Start %s: %v", nc.nodeID, err)
+		}
+
+		// Create membership discovery
+		membership, err := discovery.New(coord, cfg)
+		if err != nil {
+			t.Fatalf("discovery.New %s: %v", nc.nodeID, err)
+		}
+		coord.SetMemberLister(membership)
+
+		// Start coordinator (will join via Serf)
+		if err := coord.Start(); err != nil {
+			t.Fatalf("coord.Start %s: %v", nc.nodeID, err)
+		}
+
+		// Wait for Raft to be ready (will wait for discovery to work)
+		if err := coord.WaitforRaftReady(15 * time.Second); err != nil {
+			t.Fatalf("node %s: raft not ready: %v", nc.nodeID, err)
+		}
+
+		// Restore topic manager state
+		if err := tm.RestoreFromMetadata(); err != nil {
+			t.Fatalf("RestoreFromMetadata %s: %v", nc.nodeID, err)
+		}
+		tm.StartReplicationThread()
+
+		servers[i] = &RealTestServer{
+			NodeID:       nc.nodeID,
+			Coordinator:  coord,
+			TopicManager: tm,
+			ConsumerMgr:  consumerMgr,
+			RpcServer:    rpcSrv,
+			Membership:   membership,
+			BaseDir:      nc.basePath,
+			Addr:         rpcSrv.Addr,
+			raftAddr:     cfg.RaftConfig.Address,
+		}
+
+		allCleanup = append(allCleanup, func(s *RealTestServer) func() {
+			return func() { _ = s.Cleanup() }
+		}(servers[i]))
+
+		// Wait between node starts
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Allow cluster to stabilize
+	time.Sleep(1 * time.Second)
+
+	cleanup := func() {
+		for i := len(allCleanup) - 1; i >= 0; i-- {
+			allCleanup[i]()
+		}
+	}
+
+	return servers[0], servers[1], servers[2], cleanup
 }
