@@ -1006,12 +1006,23 @@ func (tm *TopicManager) periodicLog(interval time.Duration) {
 		case <-ticker.C:
 			tm.mu.RLock()
 			b, err := json.Marshal(tm)
+			// Build local log LEO summary (not in metadata, each node knows its own).
+			localLEOs := make(map[string]uint64, len(tm.Topics))
+			for name, t := range tm.Topics {
+				if t != nil && t.Log != nil {
+					localLEOs[name] = t.Log.LEO()
+				}
+			}
 			tm.mu.RUnlock()
 			if err != nil {
 				tm.Logger.Warn("metadata periodic log marshal error", zap.Error(err))
 				continue
 			}
-			tm.Logger.Info("metadata store", zap.String("state", string(b)))
+			leoBytes, _ := json.Marshal(localLEOs)
+			tm.Logger.Info("metadata store",
+				zap.String("state", string(b)),
+				zap.String("local_leo", string(leoBytes)),
+			)
 		}
 	}
 }
