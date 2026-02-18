@@ -120,6 +120,17 @@ func (m *Membership) Members() []serf.Member {
 	return m.serf.Members()
 }
 
+// AliveMembers returns the names of Serf members currently in the Alive state.
+func (m *Membership) AliveMembers() []string {
+	var names []string
+	for _, member := range m.serf.Members() {
+		if member.Status == serf.StatusAlive {
+			names = append(names, member.Name)
+		}
+	}
+	return names
+}
+
 func (m *Membership) Leave() error {
 	return m.serf.Leave()
 }

@@ -120,6 +120,7 @@ func (cmdHelper *CommandHelper) setupMembership() error {
 		return err
 	}
 	cmdHelper.membership = membership
+	cmdHelper.coord.SetMemberLister(membership)
 	return nil
 }
 
