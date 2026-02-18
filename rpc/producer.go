@@ -8,6 +8,12 @@ import (
 )
 
 func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest) (*protocol.ProduceResponse, error) {
+	if req.Topic == "" {
+		return nil, Err(protocol.CodeTopicRequired, "topic is required")
+	}
+	if len(req.Value) == 0 {
+		return nil, Err(protocol.CodeValuesRequired, "value is required")
+	}
 	topicObj, err := srv.topicManager.GetTopic(req.Topic)
 	if err != nil {
 		return nil, &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: fmt.Sprintf("topic %s not found: %v", req.Topic, err)}

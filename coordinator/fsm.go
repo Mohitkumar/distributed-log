@@ -34,12 +34,16 @@ func (c *MetadataFSM) Apply(l *raft.Log) interface{} {
 	return c.metadataStore.Apply(&metadataEvent)
 }
 
+// Snapshot serializes the metadata store under the lock so Persist() works on a
+// frozen copy and is safe to call without holding the FSM lock.
 func (c *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return &metadataSnapshot{
-		metadataStore: c.metadataStore,
-	}, nil
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	data, err := json.Marshal(c.metadataStore)
+	if err != nil {
+		return nil, err
+	}
+	return &metadataSnapshot{data: data}, nil
 }
 
 func (c *MetadataFSM) Restore(r io.ReadCloser) error {
@@ -48,33 +52,22 @@ func (c *MetadataFSM) Restore(r io.ReadCloser) error {
 	if err != nil {
 		return err
 	}
-	c.metadataStore.Restore(data)
-	return nil
+	return c.metadataStore.Restore(data)
 }
 
 var _ raft.FSMSnapshot = (*metadataSnapshot)(nil)
 
+// metadataSnapshot holds a frozen byte slice captured at snapshot time.
 type metadataSnapshot struct {
-	metadataStore MetadataStore
+	data []byte
 }
 
-func (c *metadataSnapshot) Persist(sink raft.SnapshotSink) error {
-	err := func() error {
-		// Encode and write state to the sink
-		b, err := json.Marshal(c.metadataStore)
-		if err != nil {
-			return err
-		}
-		if _, err := sink.Write(b); err != nil {
-			return err
-		}
-		return sink.Close()
-	}()
-
-	if err != nil {
+func (s *metadataSnapshot) Persist(sink raft.SnapshotSink) error {
+	if _, err := sink.Write(s.data); err != nil {
 		sink.Cancel()
+		return err
 	}
-	return err
+	return sink.Close()
 }
 
-func (c *metadataSnapshot) Release() {}
+func (s *metadataSnapshot) Release() {}

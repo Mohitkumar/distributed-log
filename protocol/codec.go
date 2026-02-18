@@ -226,25 +226,26 @@ func (c *Codec) encodeFrame(w io.Writer, mType MessageType, payload []byte) erro
 	if length > MaxFrameSize {
 		return ErrFrameTooLarge
 	}
-	header := make([]byte, frameHeaderSize)
-	byteOrder.PutUint16(header, uint16(mType))
+	// Stack-allocated header avoids a heap allocation per frame.
+	var header [frameHeaderSize]byte
+	byteOrder.PutUint16(header[:], uint16(mType))
 	byteOrder.PutUint32(header[messageTypeSize:], length)
-	if _, err := w.Write(header); err != nil {
-		return err
-	}
-	if _, err := w.Write(payload); err != nil {
-		return err
-	}
-	return nil
+	// Single write: combine header + payload to avoid two syscalls.
+	buf := make([]byte, frameHeaderSize+len(payload))
+	copy(buf, header[:])
+	copy(buf[frameHeaderSize:], payload)
+	_, err := w.Write(buf)
+	return err
 }
 
-// DecodeFrame reads a length-prefixed frame from r and returns the payload.
+// decodeFrame reads a length-prefixed frame from r and returns the payload.
 func (c *Codec) decodeFrame(r io.Reader) (mType MessageType, payload []byte, err error) {
-	header := make([]byte, frameHeaderSize)
-	if _, err := io.ReadFull(r, header); err != nil {
+	// Stack-allocated header avoids a heap allocation per frame.
+	var header [frameHeaderSize]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return 0, nil, err
 	}
-	mType = MessageType(byteOrder.Uint16(header))
+	mType = MessageType(byteOrder.Uint16(header[:]))
 	length := byteOrder.Uint32(header[messageTypeSize:])
 	if length > MaxFrameSize {
 		return 0, nil, ErrFrameTooLarge

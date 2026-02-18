@@ -2,7 +2,9 @@ package protocol
 
 import (
 	"errors"
-	"strings"
+	"io"
+	"net"
+	"syscall"
 )
 
 // LogEntry is a log record with offset and value.
@@ -122,14 +124,24 @@ func ShouldReconnect(err error) bool {
 			return false
 		}
 	}
-	// Low-level connection/network errors: reconnect.
-	s := err.Error()
-	return strings.Contains(s, "connection reset") ||
-		strings.Contains(s, "broken pipe") ||
-		strings.Contains(s, "use of closed network connection") ||
-		strings.Contains(s, "connection refused") ||
-		strings.Contains(s, "i/o timeout") ||
-		strings.Contains(s, "EOF")
+	// EOF means the connection was closed by the peer.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Syscall-level connection errors: reset, broken pipe, refused.
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	// net.Error covers timeouts and other transient network failures.
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	// net.ErrClosed: use of closed network connection.
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	return false
 }
 
 type ReplicateRequest struct {

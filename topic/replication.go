@@ -4,17 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/mohitkumar/mlog/client"
 	"github.com/mohitkumar/mlog/protocol"
+	"go.uber.org/zap"
 )
 
 const (
-	ReplicateTopicsMaxRounds    = 100
 	DefaultReplicationBatchSize = 5000
+	replicationTickInterval     = 1 * time.Second
 )
 
-// ReplicaTopicInfo describes a topic a node replicates from a leader.
+// ReplicaTopicInfo describes a topic this node replicates from a leader.
 type ReplicaTopicInfo struct {
 	TopicName    string
 	LeaderNodeID string
@@ -44,107 +47,143 @@ func (tm *TopicManager) StopReplicationThread() {
 }
 
 func (tm *TopicManager) runReplicationThread() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(replicationTickInterval)
 	defer ticker.Stop()
+
+	tm.mu.RLock()
+	stop := tm.stopReplication
+	tm.mu.RUnlock()
+
+	// Derive a cancellable context from the stop channel.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-stop
+		cancel()
+	}()
+
 	for {
-		tm.mu.RLock()
-		stop := tm.stopReplication
-		tm.mu.RUnlock()
-		if stop == nil {
-			return
-		}
 		select {
-		case <-stop:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tm.replicateAllTopics()
+			tm.replicateAllTopics(ctx)
 		}
 	}
 }
 
-func (tm *TopicManager) replicateAllTopics() {
+// replicateAllTopics launches one goroutine per leader and waits for all to finish.
+func (tm *TopicManager) replicateAllTopics(ctx context.Context) {
 	leaderToTopics := make(map[string][]string)
 	for _, info := range tm.ListReplicaTopics() {
 		leaderToTopics[info.LeaderNodeID] = append(leaderToTopics[info.LeaderNodeID], info.TopicName)
 	}
-	ctx := context.Background()
+	if len(leaderToTopics) == 0 {
+		return
+	}
+
 	batchSize := tm.replicationBatchSize
 	if batchSize == 0 {
 		batchSize = DefaultReplicationBatchSize
 	}
+
+	var wg sync.WaitGroup
 	for leaderID, topicNames := range leaderToTopics {
-		_ = DoReplicateTopicsForLeader(ctx, tm, tm.CurrentNodeID, leaderID, topicNames, batchSize)
+		wg.Add(1)
+		go func(leaderID string, topicNames []string) {
+			defer wg.Done()
+			if err := tm.ReplicateFromLeader(ctx, leaderID, topicNames, batchSize); err != nil {
+				tm.Logger.Warn("replication from leader failed",
+					zap.String("leader_id", leaderID),
+					zap.Error(err),
+				)
+			}
+		}(leaderID, topicNames)
 	}
+	wg.Wait()
 }
 
-// DoReplicateTopicsForLeader replicates topicNames from leaderNodeID using the consumer FetchBatch API.
-// The consumer client is used with ReplicaNodeID set so the leader uses ReadUncommitted and records replica LEO.
-func DoReplicateTopicsForLeader(
-	ctx context.Context,
-	topicMgr *TopicManager,
-	currentNodeID string,
-	leaderNodeID string,
-	topicNames []string,
-	batchSize uint32,
-) error {
-	if len(topicNames) == 0 {
-		return nil
+// ReplicateFromLeader creates a dedicated consumer client for this leader,
+// fetches batches for each topic, and applies them locally.
+func (tm *TopicManager) ReplicateFromLeader(ctx context.Context, leaderID string, topicNames []string, batchSize uint32) error {
+	// Look up leader RPC address.
+	tm.mu.RLock()
+	node := tm.Nodes[leaderID]
+	tm.mu.RUnlock()
+	if node == nil {
+		return fmt.Errorf("leader node %s not found", leaderID)
 	}
-	if batchSize == 0 {
-		batchSize = DefaultReplicationBatchSize
-	}
-	consumerClient, err := topicMgr.GetConsumerClient(leaderNodeID)
-	if err != nil {
-		return err
-	}
-	consumerClient.SetReplicaNodeID(currentNodeID)
-	defer consumerClient.SetReplicaNodeID("")
 
-	names := append([]string(nil), topicNames...)
-	for round := 0; round < ReplicateTopicsMaxRounds && len(names) > 0; round++ {
-		stillReplicating := names[:0]
-		for _, topicName := range names {
-			leo, ok := topicMgr.GetLEO(topicName)
+	// Create a dedicated client for this replication goroutine (not shared).
+	cc, err := client.NewConsumerClient(node.RpcAddr)
+	if err != nil {
+		return fmt.Errorf("connect to leader %s at %s: %w", leaderID, node.RpcAddr, err)
+	}
+	defer cc.Close()
+	cc.SetReplicaNodeID(tm.CurrentNodeID)
+
+	consumerID := fmt.Sprintf("replicate-%s-%s", tm.CurrentNodeID, leaderID)
+
+	// Fetch each topic in a loop. A topic is done when FetchBatch returns fewer than batchSize entries.
+	// No multi-round outer loop needed: we keep fetching until each topic is caught up or ctx is cancelled.
+	pending := make([]string, len(topicNames))
+	copy(pending, topicNames)
+
+	for len(pending) > 0 {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		next := make([]string, 0, len(pending))
+		for _, topicName := range pending {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			leo, ok := tm.GetLEO(topicName)
 			if !ok {
 				continue
 			}
-			req := &protocol.FetchBatchRequest{
+
+			resp, err := cc.FetchBatch(ctx, &protocol.FetchBatchRequest{
 				Topic:    topicName,
-				Id:       fmt.Sprintf("replicate-%s-%s", currentNodeID, leaderNodeID),
+				Id:       consumerID,
 				Offset:   leo,
 				MaxCount: batchSize,
-			}
-			resp, err := consumerClient.FetchBatch(ctx, req)
+			})
 			if err != nil {
 				var rpcErr *protocol.RPCError
 				if errors.As(err, &rpcErr) && rpcErr.Code == protocol.CodeReadOffset {
+					// Caught up — skip this topic.
 					continue
 				}
 				if protocol.ShouldReconnect(err) {
-					topicMgr.InvalidateConsumerClient(leaderNodeID)
+					// Connection gone — abort this leader entirely; next tick will retry.
+					return fmt.Errorf("connection lost to leader %s: %w", leaderID, err)
 				}
-				stillReplicating = append(stillReplicating, topicName)
+				// Transient error — keep topic for next round.
+				next = append(next, topicName)
 				continue
 			}
-			applyErr := false
-			for _, entry := range resp.Entries {
-				if entry == nil {
+
+			if len(resp.Entries) > 0 {
+				values := make([][]byte, 0, len(resp.Entries))
+				for _, entry := range resp.Entries {
+					if entry != nil {
+						values = append(values, entry.Value)
+					}
+				}
+				if err := tm.ApplyRecordBatch(topicName, values); err != nil {
+					next = append(next, topicName)
 					continue
 				}
-				if err := topicMgr.ApplyRecord(topicName, entry.Value); err != nil {
-					stillReplicating = append(stillReplicating, topicName)
-					applyErr = true
-					break
-				}
 			}
-			if applyErr {
-				continue
-			}
+
+			// If we got a full batch, there's likely more data — keep fetching.
 			if uint32(len(resp.Entries)) >= batchSize {
-				stillReplicating = append(stillReplicating, topicName)
+				next = append(next, topicName)
 			}
 		}
-		names = stillReplicating
+		pending = next
 	}
 	return nil
 }
