@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/topic"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
@@ -113,7 +113,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	leaderCoord.ApplyEvent(ev)
 	followerCoord.ApplyEvent(ev)
 
-	producerClient, err := client.NewProducerClient(server1.Addr)
+	producerClient, err := producerclient.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leaderCoord.NodeID, []string{server2.Coordinator().NodeID})
 	leaderCoord.ApplyEvent(ev)
 	followerCoord.ApplyEvent(ev)
-	producerClient, err := client.NewProducerClient(server1.Addr)
+	producerClient, err := producerclient.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}

@@ -6,9 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/topic"
 	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 func TestProduceWithAckLeader_10000Messages(t *testing.T) {
@@ -39,7 +40,7 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	server2.Coordinator().ApplyEvent(ev)
 	time.Sleep(400 * time.Millisecond) // allow follower replication thread to run and open replica log
 
-	producerClient, err := client.NewProducerClient(server1.Addr)
+	producerClient, err := producerclient.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	time.Sleep(600 * time.Millisecond)
 
 	// Produce warmup (ACK_ALL waits for replica LEO; follower must have topic to replicate)
-	producerClient, err := client.NewProducerClient(server1.Addr)
+	producerClient, err := producerclient.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}

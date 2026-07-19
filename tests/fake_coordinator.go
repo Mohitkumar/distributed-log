@@ -2,13 +2,12 @@ package tests
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/topic"
 )
 
 var _ topic.TopicCoordinator = (*FakeTopicCoordinator)(nil)
@@ -191,7 +190,7 @@ func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCo
 		f.Replicas[topicName][id] = &topic.ReplicaState{ReplicaNodeID: id, LEO: 0, IsISR: true}
 	}
 	if f.replicationTarget != nil {
-		eventData, _ := json.Marshal(protocol.CreateTopicEvent{
+		eventData, _ := protocol.EncodeCreateTopicEvent(protocol.CreateTopicEvent{
 			Topic: topicName, ReplicaCount: replicaCount, LeaderNodeID: leaderNodeID, LeaderEpoch: 1, ReplicaNodeIds: replicaNodeIds,
 		})
 		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeCreateTopic, Data: eventData})
@@ -203,7 +202,7 @@ func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
 	delete(f.Topics, topicName)
 	delete(f.Replicas, topicName)
 	if f.replicationTarget != nil {
-		eventData, _ := json.Marshal(protocol.DeleteTopicEvent{Topic: topicName})
+		eventData, _ := protocol.EncodeDeleteTopicEvent(protocol.DeleteTopicEvent{Topic: topicName})
 		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeDeleteTopic, Data: eventData})
 	}
 	return nil
@@ -212,7 +211,7 @@ func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
 func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool) error {
 	f.updateReplicaISR(topicName, replicaNodeID, isr)
 	if f.replicationTarget != nil {
-		eventData, _ := json.Marshal(protocol.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr})
+		eventData, _ := protocol.EncodeIsrUpdateEvent(protocol.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr})
 		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeIsrUpdate, Data: eventData})
 	}
 	return nil

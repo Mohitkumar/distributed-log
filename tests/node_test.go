@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/broker/topic"
 )
 
 func TestNode_TwoNodeCluster(t *testing.T) {

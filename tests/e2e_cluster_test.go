@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mohitkumar/mlog/api/protocol"
 	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
+	consumerclient "github.com/mohitkumar/mlog/consumer/client"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 // TestE2E_RealCluster_BasicProduceConsume tests basic produce and consume on a 3-node real cluster.
@@ -34,7 +36,7 @@ func TestE2E_RealCluster_BasicProduceConsume(t *testing.T) {
 	remoteClient.Close()
 
 	// Produce messages
-	producerClient, err := client.NewProducerClient(node1.Addr)
+	producerClient, err := producerclient.NewProducerClient(node1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -104,7 +106,7 @@ func TestE2E_RealCluster_ReplicationAcrossNodes(t *testing.T) {
 	t.Logf("Created topic with replicas=%v", resp.ReplicaNodeIds)
 
 	// Produce messages
-	producerClient, err := client.NewProducerClient(node1.Addr)
+	producerClient, err := producerclient.NewProducerClient(node1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -165,7 +167,7 @@ func TestE2E_RealCluster_ConsumerOffsets(t *testing.T) {
 	remoteClient.Close()
 
 	// Produce messages
-	producerClient, err := client.NewProducerClient(node1.Addr)
+	producerClient, err := producerclient.NewProducerClient(node1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -185,7 +187,7 @@ func TestE2E_RealCluster_ConsumerOffsets(t *testing.T) {
 	consumerID := "test-consumer"
 
 	// Test consumer offset operations
-	consumerClient, err := client.NewConsumerClient(node1.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(node1.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -251,7 +253,7 @@ func TestE2E_RealCluster_ConcurrentProducers(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			producerClient, err := client.NewProducerClient(node1.Addr)
+			producerClient, err := producerclient.NewProducerClient(node1.Addr)
 			if err != nil {
 				errors <- err
 				return

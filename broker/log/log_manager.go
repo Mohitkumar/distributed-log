@@ -1,0 +1,97 @@
+package log
+
+import (
+	"io"
+	"sync/atomic"
+)
+
+type LogManager struct {
+	*Log
+	leo           atomic.Uint64 // Log End Offset
+	highWatermark atomic.Uint64
+}
+
+func NewLogManager(dir string) (*LogManager, error) {
+	log, err := NewLog(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	lm := &LogManager{
+		Log: log,
+	}
+
+	// Initialize LEO from the active segment's NextOffset (restart scenario)
+	// NextOffset is the next offset to write, which is exactly what LEO represents
+	if log.activeSegment != nil {
+		lm.leo.Store(log.activeSegment.NextOffset)
+	}
+
+	return lm, nil
+}
+
+func (l *LogManager) LEO() uint64 {
+	return l.leo.Load()
+}
+
+func (l *LogManager) SetLEO(leo uint64) {
+	l.leo.Store(leo)
+}
+
+func (l *LogManager) HighWatermark() uint64 {
+	return l.highWatermark.Load()
+}
+
+func (l *LogManager) SetHighWatermark(highWatermark uint64) {
+	l.highWatermark.Store(highWatermark)
+}
+
+// Append appends a log entry and automatically advances LEO
+func (l *LogManager) Append(value []byte) (uint64, error) {
+	offset, err := l.Log.Append(value)
+	if err != nil {
+		return 0, err
+	}
+
+	// LEO is the next offset to write, so after writing at offset N, LEO becomes N+1
+	l.leo.Store(offset + 1)
+
+	return offset, nil
+}
+
+// AppendBatch writes multiple records and advances LEO past the entire batch.
+// Returns the base offset of the batch.
+func (l *LogManager) AppendBatch(values [][]byte) (uint64, error) {
+	baseOffset, err := l.Log.AppendBatch(values)
+	if err != nil {
+		return 0, err
+	}
+
+	l.leo.Store(baseOffset + uint64(len(values)))
+
+	return baseOffset, nil
+}
+
+// Read reads a log entry at the given offset, but only if it's within the high watermark
+// This ensures consumers can only read committed data (data replicated to all ISR followers)
+func (l *LogManager) Read(offset uint64) ([]byte, error) {
+	hw := l.highWatermark.Load()
+	// Consumers should only be able to read up to (and including) the high watermark
+	if offset > hw {
+		return nil, ErrLogOffsetBeyondHWf(offset, hw)
+	}
+
+	return l.Log.Read(offset)
+}
+
+// ReadUncommitted reads a log entry at the given offset without checking the high watermark
+// This is used for replication purposes where we need to read all data up to LEO, not just HW
+func (l *LogManager) ReadUncommitted(offset uint64) ([]byte, error) {
+	return l.Log.Read(offset)
+}
+
+// ReaderFrom returns an io.Reader that streams raw segment records from startOffset to current end of log.
+// Stream format: for each record, [Offset 8 bytes][Len 4 bytes][Value]. Use for replication with raw bytes.
+func (lm *LogManager) ReaderFrom(startOffset uint64) (io.Reader, error) {
+	return lm.Log.ReaderFrom(startOffset)
+}

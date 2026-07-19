@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -11,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/config"
-	consumermgr "github.com/mohitkumar/mlog/consumer"
-	"github.com/mohitkumar/mlog/coordinator"
-	"github.com/mohitkumar/mlog/discovery"
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/rpc"
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/config"
+	consumermgr "github.com/mohitkumar/mlog/broker/consumer"
+	"github.com/mohitkumar/mlog/broker/coordinator"
+	"github.com/mohitkumar/mlog/broker/discovery"
+	"github.com/mohitkumar/mlog/broker/rpc"
+	"github.com/mohitkumar/mlog/broker/topic"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -87,7 +86,7 @@ func syncFakeNodesToTopicManager(topicMgr *topic.TopicManager, fake *FakeTopicCo
 		if n == nil {
 			continue
 		}
-		data, _ := json.Marshal(protocol.AddNodeEvent{NodeID: n.NodeID, Addr: n.Addr, RpcAddr: n.RpcAddr})
+		data, _ := protocol.EncodeAddNodeEvent(protocol.AddNodeEvent{NodeID: n.NodeID, Addr: n.Addr, RpcAddr: n.RpcAddr})
 		_ = topicMgr.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeAddNode, Data: data})
 	}
 }

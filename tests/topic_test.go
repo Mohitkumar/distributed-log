@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/topic"
 	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 func TestCreateTopic(t *testing.T) {
@@ -56,7 +57,7 @@ func TestDeleteTopic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemoteClient: %v", err)
 	}
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := producerclient.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}

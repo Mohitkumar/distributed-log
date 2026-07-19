@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/topic"
 	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 // producerTestServers holds the two-node cluster used by all producer tests (setup once).
@@ -85,7 +86,7 @@ func TestProducer(t *testing.T) {
 			t.Fatalf("getTopicLeaderAddr: %v", err)
 		}
 
-		producerClient, err := client.NewProducerClient(leaderAddr)
+		producerClient, err := producerclient.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -135,7 +136,7 @@ func TestProducer(t *testing.T) {
 
 	t.Run("TopicNotFound", func(t *testing.T) {
 		ctx := context.Background()
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		producerClient, err := producerclient.NewProducerClient(servers.getLeaderAddr())
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -170,7 +171,7 @@ func TestProducer(t *testing.T) {
 			t.Fatalf("getTopicLeaderAddr: %v", err)
 		}
 
-		producerClient, err := client.NewProducerClient(leaderAddr)
+		producerClient, err := producerclient.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -208,7 +209,7 @@ func TestProducer(t *testing.T) {
 			t.Fatalf("getTopicLeaderAddr: %v", err)
 		}
 
-		producerClient, err := client.NewProducerClient(leaderAddr)
+		producerClient, err := producerclient.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -248,7 +249,7 @@ func TestProducer(t *testing.T) {
 			t.Fatalf("getTopicLeaderAddr: %v", err)
 		}
 
-		producerClient, err := client.NewProducerClient(leaderAddr)
+		producerClient, err := producerclient.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -295,7 +296,7 @@ func TestProducerBatch(t *testing.T) {
 			t.Fatalf("getTopicLeaderAddr: %v", err)
 		}
 
-		producerClient, err := client.NewProducerClient(leaderAddr)
+		producerClient, err := producerclient.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -336,7 +337,7 @@ func TestProducerBatch(t *testing.T) {
 			t.Fatalf("getTopicLeaderAddr: %v", err)
 		}
 
-		producerClient, err := client.NewProducerClient(leaderAddr)
+		producerClient, err := producerclient.NewProducerClient(leaderAddr)
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -362,7 +363,7 @@ func TestProducerBatch(t *testing.T) {
 	})
 
 	t.Run("TopicNotFound", func(t *testing.T) {
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		producerClient, err := producerclient.NewProducerClient(servers.getLeaderAddr())
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -392,7 +393,7 @@ func TestProducerBatch(t *testing.T) {
 		}
 		remoteClient.Close()
 
-		producerClient, err := client.NewProducerClient(servers.getLeaderAddr())
+		producerClient, err := producerclient.NewProducerClient(servers.getLeaderAddr())
 		if err != nil {
 			t.Fatalf("NewProducerClient: %v", err)
 		}
@@ -444,7 +445,7 @@ func BenchmarkProduce(b *testing.B) {
 		b.Fatalf("getTopicLeaderAddr: %v", err)
 	}
 
-	producerClient, err := client.NewProducerClient(leaderAddr)
+	producerClient, err := producerclient.NewProducerClient(leaderAddr)
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
@@ -493,7 +494,7 @@ func BenchmarkProduceBatch(b *testing.B) {
 		b.Fatalf("getTopicLeaderAddr: %v", err)
 	}
 
-	producerClient, err := client.NewProducerClient(leaderAddr)
+	producerClient, err := producerclient.NewProducerClient(leaderAddr)
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
