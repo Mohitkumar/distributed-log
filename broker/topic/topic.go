@@ -102,27 +102,38 @@ func (tm *TopicManager) SetCurrentNodeID(nodeID string) {
 
 func (tm *TopicManager) IsLeader(topic string) (bool, error) {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
 	topicObj, ok := tm.Topics[topic]
+	currentNodeID := tm.CurrentNodeID
+	tm.mu.RUnlock()
 	if !ok {
 		return false, ErrTopicNotFoundf(topic)
 	}
-	return topicObj.LeaderNodeID == tm.CurrentNodeID, nil
+	return topicObj.LeaderID() == currentNodeID, nil
 }
 
 // GetTopicLeaderRPCAddr returns the RPC address of the current leader for the given topic.
 func (tm *TopicManager) GetTopicLeaderRPCAddr(topic string) (string, error) {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
 	topicObj, ok := tm.Topics[topic]
+	tm.mu.RUnlock()
 	if !ok {
 		return "", ErrTopicNotFoundf(topic)
 	}
-	node := tm.Nodes[topicObj.LeaderNodeID]
+	leaderNodeID := topicObj.LeaderID()
+	tm.mu.RLock()
+	node := tm.Nodes[leaderNodeID]
+	tm.mu.RUnlock()
 	if node == nil {
 		return "", ErrTopicNotFoundf(topic)
 	}
 	return node.RpcAddr, nil
+}
+
+// lookupTopic returns the Topic for name, or nil if not found. Safe for concurrent use.
+func (tm *TopicManager) lookupTopic(name string) *Topic {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.Topics[name]
 }
 
 // GetRaftLeaderRPCAddr returns the RPC address of the current Raft (metadata) leader.
@@ -186,8 +197,11 @@ func (tm *TopicManager) GetNodeIDWithLeastTopics() (string, error) {
 		}
 	}
 	for _, t := range tm.Topics {
-		if t != nil && t.LeaderNodeID != "" {
-			countByNode[t.LeaderNodeID]++
+		if t == nil {
+			continue
+		}
+		if leaderID := t.LeaderID(); leaderID != "" {
+			countByNode[leaderID]++
 		}
 	}
 	if len(countByNode) == 0 {
@@ -257,15 +271,16 @@ func (tm *TopicManager) DeleteTopic(ctx context.Context, req *protocol.DeleteTop
 // GetLeader returns the leader log view for a topic (this node must be the leader).
 func (tm *TopicManager) GetLeader(topic string) (*log.LogManager, error) {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
 	topicObj, ok := tm.Topics[topic]
+	currentNodeID := tm.CurrentNodeID
+	tm.mu.RUnlock()
 	if !ok {
 		return nil, ErrTopicNotFoundf(topic)
 	}
-	if topicObj.LeaderNodeID != tm.CurrentNodeID {
+	if topicObj.LeaderID() != currentNodeID {
 		return nil, ErrThisNodeNotLeaderf(topic)
 	}
-	return topicObj.Log, nil
+	return topicObj.GetLog(), nil
 }
 
 // GetTopic returns the topic object.
@@ -282,28 +297,30 @@ func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
 // ListTopics returns topic names with leader and replica info. Any node can serve this (metadata is replicated).
 func (tm *TopicManager) ListTopics() *protocol.ListTopicsResponse {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	out := make([]protocol.TopicInfo, 0, len(tm.Topics))
+	names := make([]string, 0, len(tm.Topics))
+	topics := make([]*Topic, 0, len(tm.Topics))
 	for name, t := range tm.Topics {
 		if t == nil {
 			continue
 		}
-		t.mu.RLock()
-		leaderID := t.LeaderNodeID
-		epoch := t.LeaderEpoch
-		replicas := make([]protocol.ReplicaInfo, 0, len(t.Replicas))
-		for _, rs := range t.Replicas {
-			if rs != nil {
-				replicas = append(replicas, protocol.ReplicaInfo{
-					NodeID: rs.ReplicaNodeID,
-					IsISR:  rs.IsISR,
-					LEO:    rs.LEO,
-				})
-			}
+		names = append(names, name)
+		topics = append(topics, t)
+	}
+	tm.mu.RUnlock()
+
+	out := make([]protocol.TopicInfo, 0, len(topics))
+	for i, t := range topics {
+		leaderID, epoch, replicaSnaps := t.Snapshot()
+		replicas := make([]protocol.ReplicaInfo, 0, len(replicaSnaps))
+		for _, rs := range replicaSnaps {
+			replicas = append(replicas, protocol.ReplicaInfo{
+				NodeID: rs.ReplicaNodeID,
+				IsISR:  rs.IsISR,
+				LEO:    rs.LEO,
+			})
 		}
-		t.mu.RUnlock()
 		out = append(out, protocol.TopicInfo{
-			Name:         name,
+			Name:         names[i],
 			LeaderNodeID: leaderID,
 			LeaderEpoch:  epoch,
 			Replicas:     replicas,
@@ -316,6 +333,7 @@ func (tm *TopicManager) ListTopics() *protocol.ListTopicsResponse {
 // Call after Restore() has populated Topics and Nodes from snapshot so local logs are opened where this node is leader or replica.
 func (tm *TopicManager) RestoreFromMetadata() error {
 	tm.mu.RLock()
+	currentNodeID := tm.CurrentNodeID
 	topicNames := make([]string, 0, len(tm.Topics))
 	for name := range tm.Topics {
 		topicNames = append(topicNames, name)
@@ -326,17 +344,15 @@ func (tm *TopicManager) RestoreFromMetadata() error {
 	}
 	tm.Logger.Info("restore from metadata", zap.Int("topic_count", len(topicNames)), zap.Strings("topics", topicNames))
 	for _, topicName := range topicNames {
-		tm.mu.RLock()
-		t := tm.Topics[topicName]
+		t := tm.lookupTopic(topicName)
 		leaderID := ""
 		if t != nil {
-			leaderID = t.LeaderNodeID
+			leaderID = t.LeaderID()
 		}
-		tm.mu.RUnlock()
 		if leaderID == "" {
 			continue
 		}
-		if leaderID == tm.CurrentNodeID {
+		if leaderID == currentNodeID {
 			if err := tm.restoreLeaderTopic(topicName); err != nil {
 				tm.Logger.Warn("restore leader topic failed", zap.String("topic", topicName), zap.Error(err))
 				continue
@@ -353,20 +369,18 @@ func (tm *TopicManager) RestoreFromMetadata() error {
 
 // restoreLeaderTopic opens the local leader log for the topic if not already open.
 func (tm *TopicManager) restoreLeaderTopic(topic string) error {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	t := tm.Topics[topic]
+	t := tm.lookupTopic(topic)
 	if t == nil {
 		return nil
 	}
-	if t.Log != nil {
+	if t.GetLog() != nil {
 		return nil
 	}
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
 		return ErrCreateLog(err)
 	}
-	t.Log = logManager
+	t.SetLog(logManager)
 	tm.Logger.Info("leader topic restored", zap.String("topic", topic))
 	return nil
 }
@@ -374,7 +388,6 @@ func (tm *TopicManager) restoreLeaderTopic(topic string) error {
 // restoreReplicaTopic creates a replica for the topic on this node (called by leader via RPC).
 func (tm *TopicManager) restoreReplicaTopic(topic string, leaderId string) error {
 	tm.mu.Lock()
-	defer tm.mu.Unlock()
 	topicObj, ok := tm.Topics[topic]
 	if !ok {
 		topicObj = &Topic{
@@ -385,14 +398,16 @@ func (tm *TopicManager) restoreReplicaTopic(topic string, leaderId string) error
 		}
 		tm.Topics[topic] = topicObj
 	}
-	if topicObj.Log != nil {
+	tm.mu.Unlock()
+
+	if topicObj.GetLog() != nil {
 		return ErrTopicAlreadyReplicaf(topic)
 	}
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
 		return ErrCreateLogReplica(err)
 	}
-	topicObj.Log = logManager
+	topicObj.SetLog(logManager)
 	tm.Logger.Info("replica topic restored", zap.String("topic", topic), zap.String("leader_id", leaderId))
 	return nil
 }
@@ -401,31 +416,42 @@ func (tm *TopicManager) restoreReplicaTopic(topic string, leaderId string) error
 
 func (tm *TopicManager) ListReplicaTopics() []ReplicaTopicInfo {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	var out []ReplicaTopicInfo
+	names := make([]string, 0, len(tm.Topics))
+	topics := make([]*Topic, 0, len(tm.Topics))
+	currentNodeID := tm.CurrentNodeID
 	for name, t := range tm.Topics {
-		if t == nil || t.Log == nil || t.LeaderNodeID == tm.CurrentNodeID {
+		if t == nil {
 			continue
 		}
-		out = append(out, ReplicaTopicInfo{TopicName: name, LeaderNodeID: t.LeaderNodeID})
+		names = append(names, name)
+		topics = append(topics, t)
+	}
+	tm.mu.RUnlock()
+
+	var out []ReplicaTopicInfo
+	for i, t := range topics {
+		if t.GetLog() == nil {
+			continue
+		}
+		leaderID := t.LeaderID()
+		if leaderID == currentNodeID {
+			continue
+		}
+		out = append(out, ReplicaTopicInfo{TopicName: names[i], LeaderNodeID: leaderID})
 	}
 	return out
 }
 
 func (tm *TopicManager) GetLEO(topicName string) (uint64, bool) {
-	tm.mu.RLock()
-	t := tm.Topics[topicName]
-	tm.mu.RUnlock()
+	t := tm.lookupTopic(topicName)
 	if t == nil {
 		return 0, false
 	}
-	t.mu.RLock()
-	log := t.Log
-	t.mu.RUnlock()
-	if log == nil {
+	l := t.GetLog()
+	if l == nil {
 		return 0, false
 	}
-	return log.LEO(), true
+	return l.LEO(), true
 }
 
 func (tm *TopicManager) ApplyChunk(topicName string, rawChunk []byte) error {
@@ -436,23 +462,19 @@ func (tm *TopicManager) ApplyChunk(topicName string, rawChunk []byte) error {
 	if err != nil {
 		return err
 	}
-	tm.mu.RLock()
-	t := tm.Topics[topicName]
-	tm.mu.RUnlock()
+	t := tm.lookupTopic(topicName)
 	if t == nil {
 		return nil
 	}
-	t.mu.RLock()
-	log := t.Log
-	t.mu.RUnlock()
-	if log == nil {
+	l := t.GetLog()
+	if l == nil {
 		return nil
 	}
 	values := make([][]byte, len(records))
 	for i, rec := range records {
 		values[i] = rec.Value
 	}
-	_, err = log.AppendBatch(values)
+	_, err = l.AppendBatch(values)
 	return err
 }
 
@@ -461,19 +483,15 @@ func (tm *TopicManager) ApplyRecord(topicName string, value []byte) error {
 	if len(value) == 0 {
 		return nil
 	}
-	tm.mu.RLock()
-	t := tm.Topics[topicName]
-	tm.mu.RUnlock()
+	t := tm.lookupTopic(topicName)
 	if t == nil {
 		return nil
 	}
-	t.mu.RLock()
-	log := t.Log
-	t.mu.RUnlock()
-	if log == nil {
+	l := t.GetLog()
+	if l == nil {
 		return nil
 	}
-	_, err := log.Append(value)
+	_, err := l.Append(value)
 	return err
 }
 
@@ -482,15 +500,11 @@ func (tm *TopicManager) ApplyRecordBatch(topicName string, values [][]byte) erro
 	if len(values) == 0 {
 		return nil
 	}
-	tm.mu.RLock()
-	t := tm.Topics[topicName]
-	tm.mu.RUnlock()
+	t := tm.lookupTopic(topicName)
 	if t == nil {
 		return nil
 	}
-	t.mu.RLock()
-	l := t.Log
-	t.mu.RUnlock()
+	l := t.GetLog()
 	if l == nil {
 		return nil
 	}
@@ -501,161 +515,19 @@ func (tm *TopicManager) ApplyRecordBatch(topicName string, values [][]byte) erro
 // RecordReplicaLEOFromFetch is called by the leader when it serves a Fetch from a replica (ReplicaNodeID set).
 // It updates the replica's LEO and applies an ISR update via Raft.
 func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName, replicaNodeID string, leo int64) error {
-	tm.mu.Lock()
-	t := tm.Topics[topicName]
+	t := tm.lookupTopic(topicName)
 	if t == nil {
-		tm.mu.Unlock()
 		return nil
-	}
-	leaderLEO := uint64(0)
-	if t.Log != nil {
-		leaderLEO = t.Log.LEO()
-	}
-	if t.Replicas == nil {
-		t.Replicas = make(map[string]*ReplicaState)
-	}
-	rs := t.Replicas[replicaNodeID]
-	if rs == nil {
-		t.Replicas[replicaNodeID] = &ReplicaState{
-			ReplicaNodeID: replicaNodeID,
-			LEO:           leo,
-			IsISR:         true,
-		}
-		rs = t.Replicas[replicaNodeID]
-	} else {
-		rs.LEO = leo
 	}
 	lagThreshold := tm.ISRLagThreshold
 	if lagThreshold == 0 {
 		lagThreshold = DefaultISRLagThreshold
 	}
-	var isr bool
-	if leaderLEO > lagThreshold {
-		isr = uint64(leo) >= leaderLEO-lagThreshold
-	} else {
-		isr = leo >= 0 // all replicas are in-sync for small topics
-	}
-	rs.IsISR = isr
-	tm.mu.Unlock()
-	tm.maybeAdvanceHW(t)
+	isr := t.RecordReplicaFetch(replicaNodeID, leo, lagThreshold)
 	if tm.coordinator == nil {
 		return nil
 	}
 	return tm.coordinator.ApplyIsrUpdateEventInternal(topicName, replicaNodeID, isr)
-}
-
-// HandleProduce appends to the topic log (leader only). For ACK_ALL, waits for replicas to catch up.
-func (tm *TopicManager) HandleProduce(ctx context.Context, t *Topic, logEntry *protocol.LogEntry, acks protocol.AckMode) (uint64, error) {
-	offset, err := t.Log.Append(logEntry.Value)
-	if err != nil {
-		return 0, err
-	}
-	switch acks {
-	case protocol.AckLeader:
-		return offset, nil
-	case protocol.AckAll:
-		if err := tm.waitForAllFollowersToCatchUp(ctx, t, offset); err != nil {
-			return 0, ErrWaitFollowersCatchUp(err)
-		}
-		return offset, nil
-	default:
-		return 0, ErrInvalidAckModef(int32(acks))
-	}
-}
-
-// HandleProduceBatch appends multiple records (leader only).
-func (tm *TopicManager) HandleProduceBatch(ctx context.Context, t *Topic, values [][]byte, acks protocol.AckMode) (uint64, uint64, error) {
-	if len(values) == 0 {
-		return 0, 0, ErrValuesEmpty
-	}
-
-	base, err := t.Log.AppendBatch(values)
-	if err != nil {
-		return 0, 0, err
-	}
-	last := base + uint64(len(values)) - 1
-
-	switch acks {
-	case protocol.AckLeader:
-		return base, last, nil
-	case protocol.AckAll:
-		if err := tm.waitForAllFollowersToCatchUp(ctx, t, last); err != nil {
-			return 0, 0, ErrWaitFollowersCatchUp(err)
-		}
-		return base, last, nil
-	default:
-		return 0, 0, ErrInvalidAckModef(int32(acks))
-	}
-}
-
-func (tm *TopicManager) waitForAllFollowersToCatchUp(ctx context.Context, t *Topic, offset uint64) error {
-	timeout := time.After(5 * time.Second)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	requiredLEO := offset + 1
-
-	for {
-		allCaughtUp := true
-		candidates := 0
-
-		t.mu.RLock()
-		useISR := false
-		for _, r := range t.Replicas {
-			if r != nil && r.IsISR {
-				useISR = true
-				break
-			}
-		}
-		for _, replica := range t.Replicas {
-			if replica == nil {
-				continue
-			}
-			if useISR && !replica.IsISR {
-				continue
-			}
-			candidates++
-			if uint64(replica.LEO) < requiredLEO {
-				allCaughtUp = false
-				break
-			}
-		}
-		t.mu.RUnlock()
-
-		if candidates == 0 {
-			return nil
-		}
-		if allCaughtUp {
-			return nil
-		}
-
-		select {
-		case <-ticker.C:
-			continue
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timeout:
-			if t.Logger != nil {
-				t.Logger.Warn("followers catch-up timeout", zap.String("topic", t.Name), zap.Uint64("required_offset", offset))
-			}
-			return ErrTimeoutCatchUp
-		}
-	}
-}
-
-// maybeAdvanceHW sets HW = min(leader LEO, all ISR replicas' LEO).
-// Non-ISR replicas are excluded — a dead/lagging replica must not hold back consumer visibility.
-func (tm *TopicManager) maybeAdvanceHW(t *Topic) {
-	if t.Log == nil {
-		return
-	}
-	minOffset := t.Log.LEO()
-	for _, r := range t.Replicas {
-		if r != nil && r.IsISR && uint64(r.LEO) < minOffset {
-			minOffset = uint64(r.LEO)
-		}
-	}
-	t.Log.SetHighWatermark(minOffset)
 }
 
 func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
@@ -675,23 +547,12 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 		}
 		t := tm.Topics[e.Topic]
 		if t != nil {
-			oldLeaderID := t.LeaderNodeID
-			t.LeaderNodeID = e.LeaderNodeID
-			t.LeaderEpoch = e.LeaderEpoch
-			// New leader is no longer a replica; old leader becomes a replica.
-			delete(t.Replicas, e.LeaderNodeID)
+			oldLeaderID := t.SetLeader(e.LeaderNodeID, e.LeaderEpoch)
 			// Only add the old leader as a replica if it's still a live node in the cluster.
 			// If the old leader was removed (node killed), it was already cleaned up from Replicas
 			// by the RemoveNode handler. Adding a dead node would pin HW at 0.
 			if oldLeaderID != e.LeaderNodeID && oldLeaderID != "" && tm.Nodes[oldLeaderID] != nil {
-				if t.Replicas == nil {
-					t.Replicas = make(map[string]*ReplicaState)
-				}
-				t.Replicas[oldLeaderID] = &ReplicaState{
-					ReplicaNodeID: oldLeaderID,
-					LEO:           0,
-					IsISR:         false,
-				}
+				t.AddReplicaIfAbsent(oldLeaderID, false)
 			}
 			tm.ensureLocalLogAfterLeaderChange(e.Topic, oldLeaderID, e.LeaderNodeID)
 		}
@@ -702,21 +563,9 @@ func (tm *TopicManager) Apply(ev *protocol.MetadataEvent) error {
 		}
 		t := tm.Topics[e.Topic]
 		if t != nil {
-			rs := t.Replicas[e.ReplicaNodeID]
-			if rs != nil {
-				rs.IsISR = e.Isr
-			} else {
-				// Replica not in map (e.g. node restarted, or event order); add with LEO 0 (updated on leader via Fetch)
-				if t.Replicas == nil {
-					t.Replicas = make(map[string]*ReplicaState)
-				}
-				t.Replicas[e.ReplicaNodeID] = &ReplicaState{
-					ReplicaNodeID: e.ReplicaNodeID,
-					LEO:           0,
-					IsISR:         e.Isr,
-				}
-			}
-			tm.maybeAdvanceHW(t)
+			// SetReplicaISR creates the replica entry with LEO 0 if absent (e.g. node
+			// restarted, or event order) and advances the high watermark.
+			t.SetReplicaISR(e.ReplicaNodeID, e.Isr)
 		}
 	case protocol.MetadataEventTypeDeleteTopic:
 		e, err := protocol.DecodeDeleteTopicEvent(ev.Data)
@@ -790,26 +639,26 @@ func (tm *TopicManager) ensureLocalLogForTopic(topicName, leaderNodeID string, r
 		return
 	}
 	if tm.CurrentNodeID == leaderNodeID {
-		if t.Log == nil {
+		if t.GetLog() == nil {
 			logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
 			if err != nil {
 				tm.Logger.Warn("open leader log failed", zap.String("topic", topicName), zap.Error(err))
 				return
 			}
-			t.Log = logManager
+			t.SetLog(logManager)
 			tm.Logger.Debug("leader log opened", zap.String("topic", topicName))
 		}
 		return
 	}
 	for _, rid := range replicaNodeIds {
 		if rid == tm.CurrentNodeID {
-			if t.Log == nil {
+			if t.GetLog() == nil {
 				logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
 				if err != nil {
 					tm.Logger.Warn("open replica log failed", zap.String("topic", topicName), zap.Error(err))
 					return
 				}
-				t.Log = logManager
+				t.SetLog(logManager)
 				tm.Logger.Debug("replica log opened", zap.String("topic", topicName), zap.String("leader_id", leaderNodeID))
 			}
 			return
@@ -825,13 +674,13 @@ func (tm *TopicManager) ensureLocalLogAfterLeaderChange(topicName, oldLeaderID, 
 	}
 	// This node is the new leader — open log if needed.
 	if tm.CurrentNodeID == newLeaderID {
-		if t.Log == nil {
+		if t.GetLog() == nil {
 			logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
 			if err != nil {
 				tm.Logger.Warn("open leader log failed", zap.String("topic", topicName), zap.Error(err))
 				return
 			}
-			t.Log = logManager
+			t.SetLog(logManager)
 		}
 		tm.Logger.Info("promoted to leader", zap.String("topic", topicName))
 		return
@@ -855,10 +704,12 @@ func (tm *TopicManager) removeTopicLocalLocked(topicName string) {
 	if !ok {
 		return
 	}
-	if t != nil && t.Log != nil {
-		t.Log.Close()
-		t.Log.Delete()
-		t.Log = nil
+	if t != nil {
+		if l := t.GetLog(); l != nil {
+			l.Close()
+			l.Delete()
+			t.SetLog(nil)
+		}
 	}
 	delete(tm.Topics, topicName)
 	_ = os.RemoveAll(filepath.Join(tm.BaseDir, topicName))
@@ -882,19 +733,22 @@ func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
 	var changes []leaderChange
 
 	for topicName, t := range tm.Topics {
-		if t == nil || t.LeaderNodeID != nodeID {
+		if t == nil {
+			continue
+		}
+		leaderNodeID, epoch, replicas := t.Snapshot()
+		if leaderNodeID != nodeID {
 			continue
 		}
 		var newLeader string
-		for rid, rs := range t.Replicas {
-			if rid == nodeID || rs == nil || !rs.IsISR {
+		for _, rs := range replicas {
+			if rs.ReplicaNodeID == nodeID || !rs.IsISR {
 				continue
 			}
-			n := tm.Nodes[rid]
-			if n == nil {
+			if tm.Nodes[rs.ReplicaNodeID] == nil {
 				continue
 			}
-			newLeader = rid
+			newLeader = rs.ReplicaNodeID
 			break
 		}
 		if newLeader == "" {
@@ -904,7 +758,7 @@ func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
 		changes = append(changes, leaderChange{
 			topic:     topicName,
 			newLeader: newLeader,
-			epoch:     t.LeaderEpoch + 1,
+			epoch:     epoch + 1,
 		})
 	}
 
@@ -928,23 +782,16 @@ func (tm *TopicManager) maybeReassignTopicLeaders(nodeID string) {
 // The node will open its local log via Restore/ensureLocalLogForTopic and start replicating.
 func (tm *TopicManager) maybeAddReplicasForNode(nodeID string) {
 	for _, t := range tm.Topics {
-		if t == nil || t.LeaderNodeID == nodeID {
+		if t == nil || t.LeaderID() == nodeID {
 			continue
 		}
-		if _, already := t.Replicas[nodeID]; already {
+		if t.HasReplica(nodeID) {
 			continue
 		}
-		if len(t.Replicas) >= t.DesiredReplicaCount {
+		if t.ReplicaCount() >= t.DesiredReplicaCount {
 			continue
 		}
-		if t.Replicas == nil {
-			t.Replicas = make(map[string]*ReplicaState)
-		}
-		t.Replicas[nodeID] = &ReplicaState{
-			ReplicaNodeID: nodeID,
-			LEO:           0,
-			IsISR:         false,
-		}
+		t.AddReplicaIfAbsent(nodeID, false)
 		tm.Logger.Info("added rejoined node as replica",
 			zap.String("topic", t.Name),
 			zap.String("node_id", nodeID),
@@ -977,25 +824,25 @@ func (tm *TopicManager) Restore(data []byte) error {
 		}
 		t.Logger = tm.Logger
 		if tm.CurrentNodeID == t.LeaderNodeID {
-			if t.Log == nil {
+			if t.GetLog() == nil {
 				logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, name))
 				if err != nil {
 					tm.Logger.Warn("open leader log failed", zap.String("topic", name), zap.Error(err))
 					continue
 				}
-				t.Log = logManager
+				t.SetLog(logManager)
 			}
 			// Initialize HW from local state so consumers can read immediately
 			// if no replicas exist (otherwise HW stays 0 until replicas report in).
-			tm.maybeAdvanceHW(t)
-		} else if _, isReplica := t.Replicas[tm.CurrentNodeID]; isReplica {
-			if t.Log == nil {
+			t.AdvanceHW()
+		} else if t.HasReplica(tm.CurrentNodeID) {
+			if t.GetLog() == nil {
 				logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, name))
 				if err != nil {
 					tm.Logger.Warn("open replica log failed", zap.String("topic", name), zap.Error(err))
 					continue
 				}
-				t.Log = logManager
+				t.SetLog(logManager)
 			}
 		}
 	}
@@ -1015,8 +862,11 @@ func (tm *TopicManager) periodicLog(interval time.Duration) {
 			// Build local log LEO summary (not in metadata, each node knows its own).
 			localLEOs := make(map[string]uint64, len(tm.Topics))
 			for name, t := range tm.Topics {
-				if t != nil && t.Log != nil {
-					localLEOs[name] = t.Log.LEO()
+				if t == nil {
+					continue
+				}
+				if l := t.GetLog(); l != nil {
+					localLEOs[name] = l.LEO()
 				}
 			}
 			tm.mu.RUnlock()

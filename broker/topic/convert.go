@@ -13,17 +13,19 @@ func snapshotToPB(topics map[string]*Topic, nodes map[string]*NodeMetadata) *pb.
 		if t == nil {
 			continue
 		}
-		replicas := make(map[string]*pb.ReplicaState, len(t.Replicas))
-		for id, r := range t.Replicas {
-			if r == nil {
-				continue
-			}
-			replicas[id] = &pb.ReplicaState{ReplicaId: r.ReplicaNodeID, Leo: r.LEO, IsIsr: r.IsISR}
+		// Name and DesiredReplicaCount are set once at topic creation and never
+		// mutated afterward, so they're safe to read without t.mu. LeaderNodeID,
+		// LeaderEpoch and Replicas can change concurrently (e.g. via RecordReplicaFetch),
+		// so those go through Snapshot() which takes t.mu.
+		leaderID, epoch, replicaSnaps := t.Snapshot()
+		replicas := make(map[string]*pb.ReplicaState, len(replicaSnaps))
+		for _, r := range replicaSnaps {
+			replicas[r.ReplicaNodeID] = &pb.ReplicaState{ReplicaId: r.ReplicaNodeID, Leo: r.LEO, IsIsr: r.IsISR}
 		}
 		pbTopics[name] = &pb.TopicState{
 			Name:                t.Name,
-			LeaderId:            t.LeaderNodeID,
-			LeaderEpoch:         t.LeaderEpoch,
+			LeaderId:            leaderID,
+			LeaderEpoch:         epoch,
 			DesiredReplicaCount: int32(t.DesiredReplicaCount),
 			Replicas:            replicas,
 		}
