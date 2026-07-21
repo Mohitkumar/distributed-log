@@ -31,9 +31,9 @@ type FakeTopicCoordinator struct {
 	RPCAddr      string
 	IsRaftLeader bool
 
-	Nodes    map[string]*FakeNodeInfo                  // nodeID -> node (fake's own membership view)
-	Topics   map[string]*fakeTopicMeta                  // topic -> meta
-	Replicas map[string]map[string]*cluster.ReplicaState  // topic -> replicaNodeID -> state
+	Nodes    map[string]*FakeNodeInfo                    // nodeID -> node (fake's own membership view)
+	Topics   map[string]*fakeTopicMeta                   // topic -> meta
+	Replicas map[string]map[string]*cluster.ReplicaState // topic -> replicaNodeID -> state
 
 	replicationTarget *topic.TopicManager
 	stopReplication   chan struct{}

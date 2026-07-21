@@ -49,7 +49,7 @@ func NewCluster(cfg config.Config, metadataStore raft.MetadataStore, logger *zap
 		cfg:    cfg,
 	}
 	c.node.Start()
-	go c.runLeadershipWatcher()
+	go c.watchPeerChanges()
 	return c, nil
 }
 
@@ -265,19 +265,11 @@ func (c *Cluster) Join(id, raftAddr, rpcAddr string) error {
 	return c.node.Join(id, raftAddr, rpcAddr)
 }
 
-// Leave removes id as a Raft voter and notifies the registered onNodeRemoved callback
-// (if any) so topics it was leading can be reassigned.
+// Leave removes id as a Raft voter. watchPeerChanges (below) observes the
+// resulting Raft PeerObservation and fires onNodeRemoved — that single path
+// covers removals regardless of what triggered them, not just this method.
 func (c *Cluster) Leave(id string) error {
-	if err := c.node.Leave(id); err != nil {
-		return err
-	}
-	c.mu.RLock()
-	fn := c.onNodeRemoved
-	c.mu.RUnlock()
-	if fn != nil {
-		fn(id)
-	}
-	return nil
+	return c.node.Leave(id)
 }
 
 // Start is a no-op: bootstrap (if configured) already happened during NewCluster.
@@ -291,76 +283,27 @@ func (c *Cluster) Shutdown() error {
 	return c.node.Shutdown()
 }
 
-// runLeadershipWatcher watches for Raft leadership transitions and runs periodic
-// reconciliation. When this node becomes leader, it reconciles the Raft voter list
-// against Serf alive members after a short delay. It also runs reconciliation
-// periodically to catch any missed joins or leaves.
-func (c *Cluster) runLeadershipWatcher() {
-	// Not exposed on RaftNode today; reconciliation still runs on the periodic
-	// ticker even without a leadership-change channel, just with coarser latency.
-	reconcileTicker := time.NewTicker(30 * time.Second)
-	defer reconcileTicker.Stop()
-
-	for range reconcileTicker.C {
-		if c.IsLeader() {
-			c.reconcileRaftVoters()
-		}
-	}
-}
-
-// reconcileRaftVoters ensures Raft voters and Serf alive members are in sync.
-// It removes Raft voters that are no longer alive in Serf, and adds Serf alive
-// members that are missing from the Raft voter list.
-func (c *Cluster) reconcileRaftVoters() {
-	if !c.IsLeader() {
-		return
-	}
-	c.mu.RLock()
-	ml := c.memberLister
-	c.mu.RUnlock()
-	if ml == nil {
-		return
-	}
-
-	details := ml.AliveNodeDetails()
-	aliveSet := make(map[string]discovery.NodeInfo, len(details))
-	for _, info := range details {
-		aliveSet[info.Name] = info
-	}
-
-	raftIDs, err := c.node.RaftServerIDs()
-	if err != nil {
-		c.Logger.Warn("reconcile: failed to get raft config", zap.Error(err))
-		return
-	}
-
-	localID := c.cfg.RaftConfig.ID
-	raftSet := make(map[string]struct{}, len(raftIDs))
-	for _, id := range raftIDs {
-		raftSet[id] = struct{}{}
-		if id == localID {
-			continue // never remove self
-		}
-		if _, ok := aliveSet[id]; !ok {
-			c.Logger.Info("reconcile: removing stale raft voter", zap.String("node_id", id))
-			if err := c.Leave(id); err != nil {
-				c.Logger.Warn("reconcile: leave failed", zap.String("node_id", id), zap.Error(err))
+// watchPeerChanges reacts to Raft peer configuration changes as they commit
+// (see raft.RaftNode.WatchPeerChanges) — the event-driven replacement for
+// periodically polling Raft's configuration against Serf membership. The
+// decision to add or remove a voter still comes from Serf (discovery.Membership
+// calls Join/Leave directly off Serf's own join/leave/failed events, in real
+// time); this just reacts the instant that decision actually takes effect,
+// regardless of what triggered it.
+func (c *Cluster) watchPeerChanges() {
+	events, stop := c.node.WatchPeerChanges()
+	defer stop()
+	for ev := range events {
+		if ev.Removed {
+			c.Logger.Info("raft peer removed", zap.String("node_id", ev.NodeID))
+			c.mu.RLock()
+			fn := c.onNodeRemoved
+			c.mu.RUnlock()
+			if fn != nil {
+				fn(ev.NodeID)
 			}
-		}
-	}
-
-	// Add Serf alive members that are missing from Raft voters.
-	for _, info := range details {
-		if info.Name == localID {
-			continue
-		}
-		if _, ok := raftSet[info.Name]; !ok {
-			c.Logger.Info("reconcile: adding missing raft voter",
-				zap.String("node_id", info.Name),
-				zap.String("raft_addr", info.RaftAddr))
-			if err := c.Join(info.Name, info.RaftAddr, info.RpcAddr); err != nil {
-				c.Logger.Warn("reconcile: join failed", zap.String("node_id", info.Name), zap.Error(err))
-			}
+		} else {
+			c.Logger.Info("raft peer added", zap.String("node_id", ev.NodeID))
 		}
 	}
 }

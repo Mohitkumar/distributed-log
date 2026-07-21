@@ -215,3 +215,57 @@ func (c *RaftNode) Shutdown() error {
 	f := c.raft.Shutdown()
 	return f.Error()
 }
+
+// PeerChangeEvent describes a peer being added to or removed from this node's
+// active Raft configuration. Only ever fires on whichever node currently holds
+// Raft leadership — peer/replication tracking is a leader-only concept in Raft,
+// so followers never observe these.
+type PeerChangeEvent struct {
+	NodeID  string
+	Removed bool
+}
+
+// WatchPeerChanges registers a Raft observer for peer configuration changes
+// (fired the moment an AddVoter/RemoveServer takes effect — see hashicorp/raft's
+// PeerObservation) and returns a channel of translated events plus a function to
+// stop watching and release the observer. The observer is non-blocking, so a
+// slow consumer can miss events under heavy churn; that's fine here since each
+// event is just a prompt to react, not a queue that must be drained exactly.
+func (c *RaftNode) WatchPeerChanges() (<-chan PeerChangeEvent, func()) {
+	raw := make(chan raft.Observation, 16)
+	observer := raft.NewObserver(raw, false, func(o *raft.Observation) bool {
+		_, ok := o.Data.(raft.PeerObservation)
+		return ok
+	})
+	c.raft.RegisterObserver(observer)
+
+	out := make(chan PeerChangeEvent, 16)
+	stop := make(chan struct{})
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-stop:
+				return
+			case obs, ok := <-raw:
+				if !ok {
+					return
+				}
+				po, ok := obs.Data.(raft.PeerObservation)
+				if !ok {
+					continue
+				}
+				select {
+				case out <- PeerChangeEvent{NodeID: string(po.Peer.ID), Removed: po.Removed}:
+				case <-stop:
+					return
+				}
+			}
+		}
+	}()
+
+	return out, func() {
+		c.raft.DeregisterObserver(observer)
+		close(stop)
+	}
+}
