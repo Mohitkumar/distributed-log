@@ -6,14 +6,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/cluster"
+	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
 	"github.com/mohitkumar/mlog/broker/topic"
 )
 
 var _ topic.TopicCoordinator = (*FakeTopicCoordinator)(nil)
 
+// FakeNodeInfo is a minimal node record for FakeTopicCoordinator (no Raft): just enough
+// to answer AliveNodeIDs/NodeRPCAddr/IsNodeAlive, which in production come from Raft's
+// voter configuration reconciled with Serf gossip (see cluster.Cluster).
+type FakeNodeInfo struct {
+	NodeID  string
+	RpcAddr string
+}
+
 // FakeTopicCoordinator implements topic.TopicCoordinator in memory (no Raft).
-// Mimics Raft-based coordinator: Apply* methods update in-memory state and, when
+// Mimics Cluster: Apply* methods update in-memory state and, when
 // SetReplicationTarget is set, push the same events to the TopicManager (like FSM Apply).
 type FakeTopicCoordinator struct {
 	mu sync.RWMutex
@@ -22,9 +31,9 @@ type FakeTopicCoordinator struct {
 	RPCAddr      string
 	IsRaftLeader bool
 
-	Nodes    map[string]*topic.NodeMetadata            // nodeID -> node
-	Topics   map[string]*fakeTopicMeta                 // topic -> meta
-	Replicas map[string]map[string]*topic.ReplicaState // topic -> replicaNodeID -> state
+	Nodes    map[string]*FakeNodeInfo                  // nodeID -> node (fake's own membership view)
+	Topics   map[string]*fakeTopicMeta                  // topic -> meta
+	Replicas map[string]map[string]*cluster.ReplicaState  // topic -> replicaNodeID -> state
 
 	replicationTarget *topic.TopicManager
 	stopReplication   chan struct{}
@@ -40,11 +49,11 @@ func NewFakeTopicCoordinator(nodeID, rpcAddr string) *FakeTopicCoordinator {
 		NodeID:       nodeID,
 		RPCAddr:      rpcAddr,
 		IsRaftLeader: true,
-		Nodes:        make(map[string]*topic.NodeMetadata),
+		Nodes:        make(map[string]*FakeNodeInfo),
 		Topics:       make(map[string]*fakeTopicMeta),
-		Replicas:     make(map[string]map[string]*topic.ReplicaState),
+		Replicas:     make(map[string]map[string]*cluster.ReplicaState),
 	}
-	f.Nodes[nodeID] = &topic.NodeMetadata{NodeID: nodeID, Addr: rpcAddr, RpcAddr: rpcAddr}
+	f.Nodes[nodeID] = &FakeNodeInfo{NodeID: nodeID, RpcAddr: rpcAddr}
 	return f
 }
 
@@ -74,6 +83,12 @@ func (f *FakeTopicCoordinator) ApplyLeaderChangeEvent(topicName, leaderNodeID st
 	if meta := f.Topics[topicName]; meta != nil {
 		meta.LeaderNodeID = leaderNodeID
 	}
+	if f.replicationTarget != nil {
+		eventData, _ := raft.EncodeLeaderChangeEvent(raft.LeaderChangeEvent{
+			Topic: topicName, LeaderNodeID: leaderNodeID, LeaderEpoch: leaderEpoch,
+		})
+		_ = f.replicationTarget.Apply(&raft.MetadataEvent{EventType: raft.MetadataEventTypeLeaderChange, Data: eventData})
+	}
 	return nil
 }
 
@@ -90,12 +105,41 @@ func (f *FakeTopicCoordinator) GetRaftLeaderNodeID() (string, error) {
 	return "", fmt.Errorf("not raft leader")
 }
 
+// AliveNodeIDs returns all known node IDs (fakes don't model liveness beyond "known").
+func (f *FakeTopicCoordinator) AliveNodeIDs() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	ids := make([]string, 0, len(f.Nodes))
+	for id := range f.Nodes {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// NodeRPCAddr returns the RPC address for nodeID, if known.
+func (f *FakeTopicCoordinator) NodeRPCAddr(nodeID string) (string, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	n := f.Nodes[nodeID]
+	if n == nil {
+		return "", false
+	}
+	return n.RpcAddr, true
+}
+
+// IsNodeAlive reports whether nodeID is known to this fake.
+func (f *FakeTopicCoordinator) IsNodeAlive(nodeID string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.Nodes[nodeID] != nil
+}
+
 // — Helpers for tests (testutil and node/topic/replica tests) —
 
 func (f *FakeTopicCoordinator) AddNode(nodeID, rpcAddr string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Nodes[nodeID] = &topic.NodeMetadata{NodeID: nodeID, Addr: rpcAddr, RpcAddr: rpcAddr}
+	f.Nodes[nodeID] = &FakeNodeInfo{NodeID: nodeID, RpcAddr: rpcAddr}
 }
 
 func (f *FakeTopicCoordinator) SetReplicationTarget(tm *topic.TopicManager) {
@@ -142,10 +186,10 @@ func (f *FakeTopicCoordinator) ListTopicNames() []string {
 	return names
 }
 
-func (f *FakeTopicCoordinator) GetOtherNodes() []*topic.NodeMetadata {
+func (f *FakeTopicCoordinator) GetOtherNodes() []*FakeNodeInfo {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	out := make([]*topic.NodeMetadata, 0, len(f.Nodes))
+	out := make([]*FakeNodeInfo, 0, len(f.Nodes))
 	for id, n := range f.Nodes {
 		if id != f.NodeID && n != nil {
 			out = append(out, n)
@@ -185,15 +229,15 @@ func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCo
 		leaderNodeID = f.NodeID
 	}
 	f.Topics[topicName] = &fakeTopicMeta{LeaderNodeID: leaderNodeID, ReplicaIDs: replicaNodeIds}
-	f.Replicas[topicName] = make(map[string]*topic.ReplicaState)
+	f.Replicas[topicName] = make(map[string]*cluster.ReplicaState)
 	for _, id := range replicaNodeIds {
-		f.Replicas[topicName][id] = &topic.ReplicaState{ReplicaNodeID: id, LEO: 0, IsISR: true}
+		f.Replicas[topicName][id] = &cluster.ReplicaState{ReplicaNodeID: id, LEO: 0, IsISR: true}
 	}
 	if f.replicationTarget != nil {
-		eventData, _ := protocol.EncodeCreateTopicEvent(protocol.CreateTopicEvent{
+		eventData, _ := raft.EncodeCreateTopicEvent(raft.CreateTopicEvent{
 			Topic: topicName, ReplicaCount: replicaCount, LeaderNodeID: leaderNodeID, LeaderEpoch: 1, ReplicaNodeIds: replicaNodeIds,
 		})
-		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeCreateTopic, Data: eventData})
+		_ = f.replicationTarget.Apply(&raft.MetadataEvent{EventType: raft.MetadataEventTypeCreateTopic, Data: eventData})
 	}
 	return nil
 }
@@ -202,8 +246,8 @@ func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
 	delete(f.Topics, topicName)
 	delete(f.Replicas, topicName)
 	if f.replicationTarget != nil {
-		eventData, _ := protocol.EncodeDeleteTopicEvent(protocol.DeleteTopicEvent{Topic: topicName})
-		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeDeleteTopic, Data: eventData})
+		eventData, _ := raft.EncodeDeleteTopicEvent(raft.DeleteTopicEvent{Topic: topicName})
+		_ = f.replicationTarget.Apply(&raft.MetadataEvent{EventType: raft.MetadataEventTypeDeleteTopic, Data: eventData})
 	}
 	return nil
 }
@@ -211,19 +255,19 @@ func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
 func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool) error {
 	f.updateReplicaISR(topicName, replicaNodeID, isr)
 	if f.replicationTarget != nil {
-		eventData, _ := protocol.EncodeIsrUpdateEvent(protocol.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr})
-		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeIsrUpdate, Data: eventData})
+		eventData, _ := raft.EncodeIsrUpdateEvent(raft.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr})
+		_ = f.replicationTarget.Apply(&raft.MetadataEvent{EventType: raft.MetadataEventTypeIsrUpdate, Data: eventData})
 	}
 	return nil
 }
 
 func (f *FakeTopicCoordinator) updateReplicaISR(topicName, replicaNodeID string, isr bool) {
 	if f.Replicas[topicName] == nil {
-		f.Replicas[topicName] = make(map[string]*topic.ReplicaState)
+		f.Replicas[topicName] = make(map[string]*cluster.ReplicaState)
 	}
 	rs := f.Replicas[topicName][replicaNodeID]
 	if rs == nil {
-		f.Replicas[topicName][replicaNodeID] = &topic.ReplicaState{ReplicaNodeID: replicaNodeID, LEO: 0, IsISR: isr}
+		f.Replicas[topicName][replicaNodeID] = &cluster.ReplicaState{ReplicaNodeID: replicaNodeID, LEO: 0, IsISR: isr}
 		return
 	}
 	rs.IsISR = isr

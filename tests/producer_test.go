@@ -25,15 +25,9 @@ func (s *producerTestServers) getLeaderAddr() string {
 // getTopicLeaderTopicMgr returns the TopicManager of the node that is the topic leader for topicName (from metadata).
 // Use this for verification when the topic leader may be different from the Raft leader.
 func (s *producerTestServers) getTopicLeaderTopicMgr(topicName string) *topic.TopicManager {
-	// Look up the topic on each server and return the TopicManager
-	// whose CurrentNodeID matches the topic's LeaderNodeID.
 	for _, srv := range []*TestServer{s.server1, s.server2} {
 		tm := srv.TopicManager
-		t, err := tm.GetTopic(topicName)
-		if err != nil || t == nil {
-			continue
-		}
-		if t.LeaderNodeID == tm.CurrentNodeID {
+		if isLeader, err := tm.IsLeader(topicName); err == nil && isLeader {
 			return tm
 		}
 	}

@@ -8,8 +8,6 @@ import (
 var (
 	ErrTopicExists         = errors.New("topic already exists")
 	ErrTopicNotFound       = errors.New("topic not found")
-	ErrNotEnoughNodes      = errors.New("not enough nodes")
-	ErrNoNodesInCluster    = errors.New("no nodes in cluster")
 	ErrCannotReachLeader   = errors.New("cannot reach Raft leader")
 	ErrNoRPCForTopicLeader = errors.New("no RPC address for topic leader node")
 	ErrNodeIDRequired      = errors.New("node id is required")
@@ -29,10 +27,6 @@ func ErrTopicExistsf(topic string) error {
 
 func ErrTopicNotFoundf(topic string) error {
 	return fmt.Errorf("topic %s not found: %w", topic, ErrTopicNotFound)
-}
-
-func ErrNotEnoughNodesf(need, have int) error {
-	return fmt.Errorf("not enough nodes: need %d, have %d: %w", need, have, ErrNotEnoughNodes)
 }
 
 func ErrNoRPCForTopicLeaderf(nodeID string) error {

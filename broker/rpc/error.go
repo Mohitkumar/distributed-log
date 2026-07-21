@@ -4,7 +4,8 @@ import (
 	"errors"
 
 	"github.com/mohitkumar/mlog/api/protocol"
-	"github.com/mohitkumar/mlog/broker/coordinator"
+	"github.com/mohitkumar/mlog/broker/cluster"
+	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
 	"github.com/mohitkumar/mlog/broker/log"
 	"github.com/mohitkumar/mlog/broker/segment"
 	"github.com/mohitkumar/mlog/broker/topic"
@@ -25,7 +26,7 @@ func CodeFor(err error) int32 {
 		return protocol.CodeTopicNotFound
 	case errors.Is(err, topic.ErrTopicExists):
 		return protocol.CodeTopicExists
-	case errors.Is(err, topic.ErrNotEnoughNodes):
+	case errors.Is(err, cluster.ErrNotEnoughNodes):
 		return protocol.CodeNotEnoughNodes
 	case errors.Is(err, topic.ErrCannotReachLeader):
 		return protocol.CodeCannotReachLeader
@@ -39,7 +40,7 @@ func CodeFor(err error) int32 {
 		return protocol.CodeValuesRequired
 	case errors.Is(err, log.ErrLogOffsetOutOfRange), errors.Is(err, segment.ErrSegmentOffsetNotFound):
 		return protocol.CodeReadOffset
-	case errors.Is(err, coordinator.ErrRaftNoLeader), errors.Is(err, coordinator.ErrRaftNodeNotFound):
+	case errors.Is(err, raft.ErrRaftNoLeader), errors.Is(err, raft.ErrRaftNodeNotFound):
 		return protocol.CodeRaftLeaderUnavailable
 	default:
 		return protocol.CodeUnknown

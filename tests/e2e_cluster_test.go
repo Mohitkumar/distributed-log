@@ -302,14 +302,23 @@ func TestE2E_RealCluster_ClusterMetadata(t *testing.T) {
 	node1, node2, node3, cleanup := StartRealThreeNodeCluster(t, "e2e-metadata")
 	defer cleanup()
 
-	// Verify each node has correct metadata
+	// Verify each node has correct metadata (cluster membership is Raft's own voter
+	// configuration now, not a separately-replicated node map — see cluster.Cluster).
 	for idx, node := range []*RealTestServer{node1, node2, node3} {
-		if len(node.TopicManager.Nodes) < 3 {
-			t.Logf("node %d: waiting for cluster members... (have %d)", idx+1, len(node.TopicManager.Nodes))
-			time.Sleep(500 * time.Millisecond)
+		ids, err := node.Coordinator.RaftServerIDs()
+		if err != nil {
+			t.Fatalf("node %d: RaftServerIDs: %v", idx+1, err)
 		}
-		if len(node.TopicManager.Nodes) != 3 {
-			t.Fatalf("node %d: expected 3 cluster members, got %d", idx+1, len(node.TopicManager.Nodes))
+		if len(ids) < 3 {
+			t.Logf("node %d: waiting for cluster members... (have %d)", idx+1, len(ids))
+			time.Sleep(500 * time.Millisecond)
+			ids, err = node.Coordinator.RaftServerIDs()
+			if err != nil {
+				t.Fatalf("node %d: RaftServerIDs: %v", idx+1, err)
+			}
+		}
+		if len(ids) != 3 {
+			t.Fatalf("node %d: expected 3 cluster members, got %d", idx+1, len(ids))
 		}
 	}
 

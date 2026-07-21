@@ -105,18 +105,19 @@ func (tm *TopicManager) replicateAllTopics(ctx context.Context) {
 // ReplicateFromLeader creates a dedicated consumer client for this leader,
 // fetches batches for each topic, and applies them locally.
 func (tm *TopicManager) ReplicateFromLeader(ctx context.Context, leaderID string, topicNames []string, batchSize uint32) error {
+	if tm.coordinator == nil {
+		return fmt.Errorf("no coordinator")
+	}
 	// Look up leader RPC address.
-	tm.mu.RLock()
-	node := tm.Nodes[leaderID]
-	tm.mu.RUnlock()
-	if node == nil {
+	rpcAddr, ok := tm.coordinator.NodeRPCAddr(leaderID)
+	if !ok {
 		return fmt.Errorf("leader node %s not found", leaderID)
 	}
 
 	// Create a dedicated client for this replication goroutine (not shared).
-	cc, err := client.NewConsumerClient(node.RpcAddr)
+	cc, err := client.NewConsumerClient(rpcAddr)
 	if err != nil {
-		return fmt.Errorf("connect to leader %s at %s: %w", leaderID, node.RpcAddr, err)
+		return fmt.Errorf("connect to leader %s at %s: %w", leaderID, rpcAddr, err)
 	}
 	defer cc.Close()
 	cc.SetReplicaNodeID(tm.CurrentNodeID)

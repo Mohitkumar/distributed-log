@@ -2,17 +2,37 @@ package cluster
 
 import (
 	"strings"
+	"sync"
+	"time"
 
-	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/cluster/discovery"
 	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
 	"github.com/mohitkumar/mlog/broker/config"
 	"go.uber.org/zap"
 )
 
+// MemberLister returns information about cluster members currently alive (as seen by
+// Serf). Used by Cluster to reconcile Raft voters with Serf membership, and as the
+// source of node addresses (Raft's own configuration only knows raft addresses, not
+// RPC addresses — see AliveNodeIDs/NodeRPCAddr).
+type MemberLister interface {
+	AliveMembers() []string
+	AliveNodeDetails() []discovery.NodeInfo
+}
+
+// Cluster is the write path for cluster-wide state: it drives Raft consensus and
+// membership (Join/Leave), and issues the metadata events (create/delete topic,
+// leader change, ISR update) that ClusterMetadataStore applies. Address/membership
+// queries are answered from Raft's own voter configuration reconciled with Serf
+// gossip (see AliveNodeIDs, NodeRPCAddr) rather than a separate replicated node map.
 type Cluster struct {
 	Logger *zap.Logger
 	node   *raft.RaftNode
 	cfg    config.Config
+
+	mu            sync.RWMutex
+	memberLister  MemberLister
+	onNodeRemoved func(nodeID string)
 }
 
 func NewCluster(cfg config.Config, metadataStore raft.MetadataStore, logger *zap.Logger) (*Cluster, error) {
@@ -29,7 +49,84 @@ func NewCluster(cfg config.Config, metadataStore raft.MetadataStore, logger *zap
 		cfg:    cfg,
 	}
 	c.node.Start()
+	go c.runLeadershipWatcher()
 	return c, nil
+}
+
+// SetMemberLister sets the Serf member lister used for Raft-Serf reconciliation and
+// node address lookups. Must be called after discovery.New() completes.
+func (c *Cluster) SetMemberLister(ml MemberLister) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.memberLister = ml
+}
+
+// SetOnNodeRemoved registers a callback invoked after a node is removed as a Raft
+// voter (either via explicit Leave or reconciliation dropping a stale voter). Used by
+// topic.TopicManager to reassign leadership for topics the removed node was leading.
+func (c *Cluster) SetOnNodeRemoved(fn func(nodeID string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onNodeRemoved = fn
+}
+
+// AliveNodeIDs returns the current cluster member node IDs: Raft's own voter
+// configuration (authoritative — what consensus has actually agreed to), intersected
+// with Serf's alive set when a member lister is available. Used as the candidate list
+// for topic/replica placement.
+func (c *Cluster) AliveNodeIDs() []string {
+	raftIDs, err := c.node.RaftServerIDs()
+	if err != nil {
+		c.Logger.Warn("alive node ids: raft config unavailable", zap.Error(err))
+		return nil
+	}
+	c.mu.RLock()
+	ml := c.memberLister
+	c.mu.RUnlock()
+	if ml == nil {
+		return raftIDs
+	}
+	alive := make(map[string]struct{})
+	for _, name := range ml.AliveMembers() {
+		alive[name] = struct{}{}
+	}
+	out := make([]string, 0, len(raftIDs))
+	for _, id := range raftIDs {
+		if _, ok := alive[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// IsNodeAlive reports whether nodeID is currently a Raft voter (a recognized cluster member).
+func (c *Cluster) IsNodeAlive(nodeID string) bool {
+	ids, err := c.node.RaftServerIDs()
+	if err != nil {
+		return false
+	}
+	for _, id := range ids {
+		if id == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+// NodeRPCAddr returns the RPC address Serf has gossiped for nodeID.
+func (c *Cluster) NodeRPCAddr(nodeID string) (string, bool) {
+	c.mu.RLock()
+	ml := c.memberLister
+	c.mu.RUnlock()
+	if ml == nil {
+		return "", false
+	}
+	for _, n := range ml.AliveNodeDetails() {
+		if n.Name == nodeID && n.RpcAddr != "" {
+			return n.RpcAddr, true
+		}
+	}
+	return "", false
 }
 
 func (c *Cluster) ApplyCreateTopicEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
@@ -37,7 +134,7 @@ func (c *Cluster) ApplyCreateTopicEvent(topic string, replicaCount uint32, leade
 		c.Logger.Debug("not leader, skipping create topic event", zap.String("topic", topic))
 		return nil
 	}
-	eventData, err := protocol.EncodeCreateTopicEvent(protocol.CreateTopicEvent{
+	eventData, err := raft.EncodeCreateTopicEvent(raft.CreateTopicEvent{
 		Topic:          topic,
 		ReplicaCount:   replicaCount,
 		LeaderNodeID:   leaderNodeID,
@@ -47,16 +144,15 @@ func (c *Cluster) ApplyCreateTopicEvent(topic string, replicaCount uint32, leade
 	if err != nil {
 		return err
 	}
-	data, err := protocol.EncodeMetadataEvent(&protocol.MetadataEvent{
-		EventType: protocol.MetadataEventTypeCreateTopic,
+	data, err := raft.EncodeMetadataEvent(&raft.MetadataEvent{
+		EventType: raft.MetadataEventTypeCreateTopic,
 		Data:      eventData,
 	})
 	if err != nil {
 		return err
 	}
 	c.Logger.Info("apply create topic event", zap.String("topic", topic), zap.String("leader_node_id", leaderNodeID))
-	err = c.node.ApplyEvent(data)
-	if err != nil {
+	if err := c.node.ApplyEvent(data); err != nil {
 		c.Logger.Error("raft apply create topic failed", zap.Error(err), zap.String("topic", topic))
 		return err
 	}
@@ -68,20 +164,19 @@ func (c *Cluster) ApplyDeleteTopicEventInternal(topic string) error {
 		c.Logger.Debug("not leader, skipping delete topic event", zap.String("topic", topic))
 		return nil
 	}
-	eventData, err := protocol.EncodeDeleteTopicEvent(protocol.DeleteTopicEvent{Topic: topic})
+	eventData, err := raft.EncodeDeleteTopicEvent(raft.DeleteTopicEvent{Topic: topic})
 	if err != nil {
 		return err
 	}
-	data, err := protocol.EncodeMetadataEvent(&protocol.MetadataEvent{
-		EventType: protocol.MetadataEventTypeDeleteTopic,
+	data, err := raft.EncodeMetadataEvent(&raft.MetadataEvent{
+		EventType: raft.MetadataEventTypeDeleteTopic,
 		Data:      eventData,
 	})
 	if err != nil {
 		return err
 	}
 	c.Logger.Info("apply delete topic event", zap.String("topic", topic))
-	err = c.node.ApplyEvent(data)
-	if err != nil {
+	if err := c.node.ApplyEvent(data); err != nil {
 		c.Logger.Error("raft apply delete topic failed", zap.Error(err), zap.String("topic", topic))
 		return err
 	}
@@ -93,19 +188,18 @@ func (c *Cluster) ApplyIsrUpdateEventInternal(topic, replicaNodeID string, isr b
 		c.Logger.Debug("not leader, skipping ISR update event", zap.String("topic", topic))
 		return nil
 	}
-	eventData, err := protocol.EncodeIsrUpdateEvent(protocol.IsrUpdateEvent{Topic: topic, ReplicaNodeID: replicaNodeID, Isr: isr})
+	eventData, err := raft.EncodeIsrUpdateEvent(raft.IsrUpdateEvent{Topic: topic, ReplicaNodeID: replicaNodeID, Isr: isr})
 	if err != nil {
 		return err
 	}
-	data, err := protocol.EncodeMetadataEvent(&protocol.MetadataEvent{
-		EventType: protocol.MetadataEventTypeIsrUpdate,
+	data, err := raft.EncodeMetadataEvent(&raft.MetadataEvent{
+		EventType: raft.MetadataEventTypeIsrUpdate,
 		Data:      eventData,
 	})
 	if err != nil {
 		return err
 	}
-	err = c.node.ApplyEvent(data)
-	if err != nil {
+	if err := c.node.ApplyEvent(data); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "shutdown") || strings.Contains(msg, "leadership lost") {
 			c.Logger.Debug("raft apply ISR update failed (shutdown or leadership change)", zap.Error(err))
@@ -122,7 +216,7 @@ func (c *Cluster) ApplyLeaderChangeEvent(topic, leaderNodeID string, leaderEpoch
 		c.Logger.Debug("not leader, skipping leader change event", zap.String("topic", topic))
 		return nil
 	}
-	eventData, err := protocol.EncodeLeaderChangeEvent(protocol.LeaderChangeEvent{
+	eventData, err := raft.EncodeLeaderChangeEvent(raft.LeaderChangeEvent{
 		Topic:        topic,
 		LeaderNodeID: leaderNodeID,
 		LeaderEpoch:  leaderEpoch,
@@ -130,26 +224,143 @@ func (c *Cluster) ApplyLeaderChangeEvent(topic, leaderNodeID string, leaderEpoch
 	if err != nil {
 		return err
 	}
-	data, err := protocol.EncodeMetadataEvent(&protocol.MetadataEvent{
-		EventType: protocol.MetadataEventTypeLeaderChange,
+	data, err := raft.EncodeMetadataEvent(&raft.MetadataEvent{
+		EventType: raft.MetadataEventTypeLeaderChange,
 		Data:      eventData,
 	})
 	if err != nil {
 		return err
 	}
 	c.Logger.Info("apply leader change event", zap.String("topic", topic), zap.String("new_leader_node_id", leaderNodeID), zap.Int64("leader_epoch", leaderEpoch))
-	err = c.node.ApplyEvent(data)
-	if err != nil {
+	if err := c.node.ApplyEvent(data); err != nil {
 		c.Logger.Error("raft apply leader change failed", zap.Error(err), zap.String("topic", topic))
 		return err
 	}
 	return nil
 }
 
-func (c *Cluster) Start() error {
-	return c.node.Start()
+func (c *Cluster) IsLeader() bool {
+	return c.node.IsLeader()
 }
 
-func (c *Cluster) ShutDown() error {
+func (c *Cluster) GetRaftLeaderNodeID() (string, error) {
+	return c.node.GetRaftLeaderNodeID()
+}
+
+func (c *Cluster) RaftServerIDs() ([]string, error) {
+	return c.node.RaftServerIDs()
+}
+
+func (c *Cluster) WaitforRaftReady(timeout time.Duration) error {
+	return c.node.WaitforRaftReady(timeout)
+}
+
+func (c *Cluster) IsRaftReady() bool {
+	return c.node.IsRaftReady()
+}
+
+// Join adds id as a Raft voter. Cluster membership itself is now purely Raft's own
+// configuration — no separate metadata event is applied for it.
+func (c *Cluster) Join(id, raftAddr, rpcAddr string) error {
+	return c.node.Join(id, raftAddr, rpcAddr)
+}
+
+// Leave removes id as a Raft voter and notifies the registered onNodeRemoved callback
+// (if any) so topics it was leading can be reassigned.
+func (c *Cluster) Leave(id string) error {
+	if err := c.node.Leave(id); err != nil {
+		return err
+	}
+	c.mu.RLock()
+	fn := c.onNodeRemoved
+	c.mu.RUnlock()
+	if fn != nil {
+		fn(id)
+	}
+	return nil
+}
+
+// Start is a no-op: bootstrap (if configured) already happened during NewCluster.
+// Kept for interface parity with callers that call Start() explicitly after construction.
+func (c *Cluster) Start() error {
+	return nil
+}
+
+func (c *Cluster) Shutdown() error {
+	c.Logger.Info("cluster shutting down")
 	return c.node.Shutdown()
+}
+
+// runLeadershipWatcher watches for Raft leadership transitions and runs periodic
+// reconciliation. When this node becomes leader, it reconciles the Raft voter list
+// against Serf alive members after a short delay. It also runs reconciliation
+// periodically to catch any missed joins or leaves.
+func (c *Cluster) runLeadershipWatcher() {
+	// Not exposed on RaftNode today; reconciliation still runs on the periodic
+	// ticker even without a leadership-change channel, just with coarser latency.
+	reconcileTicker := time.NewTicker(30 * time.Second)
+	defer reconcileTicker.Stop()
+
+	for range reconcileTicker.C {
+		if c.IsLeader() {
+			c.reconcileRaftVoters()
+		}
+	}
+}
+
+// reconcileRaftVoters ensures Raft voters and Serf alive members are in sync.
+// It removes Raft voters that are no longer alive in Serf, and adds Serf alive
+// members that are missing from the Raft voter list.
+func (c *Cluster) reconcileRaftVoters() {
+	if !c.IsLeader() {
+		return
+	}
+	c.mu.RLock()
+	ml := c.memberLister
+	c.mu.RUnlock()
+	if ml == nil {
+		return
+	}
+
+	details := ml.AliveNodeDetails()
+	aliveSet := make(map[string]discovery.NodeInfo, len(details))
+	for _, info := range details {
+		aliveSet[info.Name] = info
+	}
+
+	raftIDs, err := c.node.RaftServerIDs()
+	if err != nil {
+		c.Logger.Warn("reconcile: failed to get raft config", zap.Error(err))
+		return
+	}
+
+	localID := c.cfg.RaftConfig.ID
+	raftSet := make(map[string]struct{}, len(raftIDs))
+	for _, id := range raftIDs {
+		raftSet[id] = struct{}{}
+		if id == localID {
+			continue // never remove self
+		}
+		if _, ok := aliveSet[id]; !ok {
+			c.Logger.Info("reconcile: removing stale raft voter", zap.String("node_id", id))
+			if err := c.Leave(id); err != nil {
+				c.Logger.Warn("reconcile: leave failed", zap.String("node_id", id), zap.Error(err))
+			}
+		}
+	}
+
+	// Add Serf alive members that are missing from Raft voters.
+	for _, info := range details {
+		if info.Name == localID {
+			continue
+		}
+		if _, ok := raftSet[info.Name]; !ok {
+			c.Logger.Info("reconcile: adding missing raft voter",
+				zap.String("node_id", info.Name),
+				zap.String("raft_addr", info.RaftAddr))
+			if err := c.Join(info.Name, info.RaftAddr, info.RpcAddr); err != nil {
+				c.Logger.Warn("reconcile: join failed", zap.String("node_id", info.Name), zap.Error(err))
+			}
+		}
+	}
 }

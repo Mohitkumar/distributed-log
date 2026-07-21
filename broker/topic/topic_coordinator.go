@@ -1,7 +1,7 @@
 package topic
 
-// TopicCoordinator is the interface TopicManager uses to apply metadata events (Raft or fake in tests).
-// Implemented by *coordinator.Coordinator and *tests.FakeTopicCoordinator.
+// TopicCoordinator is the interface TopicManager uses to apply metadata events (Raft or fake in tests)
+// and to query cluster membership. Implemented by *cluster.Cluster and *tests.FakeTopicCoordinator.
 type TopicCoordinator interface {
 	ApplyCreateTopicEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error
 	ApplyDeleteTopicEventInternal(topic string) error
@@ -9,6 +9,13 @@ type TopicCoordinator interface {
 	ApplyLeaderChangeEvent(topic, leaderNodeID string, leaderEpoch int64) error
 	IsLeader() bool
 	GetRaftLeaderNodeID() (string, error)
+	// AliveNodeIDs returns the current cluster member node IDs, used as the
+	// candidate list for topic/replica placement.
+	AliveNodeIDs() []string
+	// NodeRPCAddr returns the RPC address for nodeID, if known.
+	NodeRPCAddr(nodeID string) (string, bool)
+	// IsNodeAlive reports whether nodeID is currently a recognized cluster member.
+	IsNodeAlive(nodeID string) bool
 }
 
 // ApplyEventType is the type of a metadata apply event (used by tests with fake coordinator).

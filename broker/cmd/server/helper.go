@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mohitkumar/mlog/broker/cluster"
+	"github.com/mohitkumar/mlog/broker/cluster/discovery"
 	"github.com/mohitkumar/mlog/broker/config"
 	"github.com/mohitkumar/mlog/broker/consumer"
-	"github.com/mohitkumar/mlog/broker/coordinator"
-	"github.com/mohitkumar/mlog/broker/discovery"
 	"github.com/mohitkumar/mlog/broker/rpc"
 	"github.com/mohitkumar/mlog/broker/topic"
 	"go.uber.org/zap"
@@ -22,7 +22,7 @@ const RaftReadyTimeout = 15 * time.Second
 type CommandHelper struct {
 	config.Config
 	membership   *discovery.Membership
-	coord        *coordinator.Coordinator
+	coord        *cluster.Cluster
 	topicMgr     *topic.TopicManager
 	rpcServer    *rpc.RpcServer
 	shutdown     bool
@@ -57,19 +57,22 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 	logger = logger.With(zap.String("node_id", cmdHelper.NodeConfig.ID))
 	zap.ReplaceGlobals(logger)
 
-	// TopicManager implements MetadataStore; create it first so Coordinator can use it.
-	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, nil, logger)
+	// TopicManager implements raft.MetadataStore (wrapping ClusterMetadataStore);
+	// create it first so Cluster can use it.
+	metadataStore := cluster.NewClusterMetadataStore()
+	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, metadataStore, nil, logger)
 	if err != nil {
 		logger.Sync()
 		return fmt.Errorf("create topic manager: %w", err)
 	}
-	coord, err := coordinator.NewCoordinatorFromConfig(cmdHelper.Config, topicMgr, logger)
+	coord, err := cluster.NewCluster(cmdHelper.Config, topicMgr, logger)
 	if err != nil {
 		logger.Sync()
 		return err
 	}
 	topicMgr.SetCoordinator(coord)
 	topicMgr.SetCurrentNodeID(cmdHelper.NodeConfig.ID)
+	coord.SetOnNodeRemoved(topicMgr.ReassignLeadersForDeadNode)
 	cmdHelper.coord = coord
 	cmdHelper.topicMgr = topicMgr
 
@@ -78,11 +81,6 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 			if err := cmdHelper.coord.WaitforRaftReady(30 * time.Second); err != nil {
 				return fmt.Errorf("wait for leader: %w", err)
 			}
-		}
-	}
-	if cmdHelper.coord.IsLeader() {
-		if err := cmdHelper.coord.EnsureSelfInMetadata(); err != nil {
-			return fmt.Errorf("ensure self in metadata: %w", err)
 		}
 	}
 	return nil

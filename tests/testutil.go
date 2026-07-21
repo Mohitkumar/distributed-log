@@ -10,11 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/cluster"
+	"github.com/mohitkumar/mlog/broker/cluster/discovery"
 	"github.com/mohitkumar/mlog/broker/config"
 	consumermgr "github.com/mohitkumar/mlog/broker/consumer"
-	"github.com/mohitkumar/mlog/broker/coordinator"
-	"github.com/mohitkumar/mlog/broker/discovery"
 	"github.com/mohitkumar/mlog/broker/rpc"
 	"github.com/mohitkumar/mlog/broker/topic"
 	"go.uber.org/zap"
@@ -76,19 +75,13 @@ func (ts *TestServer) Cleanup() {
 	_ = ts.srv.Stop()
 }
 
-// syncFakeNodesToTopicManager applies AddNode events to topicMgr for each node in the fake
-// so that TopicManager.Nodes is populated (CreateTopic uses tm.Nodes).
+// syncFakeNodesToTopicManager sets topicMgr's current node ID to match the fake
+// coordinator. Cluster membership itself (AliveNodeIDs/NodeRPCAddr) is answered
+// directly from the FakeTopicCoordinator (see fake_coordinator.go), not from any
+// state pushed into topicMgr — this mirrors production, where node membership comes
+// from Raft's own voter configuration rather than a Raft-replicated event.
 func syncFakeNodesToTopicManager(topicMgr *topic.TopicManager, fake *FakeTopicCoordinator) {
-	fake.mu.RLock()
-	defer fake.mu.RUnlock()
 	topicMgr.SetCurrentNodeID(fake.NodeID)
-	for _, n := range fake.Nodes {
-		if n == nil {
-			continue
-		}
-		data, _ := protocol.EncodeAddNodeEvent(protocol.AddNodeEvent{NodeID: n.NodeID, Addr: n.Addr, RpcAddr: n.RpcAddr})
-		_ = topicMgr.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeAddNode, Data: data})
-	}
 }
 
 // StartSingleNode starts a single-node server backed by a FakeTopicCoordinator.
@@ -104,7 +97,7 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 
 	// Start RPC server on an ephemeral port.
 	fakeCoord := NewFakeTopicCoordinator("node-1", rpcAddr)
-	topicMgr, err := topic.NewTopicManager(baseDir, fakeCoord, logger)
+	topicMgr, err := topic.NewTopicManager(baseDir, cluster.NewClusterMetadataStore(), fakeCoord, logger)
 	if err != nil {
 		t.Fatalf("NewTopicManager: %v", err)
 	}
@@ -162,7 +155,7 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	fake2 := NewFakeTopicCoordinator("node-2", server2Addr)
 
 	// Topic managers and consumer managers.
-	server1TopicMgr, err := topic.NewTopicManager(server1BaseDir, fake1, logger1)
+	server1TopicMgr, err := topic.NewTopicManager(server1BaseDir, cluster.NewClusterMetadataStore(), fake1, logger1)
 	if err != nil {
 		t.Fatalf("NewTopicManager server1: %v", err)
 	}
@@ -170,7 +163,7 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	if err != nil {
 		t.Fatalf("NewConsumerManager server1: %v", err)
 	}
-	server2TopicMgr, err := topic.NewTopicManager(server2BaseDir, fake2, logger2)
+	server2TopicMgr, err := topic.NewTopicManager(server2BaseDir, cluster.NewClusterMetadataStore(), fake2, logger2)
 	if err != nil {
 		t.Fatalf("NewTopicManager server2: %v", err)
 	}
@@ -323,7 +316,7 @@ func testLoggerSilent(nodeID string) *zap.Logger {
 // RealTestServer represents a test server with a real coordinator.
 type RealTestServer struct {
 	NodeID         string
-	Coordinator    *coordinator.Coordinator
+	Coordinator    *cluster.Cluster
 	TopicManager   *topic.TopicManager
 	ConsumerMgr    *consumermgr.ConsumerManager
 	RpcServer      *rpc.RpcServer
@@ -455,19 +448,20 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 
 		logger := testLoggerSilent(nc.nodeID)
 
-		// Create topic manager first (implements MetadataStore)
-		tm, err := topic.NewTopicManager(nc.basePath, nil, logger)
+		// Create topic manager first (implements raft.MetadataStore)
+		tm, err := topic.NewTopicManager(nc.basePath, cluster.NewClusterMetadataStore(), nil, logger)
 		if err != nil {
 			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
 		}
 
 		// Create coordinator
-		coord, err := coordinator.NewCoordinatorFromConfig(cfg, tm, logger)
+		coord, err := cluster.NewCluster(cfg, tm, logger)
 		if err != nil {
-			t.Fatalf("NewCoordinator %s: %v", nc.nodeID, err)
+			t.Fatalf("NewCluster %s: %v", nc.nodeID, err)
 		}
 		tm.SetCoordinator(coord)
 		tm.SetCurrentNodeID(nc.nodeID)
+		coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
 
 		// Start coordinator for bootstrap
 		if err := coord.Start(); err != nil {
@@ -477,9 +471,6 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 		// Wait for Raft to be ready
 		if err := coord.WaitforRaftReady(10 * time.Second); err != nil {
 			t.Fatalf("bootstrap node %s: raft not ready: %v", nc.nodeID, err)
-		}
-		if err := coord.EnsureSelfInMetadata(); err != nil {
-			t.Fatalf("bootstrap node %s: ensure self in metadata: %v", nc.nodeID, err)
 		}
 
 		// Restore topic manager state
@@ -551,19 +542,20 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 
 		logger := testLoggerSilent(nc.nodeID)
 
-		// Create topic manager first (implements MetadataStore)
-		tm, err := topic.NewTopicManager(nc.basePath, nil, logger)
+		// Create topic manager first (implements raft.MetadataStore)
+		tm, err := topic.NewTopicManager(nc.basePath, cluster.NewClusterMetadataStore(), nil, logger)
 		if err != nil {
 			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
 		}
 
 		// Create coordinator
-		coord, err := coordinator.NewCoordinatorFromConfig(cfg, tm, logger)
+		coord, err := cluster.NewCluster(cfg, tm, logger)
 		if err != nil {
-			t.Fatalf("NewCoordinator %s: %v", nc.nodeID, err)
+			t.Fatalf("NewCluster %s: %v", nc.nodeID, err)
 		}
 		tm.SetCoordinator(coord)
 		tm.SetCurrentNodeID(nc.nodeID)
+		coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
 
 		// Create consumer manager
 		consumerMgr, err := consumermgr.NewConsumerManager(nc.basePath)

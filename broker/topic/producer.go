@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/cluster"
 	"go.uber.org/zap"
 )
 
@@ -69,7 +70,10 @@ func (tm *TopicManager) waitForAllFollowersToCatchUp(ctx context.Context, t *Top
 	requiredLEO := offset + 1
 
 	for {
-		_, _, replicas := t.Snapshot()
+		var replicas []cluster.ReplicaSnapshot
+		if tmeta := tm.metadataStore.GetTopic(t.Name); tmeta != nil {
+			_, _, replicas = tmeta.Snapshot()
+		}
 
 		useISR := false
 		for _, r := range replicas {
