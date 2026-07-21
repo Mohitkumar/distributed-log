@@ -1,4 +1,4 @@
-package coordinator
+package raft
 
 import (
 	"path/filepath"

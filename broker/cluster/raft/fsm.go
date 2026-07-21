@@ -1,30 +1,29 @@
-package coordinator
+package raft
 
 import (
 	"io"
 	"sync"
 
 	"github.com/hashicorp/raft"
-	"github.com/mohitkumar/mlog/api/protocol"
 )
 
-var _ raft.FSM = (*MetadataFSM)(nil)
+var _ raft.FSM = (*FSM)(nil)
 
-type MetadataFSM struct {
+type FSM struct {
 	mu            sync.RWMutex
 	metadataStore MetadataStore
 	BaseDir       string
 }
 
-func NewCoordinatorFSM(baseDir string, metadataStore MetadataStore) (*MetadataFSM, error) {
-	return &MetadataFSM{
+func NewFSM(baseDir string, metadataStore MetadataStore) (*FSM, error) {
+	return &FSM{
 		metadataStore: metadataStore,
 		BaseDir:       baseDir,
 	}, nil
 }
 
-func (c *MetadataFSM) Apply(l *raft.Log) interface{} {
-	metadataEvent, err := protocol.DecodeMetadataEvent(l.Data)
+func (c *FSM) Apply(l *raft.Log) interface{} {
+	metadataEvent, err := DecodeMetadataEvent(l.Data)
 	if err != nil {
 		return err
 	}
@@ -35,7 +34,7 @@ func (c *MetadataFSM) Apply(l *raft.Log) interface{} {
 
 // Snapshot serializes the metadata store under the lock so Persist() works on a
 // frozen copy and is safe to call without holding the FSM lock.
-func (c *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
+func (c *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	data, err := c.metadataStore.Snapshot()
@@ -45,7 +44,7 @@ func (c *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	return &metadataSnapshot{data: data}, nil
 }
 
-func (c *MetadataFSM) Restore(r io.ReadCloser) error {
+func (c *FSM) Restore(r io.ReadCloser) error {
 	defer r.Close()
 	data, err := io.ReadAll(r)
 	if err != nil {

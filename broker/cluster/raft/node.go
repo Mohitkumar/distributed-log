@@ -1,0 +1,217 @@
+package raft
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb"
+	"github.com/mohitkumar/mlog/broker/config"
+	"go.uber.org/zap"
+)
+
+const (
+	SnapshotThreshold   = 10000
+	SnapshotInterval    = 10
+	RetainSnapshotCount = 10
+)
+
+type RaftNode struct {
+	Logger     *zap.Logger
+	raft       *raft.Raft
+	raftConfig *raft.Config
+	LocalAddr  raft.ServerAddress
+	cfg        config.Config
+}
+
+func NewRaftNode(cfg config.Config, metadataStore MetadataStore, logger *zap.Logger) (*RaftNode, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	fsm, err := NewFSM(cfg.RaftConfig.Dir, metadataStore)
+	if err != nil {
+		return nil, err
+	}
+	raftNode, raftConfig, localAddr, err := setupRaft(fsm, cfg.RaftConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	c := &RaftNode{
+		Logger:     logger,
+		raft:       raftNode,
+		raftConfig: raftConfig,
+		LocalAddr:  localAddr,
+		cfg:        cfg,
+	}
+	rpcAddr, err := cfg.RPCAddr()
+	if err != nil {
+		return nil, err
+	}
+	c.Logger.Info("coordinator started", zap.String("raft_addr", cfg.RaftConfig.Address), zap.String("rpc_addr", rpcAddr))
+	return c, nil
+}
+
+func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, *raft.Config, raft.ServerAddress, error) {
+	raftBindAddr := cfg.Address
+	if cfg.BindAddress != "" {
+		raftBindAddr = cfg.BindAddress
+	}
+	raftAdvertiseAddr := cfg.Address
+	raftConfig := raft.DefaultConfig()
+	raftConfig.SnapshotThreshold = uint64(SnapshotThreshold)
+	raftConfig.SnapshotInterval = time.Duration(SnapshotInterval) * time.Second
+	raftConfig.LocalID = raft.ServerID(cfg.ID)
+	raftConfig.LogLevel = cfg.LogLevel
+
+	advertiseAddr, err := net.ResolveTCPAddr("tcp", raftAdvertiseAddr)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to resolve Raft advertise address %s: %w", raftAdvertiseAddr, err)
+	}
+	transport, err := raft.NewTCPTransport(raftBindAddr, advertiseAddr, 3, 10*time.Second, os.Stderr)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to make TCP transport bind %s advertise %s: %w", raftBindAddr, raftAdvertiseAddr, err)
+	}
+	snapshots, err := raft.NewFileSnapshotStore(cfg.Dir, RetainSnapshotCount, os.Stderr)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to create snapshot store at %s: %w", cfg.Dir, err)
+	}
+	boltDB, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, "raft.db"))
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to create bolt store: %w", err)
+	}
+	logStore, err := NewLogStore(cfg.Dir)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to create log store: %w", err)
+	}
+	ra, err := raft.NewRaft(raftConfig, fsm, logStore, boltDB, snapshots, transport)
+	if err != nil {
+		return nil, nil, "", ErrNewRaft(err)
+	}
+	return ra, raftConfig, transport.LocalAddr(), nil
+}
+
+func (c *RaftNode) Join(id, raftAddr, rpcAddr string) error {
+	if !c.IsLeader() {
+		c.Logger.Error("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+		return nil
+	}
+	c.Logger.Info("join requested", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+	configFuture := c.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		return err
+	}
+	serverID := raft.ServerID(id)
+	serverAddr := raft.ServerAddress(raftAddr)
+	for _, srv := range configFuture.Configuration().Servers {
+		if srv.ID == serverID || srv.Address == serverAddr {
+			if srv.ID == serverID && srv.Address == serverAddr {
+				return nil
+			}
+			removeFuture := c.raft.RemoveServer(serverID, 0, 5*time.Second)
+			if err := removeFuture.Error(); err != nil {
+				return err
+			}
+		}
+	}
+	addFuture := c.raft.AddVoter(serverID, serverAddr, 0, 5*time.Second)
+	if err := addFuture.Error(); err != nil {
+		c.Logger.Error("raft add voter failed", zap.Error(err), zap.String("node_id", id))
+		return err
+	}
+	c.Logger.Info("node joined cluster", zap.String("joined_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+	return nil
+}
+
+func (c *RaftNode) Leave(id string) error {
+	if !c.IsLeader() {
+		c.Logger.Error("not leader, skipping leave", zap.String("leaving_node_id", id))
+		return nil
+	}
+	c.Logger.Info("leave requested", zap.String("leaving_node_id", id))
+	removeFuture := c.raft.RemoveServer(raft.ServerID(id), 0, 5*time.Second)
+	if err := removeFuture.Error(); err != nil {
+		c.Logger.Error("raft remove server failed", zap.Error(err), zap.String("node_id", id))
+		return err
+	}
+	c.Logger.Info("node left cluster", zap.String("left_node_id", id))
+	return nil
+}
+
+func (c *RaftNode) IsLeader() bool {
+	return c.raft.State() == raft.Leader
+}
+
+func (c *RaftNode) ApplyEvent(data []byte) error {
+	f := c.raft.Apply(data, 5*time.Second)
+	if err := f.Error(); err != nil {
+		return ErrRaftApply(err)
+	}
+	return nil
+}
+
+func (c *RaftNode) GetRaftLeaderNodeID() (string, error) {
+	_, id := c.raft.LeaderWithID()
+	return string(id), nil
+}
+
+// RaftServerIDs returns the current Raft cluster server IDs (for reconciliation with Serf).
+func (c *RaftNode) RaftServerIDs() ([]string, error) {
+	f := c.raft.GetConfiguration()
+	if err := f.Error(); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(f.Configuration().Servers))
+	for _, s := range f.Configuration().Servers {
+		ids = append(ids, string(s.ID))
+	}
+	return ids, nil
+}
+
+func (c *RaftNode) WaitforRaftReady(timeout time.Duration) error {
+	timeoutc := time.After(timeout)
+	ticker := time.NewTicker(time.Second)
+	for {
+		select {
+		case <-timeoutc:
+			return fmt.Errorf("timed out waiting for raft ready")
+		case <-ticker.C:
+			c.Logger.Info("waiting for raft ready", zap.String("leader", string(c.raft.Leader())))
+			if c.raft.Leader() != "" {
+				return nil
+			}
+		}
+	}
+}
+
+func (c *RaftNode) IsRaftReady() bool {
+	return c.raft.Leader() != ""
+}
+
+func (c *RaftNode) Start() error {
+	cfg := c.cfg.RaftConfig
+	raftConfig := c.raftConfig
+	if cfg.Boostatrap {
+		configuration := raft.Configuration{
+			Servers: []raft.Server{
+				{
+					ID:      raftConfig.LocalID,
+					Address: c.LocalAddr,
+				},
+			},
+		}
+		if err := c.raft.BootstrapCluster(configuration).Error(); err != nil {
+			return ErrBootstrapCluster(err)
+		}
+	}
+	return nil
+}
+
+func (c *RaftNode) Shutdown() error {
+	c.Logger.Info("coordinator shutting down")
+	f := c.raft.Shutdown()
+	return f.Error()
+}
