@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mohitkumar/mlog/api/protocol"
 	"github.com/mohitkumar/mlog/broker/cluster/discovery"
 	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
 	"github.com/mohitkumar/mlog/broker/config"
@@ -21,36 +22,159 @@ type MemberLister interface {
 }
 
 // Cluster is the write path for cluster-wide state: it drives Raft consensus and
-// membership (Join/Leave), and issues the metadata events (create/delete topic,
-// leader change, ISR update) that ClusterMetadataStore applies. Address/membership
-// queries are answered from Raft's own voter configuration reconciled with Serf
-// gossip (see AliveNodeIDs, NodeRPCAddr) rather than a separate replicated node map.
+// membership (Join/Leave), owns the Raft-replicated metadata store (ClusterMetadataStore
+// is the FSM state), and issues the metadata events (create/delete topic, leader change,
+// ISR update) that store applies. Address/membership queries are answered from Raft's
+// own voter configuration reconciled with Serf gossip (see AliveNodeIDs, NodeRPCAddr)
+// rather than a separate replicated node map.
 type Cluster struct {
-	Logger *zap.Logger
-	node   *raft.RaftNode
-	cfg    config.Config
+	Logger        *zap.Logger
+	node          *raft.RaftNode
+	cfg           config.Config
+	metadataStore *ClusterMetadataStore
 
-	mu            sync.RWMutex
-	memberLister  MemberLister
-	onNodeRemoved func(nodeID string)
+	mu              sync.RWMutex
+	memberLister    MemberLister
+	onNodeRemoved   func(nodeID string)
+	onMetadataEvent func(ev *raft.MetadataEvent) error
 }
 
-func NewCluster(cfg config.Config, metadataStore raft.MetadataStore, logger *zap.Logger) (*Cluster, error) {
+// notifyingMetadataStore wraps ClusterMetadataStore to satisfy raft.MetadataStore
+// while also handing every successfully-applied event to Cluster's registered
+// onMetadataEvent callback, synchronously, in the same order Raft applied them. This
+// runs on Raft's own FSM-apply path (same timing topic.TopicManager relied on before
+// this type existed) — callers that create a topic and immediately produce to it rely
+// on the local log already being open by the time the create call returns, so this
+// must stay synchronous rather than handed off to a separate goroutine.
+type notifyingMetadataStore struct {
+	*ClusterMetadataStore
+	notify func(ev *raft.MetadataEvent) error
+}
+
+func (s *notifyingMetadataStore) Apply(ev *raft.MetadataEvent) error {
+	if err := s.ClusterMetadataStore.Apply(ev); err != nil {
+		return err
+	}
+	if s.notify != nil {
+		return s.notify(ev)
+	}
+	return nil
+}
+
+func NewCluster(cfg config.Config, logger *zap.Logger) (*Cluster, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	node, err := raft.NewRaftNode(cfg, metadataStore, logger)
+	c := &Cluster{
+		Logger:        logger,
+		cfg:           cfg,
+		metadataStore: NewClusterMetadataStore(),
+	}
+	node, err := raft.NewRaftNode(cfg, &notifyingMetadataStore{ClusterMetadataStore: c.metadataStore, notify: c.notifyMetadataEvent}, logger)
 	if err != nil {
 		return nil, err
 	}
-	c := &Cluster{
-		Logger: logger,
-		node:   node,
-		cfg:    cfg,
-	}
+	c.node = node
 	c.node.Start()
 	go c.watchPeerChanges()
 	return c, nil
+}
+
+// — Topic metadata queries (read-only; answered from the local, Raft-replicated
+// ClusterMetadataStore — see the type's own docs for why it never touches Raft
+// directly). topic.TopicManager reaches cluster metadata only through these, never by
+// holding the store itself. —
+
+// TopicExists reports whether topic exists.
+func (c *Cluster) TopicExists(topic string) bool {
+	return c.metadataStore.TopicExists(topic)
+}
+
+// TopicNames returns all topic names.
+func (c *Cluster) TopicNames() []string {
+	return c.metadataStore.TopicNames()
+}
+
+// TopicInfo returns a point-in-time snapshot of topic's leader/epoch/replica state,
+// or ok=false if topic doesn't exist.
+func (c *Cluster) TopicInfo(topic string) (info protocol.TopicInfo, ok bool) {
+	t := c.metadataStore.GetTopic(topic)
+	if t == nil {
+		return protocol.TopicInfo{}, false
+	}
+	leaderID, epoch, replicaSnaps := t.Snapshot()
+	replicas := make([]protocol.ReplicaInfo, 0, len(replicaSnaps))
+	for _, rs := range replicaSnaps {
+		replicas = append(replicas, protocol.ReplicaInfo{NodeID: rs.ReplicaNodeID, IsISR: rs.IsISR, LEO: rs.LEO})
+	}
+	return protocol.TopicInfo{Name: topic, LeaderNodeID: leaderID, LeaderEpoch: epoch, Replicas: replicas}, true
+}
+
+// TopicLeaderNodeID returns the current leader node ID for topic, or ok=false if
+// topic doesn't exist.
+func (c *Cluster) TopicLeaderNodeID(topic string) (leaderNodeID string, ok bool) {
+	t := c.metadataStore.GetTopic(topic)
+	if t == nil {
+		return "", false
+	}
+	return t.LeaderID(), true
+}
+
+// TopicHasReplica reports whether nodeID is a tracked replica of topic.
+func (c *Cluster) TopicHasReplica(topic, nodeID string) bool {
+	t := c.metadataStore.GetTopic(topic)
+	if t == nil {
+		return false
+	}
+	return t.HasReplica(nodeID)
+}
+
+// TopicMinISRLeo returns min(localLEO, all of topic's in-sync replicas' LEO) — used to
+// compute the consumer-visible high watermark. Returns localLEO unchanged if topic
+// doesn't exist.
+func (c *Cluster) TopicMinISRLeo(topic string, localLEO uint64) uint64 {
+	t := c.metadataStore.GetTopic(topic)
+	if t == nil {
+		return localLEO
+	}
+	return t.MinISRLeo(localLEO)
+}
+
+// NodeIDWithLeastTopics returns whichever of candidateNodeIDs currently leads the
+// fewest topics, for CreateTopic leader placement.
+func (c *Cluster) NodeIDWithLeastTopics(candidateNodeIDs []string) (string, error) {
+	return c.metadataStore.NodeIDWithLeastTopics(candidateNodeIDs)
+}
+
+// RecordReplicaFetch updates replicaNodeID's LEO for topic from a Fetch call and
+// recomputes its ISR status against lagThreshold; ok is false if topic doesn't exist.
+// Local only (not Raft-replicated) — the caller applies the returned isr status via
+// ApplyIsrUpdateEventInternal if it changed.
+func (c *Cluster) RecordReplicaFetch(topic, replicaNodeID string, leo int64, lagThreshold uint64, localLEO uint64) (isr bool, ok bool) {
+	t := c.metadataStore.GetTopic(topic)
+	if t == nil {
+		return false, false
+	}
+	return t.RecordReplicaFetch(replicaNodeID, leo, lagThreshold, localLEO), true
+}
+
+// SetOnMetadataEvent registers a callback invoked synchronously, in commit order, right
+// after each metadata event is applied to MetadataStore() — see notifyingMetadataStore.
+// Used by topic.TopicManager to react to cluster metadata changes (open/close local logs).
+func (c *Cluster) SetOnMetadataEvent(fn func(ev *raft.MetadataEvent) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onMetadataEvent = fn
+}
+
+func (c *Cluster) notifyMetadataEvent(ev *raft.MetadataEvent) error {
+	c.mu.RLock()
+	fn := c.onMetadataEvent
+	c.mu.RUnlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(ev)
 }
 
 // SetMemberLister sets the Serf member lister used for Raft-Serf reconciliation and

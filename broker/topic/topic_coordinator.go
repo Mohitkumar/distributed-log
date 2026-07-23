@@ -1,12 +1,55 @@
 package topic
 
-// TopicCoordinator is the interface TopicManager uses to apply metadata events (Raft or fake in tests)
-// and to query cluster membership. Implemented by *cluster.Cluster and *tests.FakeTopicCoordinator.
+import (
+	"github.com/mohitkumar/mlog/api/protocol"
+	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
+)
+
+// TopicCoordinator is the interface TopicManager uses for every cluster-metadata
+// query, cluster-metadata mutation, and cluster-membership query it needs. TopicManager
+// never holds or touches cluster-internal storage directly — only through this
+// interface — which keeps topic a lean consumer of cluster state rather than a second
+// owner of it. Implemented by *cluster.Cluster and *tests.FakeTopicCoordinator.
 type TopicCoordinator interface {
+	// — metadata queries (read-only) —
+
+	TopicExists(topic string) bool
+	TopicNames() []string
+	// TopicInfo returns a point-in-time snapshot of topic's leader/epoch/replica
+	// state, or ok=false if topic doesn't exist.
+	TopicInfo(topic string) (info protocol.TopicInfo, ok bool)
+	// TopicLeaderNodeID returns the current leader node ID for topic, or ok=false
+	// if topic doesn't exist.
+	TopicLeaderNodeID(topic string) (leaderNodeID string, ok bool)
+	// TopicHasReplica reports whether nodeID is a tracked replica of topic.
+	TopicHasReplica(topic, nodeID string) bool
+	// TopicMinISRLeo returns min(localLEO, all of topic's in-sync replicas' LEO),
+	// used to compute the consumer-visible high watermark.
+	TopicMinISRLeo(topic string, localLEO uint64) uint64
+	// NodeIDWithLeastTopics returns whichever of candidateNodeIDs currently leads
+	// the fewest topics, for CreateTopic leader placement.
+	NodeIDWithLeastTopics(candidateNodeIDs []string) (string, error)
+
+	// — metadata mutation (Raft-applied; only take effect when called on the Raft leader) —
+
 	ApplyCreateTopicEvent(topic string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error
 	ApplyDeleteTopicEventInternal(topic string) error
 	ApplyIsrUpdateEventInternal(topic, replicaNodeID string, isr bool) error
 	ApplyLeaderChangeEvent(topic, leaderNodeID string, leaderEpoch int64) error
+	// RecordReplicaFetch updates replicaNodeID's LEO for topic from a Fetch call and
+	// recomputes its ISR status against lagThreshold; ok is false if topic doesn't
+	// exist. Local only (not Raft-replicated) — the caller applies the returned isr
+	// status via ApplyIsrUpdateEventInternal if it changed.
+	RecordReplicaFetch(topic, replicaNodeID string, leo int64, lagThreshold uint64, localLEO uint64) (isr bool, ok bool)
+
+	// — event subscription —
+
+	// SetOnMetadataEvent registers a callback invoked synchronously, in commit order,
+	// right after each metadata event is applied.
+	SetOnMetadataEvent(fn func(ev *raft.MetadataEvent) error)
+
+	// — cluster/raft state —
+
 	IsLeader() bool
 	GetRaftLeaderNodeID() (string, error)
 	// AliveNodeIDs returns the current cluster member node IDs, used as the

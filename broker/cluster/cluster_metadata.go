@@ -13,10 +13,6 @@ import (
 
 var _ raft.MetadataStore = (*ClusterMetadataStore)(nil)
 
-// DefaultISRLagThreshold is the max number of records a replica can lag behind
-// the leader and still be considered in-sync.
-const DefaultISRLagThreshold = uint64(100)
-
 // ReplicaState is one replica's view within a topic. IsISR is Raft-replicated
 // (changed only via Apply, so it's identical on every node). LEO is written
 // locally (via RecordReplicaFetch, not through Raft) by whichever node
@@ -298,20 +294,6 @@ func (s *ClusterMetadataStore) NodeIDWithLeastTopics(candidateNodeIDs []string) 
 		}
 	}
 	return bestID, nil
-}
-
-// PickReplicaNodeIds returns up to replicaCount node IDs from candidateNodeIDs, excluding leaderNodeID.
-func PickReplicaNodeIds(leaderNodeID string, replicaCount int, candidateNodeIDs []string) ([]string, error) {
-	var others []string
-	for _, id := range candidateNodeIDs {
-		if id != leaderNodeID {
-			others = append(others, id)
-		}
-	}
-	if len(others) < replicaCount {
-		return nil, ErrNotEnoughNodesf(replicaCount, len(others))
-	}
-	return others[:replicaCount], nil
 }
 
 // Apply applies a single Raft-committed metadata event to the store.

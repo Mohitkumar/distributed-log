@@ -17,7 +17,7 @@ type logStore struct {
 }
 
 func NewLogStore(dir string) (*logStore, error) {
-	log, err := log.NewLog(filepath.Join(dir, "__metadata__.log"))
+	log, err := log.NewLog(filepath.Join(dir, "__cluster_metadata__.log"))
 	if err != nil {
 		return nil, err
 	}

@@ -57,20 +57,19 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 	logger = logger.With(zap.String("node_id", cmdHelper.NodeConfig.ID))
 	zap.ReplaceGlobals(logger)
 
-	// TopicManager implements raft.MetadataStore (wrapping ClusterMetadataStore);
-	// create it first so Cluster can use it.
-	metadataStore := cluster.NewClusterMetadataStore()
-	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, metadataStore, nil, logger)
-	if err != nil {
-		logger.Sync()
-		return fmt.Errorf("create topic manager: %w", err)
-	}
-	coord, err := cluster.NewCluster(cmdHelper.Config, topicMgr, logger)
+	// Cluster owns the Raft-replicated metadata store; create it first so
+	// TopicManager can query and react to it.
+	coord, err := cluster.NewCluster(cmdHelper.Config, logger)
 	if err != nil {
 		logger.Sync()
 		return err
 	}
-	topicMgr.SetCoordinator(coord)
+	topicMgr, err := topic.NewTopicManager(cmdHelper.NodeConfig.DataDir, coord, logger)
+	if err != nil {
+		logger.Sync()
+		return fmt.Errorf("create topic manager: %w", err)
+	}
+	coord.SetOnMetadataEvent(topicMgr.HandleMetadataEvent)
 	topicMgr.SetCurrentNodeID(cmdHelper.NodeConfig.ID)
 	coord.SetOnNodeRemoved(topicMgr.ReassignLeadersForDeadNode)
 	cmdHelper.coord = coord

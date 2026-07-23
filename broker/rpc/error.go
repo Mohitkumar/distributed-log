@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/mohitkumar/mlog/api/protocol"
-	"github.com/mohitkumar/mlog/broker/cluster"
 	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
 	"github.com/mohitkumar/mlog/broker/log"
 	"github.com/mohitkumar/mlog/broker/segment"
@@ -26,7 +25,7 @@ func CodeFor(err error) int32 {
 		return protocol.CodeTopicNotFound
 	case errors.Is(err, topic.ErrTopicExists):
 		return protocol.CodeTopicExists
-	case errors.Is(err, cluster.ErrNotEnoughNodes):
+	case errors.Is(err, topic.ErrNotEnoughNodes):
 		return protocol.CodeNotEnoughNodes
 	case errors.Is(err, topic.ErrCannotReachLeader):
 		return protocol.CodeCannotReachLeader

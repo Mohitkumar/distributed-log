@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/mohitkumar/mlog/api/protocol"
-	"github.com/mohitkumar/mlog/broker/cluster"
 	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
 	"github.com/mohitkumar/mlog/broker/log"
 	"go.uber.org/zap"
@@ -20,8 +19,8 @@ const defaultMetadataLogInterval = 30 * time.Second
 
 // Topic is the per-broker runtime state for a topic: its locally-open log (only
 // present on nodes that are currently leader or replica for it) and nothing else.
-// Cluster-wide state (leader, epoch, replica set, ISR) lives in
-// cluster.ClusterMetadataStore, not here — see TopicManager.metadataStore.
+// Cluster-wide state (leader, epoch, replica set, ISR) lives behind TopicCoordinator,
+// not here — see TopicManager.coordinator.
 type Topic struct {
 	mu     sync.RWMutex
 	Name   string          `json:"name"`
@@ -29,15 +28,12 @@ type Topic struct {
 	Logger *zap.Logger     `json:"-"`
 }
 
-var _ raft.MetadataStore = (*TopicManager)(nil)
-
 type TopicManager struct {
 	mu                   sync.RWMutex
 	Topics               map[string]*Topic // local runtime state only: open log handles, keyed by topic name
 	BaseDir              string
 	Logger               *zap.Logger
 	CurrentNodeID        string // Local node ID from config; not persisted.
-	metadataStore        *cluster.ClusterMetadataStore
 	coordinator          TopicCoordinator
 	stopPeriodic         chan struct{}
 	stopReplication      chan struct{}
@@ -45,36 +41,24 @@ type TopicManager struct {
 	ISRLagThreshold      uint64 // max record lag for ISR membership
 }
 
-// NewTopicManager creates a TopicManager. metadataStore holds the cluster-wide
-// (Raft-replicated) topic metadata; if nil, an empty one is created (mainly for
-// convenience in tests that don't care about it). Coordinator may be nil and set
-// later via SetCoordinator (e.g. when TopicManager is used as MetadataStore for Cluster).
-func NewTopicManager(baseDir string, metadataStore *cluster.ClusterMetadataStore, coord TopicCoordinator, logger *zap.Logger) (*TopicManager, error) {
+// NewTopicManager creates a TopicManager. coord is the cluster coordinator (real
+// *cluster.Cluster or a test fake) — the sole source of cluster-wide (Raft-replicated)
+// topic metadata; TopicManager never stores that metadata itself, only queries it.
+func NewTopicManager(baseDir string, coord TopicCoordinator, logger *zap.Logger) (*TopicManager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
-	}
-	if metadataStore == nil {
-		metadataStore = cluster.NewClusterMetadataStore()
 	}
 	tm := &TopicManager{
 		Topics:          make(map[string]*Topic),
 		BaseDir:         baseDir,
 		Logger:          logger,
-		metadataStore:   metadataStore,
 		coordinator:     coord,
 		stopPeriodic:    make(chan struct{}),
-		ISRLagThreshold: cluster.DefaultISRLagThreshold,
+		ISRLagThreshold: DefaultISRLagThreshold,
 	}
 	go tm.periodicLog(defaultMetadataLogInterval)
 	tm.replicationBatchSize = DefaultReplicationBatchSize
 	return tm, nil
-}
-
-// SetCoordinator sets the coordinator (e.g. after Cluster is created with this TopicManager as MetadataStore).
-func (tm *TopicManager) SetCoordinator(c TopicCoordinator) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	tm.coordinator = c
 }
 
 // SetCurrentNodeID sets this node's ID (from config); not persisted in Raft state.
@@ -91,23 +75,20 @@ func (tm *TopicManager) currentNodeID() string {
 }
 
 func (tm *TopicManager) IsLeader(topic string) (bool, error) {
-	t := tm.metadataStore.GetTopic(topic)
-	if t == nil {
+	leaderID, ok := tm.coordinator.TopicLeaderNodeID(topic)
+	if !ok {
 		return false, ErrTopicNotFoundf(topic)
 	}
-	return t.LeaderID() == tm.currentNodeID(), nil
+	return leaderID == tm.currentNodeID(), nil
 }
 
 // GetTopicLeaderRPCAddr returns the RPC address of the current leader for the given topic.
 func (tm *TopicManager) GetTopicLeaderRPCAddr(topic string) (string, error) {
-	t := tm.metadataStore.GetTopic(topic)
-	if t == nil {
+	leaderID, ok := tm.coordinator.TopicLeaderNodeID(topic)
+	if !ok {
 		return "", ErrTopicNotFoundf(topic)
 	}
-	if tm.coordinator == nil {
-		return "", fmt.Errorf("topic: no coordinator")
-	}
-	addr, ok := tm.coordinator.NodeRPCAddr(t.LeaderID())
+	addr, ok := tm.coordinator.NodeRPCAddr(leaderID)
 	if !ok {
 		return "", ErrTopicNotFoundf(topic)
 	}
@@ -135,9 +116,6 @@ func (tm *TopicManager) ensureLocalTopic(name string) *Topic {
 
 // GetRaftLeaderRPCAddr returns the RPC address of the current Raft (metadata) leader.
 func (tm *TopicManager) GetRaftLeaderRPCAddr() (string, error) {
-	if tm.coordinator == nil {
-		return "", fmt.Errorf("topic: no coordinator")
-	}
 	leaderNodeID, err := tm.coordinator.GetRaftLeaderNodeID()
 	if err != nil {
 		return "", err
@@ -151,24 +129,21 @@ func (tm *TopicManager) GetRaftLeaderRPCAddr() (string, error) {
 
 // CreateTopic applies a CreateTopic event via Raft and returns the chosen leader and replica set.
 // Must be called on the Raft leader (client should use GetRaftLeader first). Replicas are created
-// when each node applies the event in Apply() via ensureLocalLogForTopic.
+// when each node applies the event via HandleMetadataEvent's ensureLocalLogForTopic.
 func (tm *TopicManager) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
-	if tm.coordinator == nil {
-		return nil, fmt.Errorf("topic: no coordinator")
-	}
 	c := tm.coordinator
 	if !c.IsLeader() {
 		return nil, fmt.Errorf("create topic must be sent to Raft leader: %w", ErrCannotReachLeader)
 	}
-	if tm.metadataStore.TopicExists(req.Topic) {
+	if c.TopicExists(req.Topic) {
 		return nil, ErrTopicExistsf(req.Topic)
 	}
 	candidates := c.AliveNodeIDs()
-	leaderNodeID, err := tm.metadataStore.NodeIDWithLeastTopics(candidates)
+	leaderNodeID, err := c.NodeIDWithLeastTopics(candidates)
 	if err != nil {
 		return nil, err
 	}
-	replicaNodeIds, err := cluster.PickReplicaNodeIds(leaderNodeID, int(req.ReplicaCount), candidates)
+	replicaNodeIds, err := PickReplicaNodeIds(leaderNodeID, int(req.ReplicaCount), candidates)
 	if err != nil {
 		return nil, ErrCreateTopic(err)
 	}
@@ -181,14 +156,11 @@ func (tm *TopicManager) CreateTopic(ctx context.Context, req *protocol.CreateTop
 
 // DeleteTopic applies a DeleteTopic event via Raft. Must be called on the Raft leader (client should use GetRaftLeader first).
 func (tm *TopicManager) DeleteTopic(ctx context.Context, req *protocol.DeleteTopicRequest) (*protocol.DeleteTopicResponse, error) {
-	if tm.coordinator == nil {
-		return nil, fmt.Errorf("topic: no coordinator")
-	}
 	c := tm.coordinator
 	if !c.IsLeader() {
 		return nil, fmt.Errorf("delete topic must be sent to Raft leader: %w", ErrCannotReachLeader)
 	}
-	if !tm.metadataStore.TopicExists(req.Topic) {
+	if !c.TopicExists(req.Topic) {
 		return nil, ErrTopicNotFoundf(req.Topic)
 	}
 	tm.Logger.Info("delete topic via Raft", zap.String("topic", req.Topic))
@@ -200,11 +172,11 @@ func (tm *TopicManager) DeleteTopic(ctx context.Context, req *protocol.DeleteTop
 
 // GetLeader returns the leader log view for a topic (this node must be the leader).
 func (tm *TopicManager) GetLeader(topic string) (*log.LogManager, error) {
-	tmeta := tm.metadataStore.GetTopic(topic)
-	if tmeta == nil {
+	leaderID, ok := tm.coordinator.TopicLeaderNodeID(topic)
+	if !ok {
 		return nil, ErrTopicNotFoundf(topic)
 	}
-	if tmeta.LeaderID() != tm.currentNodeID() {
+	if leaderID != tm.currentNodeID() {
 		return nil, ErrThisNodeNotLeaderf(topic)
 	}
 	t := tm.lookupTopic(topic)
@@ -227,28 +199,14 @@ func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
 
 // ListTopics returns topic names with leader and replica info. Any node can serve this (metadata is replicated).
 func (tm *TopicManager) ListTopics() *protocol.ListTopicsResponse {
-	names := tm.metadataStore.TopicNames()
+	names := tm.coordinator.TopicNames()
 	out := make([]protocol.TopicInfo, 0, len(names))
 	for _, name := range names {
-		t := tm.metadataStore.GetTopic(name)
-		if t == nil {
+		info, ok := tm.coordinator.TopicInfo(name)
+		if !ok {
 			continue
 		}
-		leaderID, epoch, replicaSnaps := t.Snapshot()
-		replicas := make([]protocol.ReplicaInfo, 0, len(replicaSnaps))
-		for _, rs := range replicaSnaps {
-			replicas = append(replicas, protocol.ReplicaInfo{
-				NodeID: rs.ReplicaNodeID,
-				IsISR:  rs.IsISR,
-				LEO:    rs.LEO,
-			})
-		}
-		out = append(out, protocol.TopicInfo{
-			Name:         name,
-			LeaderNodeID: leaderID,
-			LeaderEpoch:  epoch,
-			Replicas:     replicas,
-		})
+		out = append(out, info)
 	}
 	return &protocol.ListTopicsResponse{Topics: out}
 }
@@ -258,18 +216,14 @@ func (tm *TopicManager) ListTopics() *protocol.ListTopicsResponse {
 // node is leader or replica.
 func (tm *TopicManager) RestoreFromMetadata() error {
 	currentNodeID := tm.currentNodeID()
-	topicNames := tm.metadataStore.TopicNames()
+	topicNames := tm.coordinator.TopicNames()
 	if len(topicNames) == 0 {
 		return nil
 	}
 	tm.Logger.Info("restore from metadata", zap.Int("topic_count", len(topicNames)), zap.Strings("topics", topicNames))
 	for _, topicName := range topicNames {
-		tmeta := tm.metadataStore.GetTopic(topicName)
-		if tmeta == nil {
-			continue
-		}
-		leaderID := tmeta.LeaderID()
-		if leaderID == "" {
+		leaderID, ok := tm.coordinator.TopicLeaderNodeID(topicName)
+		if !ok || leaderID == "" {
 			continue
 		}
 		if leaderID == currentNodeID {
@@ -281,10 +235,10 @@ func (tm *TopicManager) RestoreFromMetadata() error {
 			// replicas exist (otherwise HW stays 0 until replicas report in).
 			if t := tm.lookupTopic(topicName); t != nil {
 				if l := t.GetLog(); l != nil {
-					l.SetHighWatermark(tmeta.MinISRLeo(l.LEO()))
+					l.SetHighWatermark(tm.coordinator.TopicMinISRLeo(topicName, l.LEO()))
 				}
 			}
-		} else if tmeta.HasReplica(currentNodeID) {
+		} else if tm.coordinator.TopicHasReplica(topicName, currentNodeID) {
 			if err := tm.restoreReplicaTopic(topicName, leaderID); err != nil {
 				tm.Logger.Warn("restore replica topic failed", zap.String("topic", topicName), zap.Error(err))
 				continue
@@ -345,12 +299,8 @@ func (tm *TopicManager) ListReplicaTopics() []ReplicaTopicInfo {
 		if t.GetLog() == nil {
 			continue
 		}
-		tmeta := tm.metadataStore.GetTopic(names[i])
-		if tmeta == nil {
-			continue
-		}
-		leaderID := tmeta.LeaderID()
-		if leaderID == currentNodeID {
+		leaderID, ok := tm.coordinator.TopicLeaderNodeID(names[i])
+		if !ok || leaderID == currentNodeID {
 			continue
 		}
 		out = append(out, ReplicaTopicInfo{TopicName: names[i], LeaderNodeID: leaderID})
@@ -431,10 +381,6 @@ func (tm *TopicManager) ApplyRecordBatch(topicName string, values [][]byte) erro
 // RecordReplicaLEOFromFetch is called by the leader when it serves a Fetch from a replica (ReplicaNodeID set).
 // It updates the replica's LEO and applies an ISR update via Raft.
 func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName, replicaNodeID string, leo int64) error {
-	tmeta := tm.metadataStore.GetTopic(topicName)
-	if tmeta == nil {
-		return nil
-	}
 	t := tm.lookupTopic(topicName)
 	var localLEO uint64
 	var l *log.LogManager
@@ -446,25 +392,23 @@ func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName
 	}
 	lagThreshold := tm.ISRLagThreshold
 	if lagThreshold == 0 {
-		lagThreshold = cluster.DefaultISRLagThreshold
+		lagThreshold = DefaultISRLagThreshold
 	}
-	isr := tmeta.RecordReplicaFetch(replicaNodeID, leo, lagThreshold, localLEO)
-	if l != nil {
-		l.SetHighWatermark(tmeta.MinISRLeo(localLEO))
-	}
-	if tm.coordinator == nil {
+	isr, ok := tm.coordinator.RecordReplicaFetch(topicName, replicaNodeID, leo, lagThreshold, localLEO)
+	if !ok {
 		return nil
+	}
+	if l != nil {
+		l.SetHighWatermark(tm.coordinator.TopicMinISRLeo(topicName, localLEO))
 	}
 	return tm.coordinator.ApplyIsrUpdateEventInternal(topicName, replicaNodeID, isr)
 }
 
-// Apply applies a Raft-committed metadata event: first to the cluster metadata store
-// (canonical, Raft-replicated topic state), then any local side effects (opening or
-// closing this node's on-disk log) that follow from it.
-func (tm *TopicManager) Apply(ev *raft.MetadataEvent) error {
-	if err := tm.metadataStore.Apply(ev); err != nil {
-		return err
-	}
+// HandleMetadataEvent reacts to a metadata event that has already been applied to the
+// canonical, Raft-replicated cluster metadata (see TopicCoordinator.SetOnMetadataEvent)
+// with any local side effects that follow from it: opening or closing this node's
+// on-disk log.
+func (tm *TopicManager) HandleMetadataEvent(ev *raft.MetadataEvent) error {
 	switch ev.EventType {
 	case raft.MetadataEventTypeCreateTopic:
 		e, err := raft.DecodeCreateTopicEvent(ev.Data)
@@ -565,7 +509,7 @@ func (tm *TopicManager) removeLocalTopic(topicName string) {
 // callback fires too but no-ops, since only the Raft leader can successfully propose
 // the resulting leader-change event anyway.
 func (tm *TopicManager) ReassignLeadersForDeadNode(nodeID string) {
-	if tm.coordinator == nil || !tm.coordinator.IsLeader() {
+	if !tm.coordinator.IsLeader() {
 		return
 	}
 	type leaderChange struct {
@@ -574,31 +518,27 @@ func (tm *TopicManager) ReassignLeadersForDeadNode(nodeID string) {
 		epoch     int64
 	}
 	var changes []leaderChange
-	for _, topicName := range tm.metadataStore.TopicNames() {
-		t := tm.metadataStore.GetTopic(topicName)
-		if t == nil {
-			continue
-		}
-		leaderNodeID, epoch, replicas := t.Snapshot()
-		if leaderNodeID != nodeID {
+	for _, topicName := range tm.coordinator.TopicNames() {
+		info, ok := tm.coordinator.TopicInfo(topicName)
+		if !ok || info.LeaderNodeID != nodeID {
 			continue
 		}
 		var newLeader string
-		for _, rs := range replicas {
-			if rs.ReplicaNodeID == nodeID || !rs.IsISR {
+		for _, rs := range info.Replicas {
+			if rs.NodeID == nodeID || !rs.IsISR {
 				continue
 			}
-			if !tm.coordinator.IsNodeAlive(rs.ReplicaNodeID) {
+			if !tm.coordinator.IsNodeAlive(rs.NodeID) {
 				continue
 			}
-			newLeader = rs.ReplicaNodeID
+			newLeader = rs.NodeID
 			break
 		}
 		if newLeader == "" {
 			tm.Logger.Warn("no ISR replica for leadership", zap.String("topic", topicName), zap.String("old_leader_node_id", nodeID))
 			continue
 		}
-		changes = append(changes, leaderChange{topic: topicName, newLeader: newLeader, epoch: epoch + 1})
+		changes = append(changes, leaderChange{topic: topicName, newLeader: newLeader, epoch: info.LeaderEpoch + 1})
 	}
 	if len(changes) == 0 {
 		return
@@ -612,17 +552,6 @@ func (tm *TopicManager) ReassignLeadersForDeadNode(nodeID string) {
 			}
 		}
 	}()
-}
-
-// Snapshot serializes the cluster metadata store, for Raft snapshot persistence.
-func (tm *TopicManager) Snapshot() ([]byte, error) {
-	return tm.metadataStore.Snapshot()
-}
-
-// Restore replaces the cluster metadata store's contents from a previously-taken Snapshot.
-// Call RestoreFromMetadata() afterward to open local logs based on the restored state.
-func (tm *TopicManager) Restore(data []byte) error {
-	return tm.metadataStore.Restore(data)
 }
 
 func (tm *TopicManager) periodicLog(interval time.Duration) {

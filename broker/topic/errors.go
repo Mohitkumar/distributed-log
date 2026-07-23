@@ -19,7 +19,12 @@ var (
 	ErrInvalidAckMode      = errors.New("invalid ack mode")
 	ErrValuesEmpty         = errors.New("values cannot be empty")
 	ErrTimeoutCatchUp      = errors.New("timeout before all followers caught up")
+	ErrNotEnoughNodes      = errors.New("not enough nodes")
 )
+
+func ErrNotEnoughNodesf(need, have int) error {
+	return fmt.Errorf("not enough nodes: need %d, have %d: %w", need, have, ErrNotEnoughNodes)
+}
 
 func ErrTopicExistsf(topic string) error {
 	return fmt.Errorf("topic %s already exists: %w", topic, ErrTopicExists)

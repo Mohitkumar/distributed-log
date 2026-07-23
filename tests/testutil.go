@@ -97,10 +97,11 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 
 	// Start RPC server on an ephemeral port.
 	fakeCoord := NewFakeTopicCoordinator("node-1", rpcAddr)
-	topicMgr, err := topic.NewTopicManager(baseDir, cluster.NewClusterMetadataStore(), fakeCoord, logger)
+	topicMgr, err := topic.NewTopicManager(baseDir, fakeCoord, logger)
 	if err != nil {
 		t.Fatalf("NewTopicManager: %v", err)
 	}
+	fakeCoord.SetOnMetadataEvent(topicMgr.HandleMetadataEvent)
 	consumerMgr, err := consumermgr.NewConsumerManager(baseDir)
 	if err != nil {
 		t.Fatalf("NewConsumerManager: %v", err)
@@ -114,7 +115,6 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	fakeCoord.RPCAddr = srv.Addr
 	fakeCoord.AddNode(fakeCoord.NodeID, srv.Addr)
 	syncFakeNodesToTopicManager(topicMgr, fakeCoord)
-	fakeCoord.SetReplicationTarget(topicMgr) // so ApplyCreateTopicEvent also applies to TopicManager
 
 	return &TestServer{
 		TestServerComponents: &TestServerComponents{
@@ -155,18 +155,20 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	fake2 := NewFakeTopicCoordinator("node-2", server2Addr)
 
 	// Topic managers and consumer managers.
-	server1TopicMgr, err := topic.NewTopicManager(server1BaseDir, cluster.NewClusterMetadataStore(), fake1, logger1)
+	server1TopicMgr, err := topic.NewTopicManager(server1BaseDir, fake1, logger1)
 	if err != nil {
 		t.Fatalf("NewTopicManager server1: %v", err)
 	}
+	fake1.SetOnMetadataEvent(server1TopicMgr.HandleMetadataEvent)
 	server1ConsumerMgr, err := consumermgr.NewConsumerManager(server1BaseDir)
 	if err != nil {
 		t.Fatalf("NewConsumerManager server1: %v", err)
 	}
-	server2TopicMgr, err := topic.NewTopicManager(server2BaseDir, cluster.NewClusterMetadataStore(), fake2, logger2)
+	server2TopicMgr, err := topic.NewTopicManager(server2BaseDir, fake2, logger2)
 	if err != nil {
 		t.Fatalf("NewTopicManager server2: %v", err)
 	}
+	fake2.SetOnMetadataEvent(server2TopicMgr.HandleMetadataEvent)
 	server2ConsumerMgr, err := consumermgr.NewConsumerManager(server2BaseDir)
 	if err != nil {
 		t.Fatalf("NewConsumerManager server2: %v", err)
@@ -196,8 +198,6 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	// Sync fake nodes into each TopicManager so CreateTopic and replication see the cluster.
 	syncFakeNodesToTopicManager(server1TopicMgr, fake1)
 	syncFakeNodesToTopicManager(server2TopicMgr, fake2)
-	fake1.SetReplicationTarget(server1TopicMgr)
-	fake2.SetReplicationTarget(server2TopicMgr)
 
 	// Deterministically treat server1 as "leader" for tests that care.
 	fake1.IsRaftLeader = true
@@ -448,18 +448,18 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 
 		logger := testLoggerSilent(nc.nodeID)
 
-		// Create topic manager first (implements raft.MetadataStore)
-		tm, err := topic.NewTopicManager(nc.basePath, cluster.NewClusterMetadataStore(), nil, logger)
-		if err != nil {
-			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
-		}
-
-		// Create coordinator
-		coord, err := cluster.NewCluster(cfg, tm, logger)
+		// Create coordinator first (owns the Raft-replicated metadata store).
+		coord, err := cluster.NewCluster(cfg, logger)
 		if err != nil {
 			t.Fatalf("NewCluster %s: %v", nc.nodeID, err)
 		}
-		tm.SetCoordinator(coord)
+
+		// Create topic manager
+		tm, err := topic.NewTopicManager(nc.basePath, coord, logger)
+		if err != nil {
+			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
+		}
+		coord.SetOnMetadataEvent(tm.HandleMetadataEvent)
 		tm.SetCurrentNodeID(nc.nodeID)
 		coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
 
@@ -542,18 +542,18 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 
 		logger := testLoggerSilent(nc.nodeID)
 
-		// Create topic manager first (implements raft.MetadataStore)
-		tm, err := topic.NewTopicManager(nc.basePath, cluster.NewClusterMetadataStore(), nil, logger)
-		if err != nil {
-			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
-		}
-
-		// Create coordinator
-		coord, err := cluster.NewCluster(cfg, tm, logger)
+		// Create coordinator first (owns the Raft-replicated metadata store).
+		coord, err := cluster.NewCluster(cfg, logger)
 		if err != nil {
 			t.Fatalf("NewCluster %s: %v", nc.nodeID, err)
 		}
-		tm.SetCoordinator(coord)
+
+		// Create topic manager
+		tm, err := topic.NewTopicManager(nc.basePath, coord, logger)
+		if err != nil {
+			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
+		}
+		coord.SetOnMetadataEvent(tm.HandleMetadataEvent)
 		tm.SetCurrentNodeID(nc.nodeID)
 		coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
 
