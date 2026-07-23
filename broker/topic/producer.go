@@ -108,9 +108,7 @@ func (tm *TopicManager) waitForAllFollowersToCatchUp(ctx context.Context, t *Top
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timeout:
-			if t.Logger != nil {
-				t.Logger.Warn("followers catch-up timeout", zap.String("topic", t.Name), zap.Uint64("required_offset", offset))
-			}
+			tm.Logger.Warn("followers catch-up timeout", zap.String("topic", t.Name), zap.Uint64("required_offset", offset))
 			return ErrTimeoutCatchUp
 		}
 	}

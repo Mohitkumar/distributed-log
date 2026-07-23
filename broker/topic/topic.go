@@ -22,10 +22,9 @@ const defaultMetadataLogInterval = 30 * time.Second
 // Cluster-wide state (leader, epoch, replica set, ISR) lives behind TopicCoordinator,
 // not here — see TopicManager.coordinator.
 type Topic struct {
-	mu     sync.RWMutex
-	Name   string          `json:"name"`
-	Log    *log.LogManager `json:"-"`
-	Logger *zap.Logger     `json:"-"`
+	mu   sync.RWMutex
+	Name string          `json:"name"`
+	Log  *log.LogManager `json:"-"`
 }
 
 type TopicManager struct {
@@ -108,7 +107,7 @@ func (tm *TopicManager) ensureLocalTopic(name string) *Topic {
 	defer tm.mu.Unlock()
 	t, ok := tm.Topics[name]
 	if !ok {
-		t = &Topic{Name: name, Logger: tm.Logger}
+		t = &Topic{Name: name}
 		tm.Topics[name] = t
 	}
 	return t
