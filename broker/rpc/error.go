@@ -37,7 +37,7 @@ func CodeFor(err error) int32 {
 		return protocol.CodeTimeoutCatchUp
 	case errors.Is(err, topic.ErrValuesEmpty):
 		return protocol.CodeValuesRequired
-	case errors.Is(err, log.ErrLogOffsetOutOfRange), errors.Is(err, segment.ErrSegmentOffsetNotFound):
+	case errors.Is(err, log.ErrLogOffsetOutOfRange), errors.Is(err, segment.ErrSegmentOffsetNotFound), errors.Is(err, log.ErrLogOffsetBeyondHW):
 		return protocol.CodeReadOffset
 	case errors.Is(err, raft.ErrRaftNoLeader), errors.Is(err, raft.ErrRaftNodeNotFound):
 		return protocol.CodeRaftLeaderUnavailable

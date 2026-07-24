@@ -55,7 +55,11 @@ func (c *ConsumerManager) GetOffset(id string, topic string) (uint64, error) {
 	if !ok {
 		return 0, ErrOffsetNotFoundForID(id, topic)
 	}
-	return topicMap[topic], nil
+	off, ok := topicMap[topic]
+	if !ok {
+		return 0, ErrOffsetNotFoundForID(id, topic)
+	}
+	return off, nil
 }
 
 // Recover replays the offset log into the in-memory cache.

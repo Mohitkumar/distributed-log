@@ -96,7 +96,7 @@ func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, *raft.Config, r
 
 func (c *RaftNode) Join(id, raftAddr, rpcAddr string) error {
 	if !c.IsLeader() {
-		c.Logger.Error("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
+		c.Logger.Debug("not leader, skipping join", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
 		return nil
 	}
 	c.Logger.Info("join requested", zap.String("joining_node_id", id), zap.String("raft_addr", raftAddr), zap.String("rpc_addr", rpcAddr))
@@ -128,7 +128,7 @@ func (c *RaftNode) Join(id, raftAddr, rpcAddr string) error {
 
 func (c *RaftNode) Leave(id string) error {
 	if !c.IsLeader() {
-		c.Logger.Error("not leader, skipping leave", zap.String("leaving_node_id", id))
+		c.Logger.Debug("not leader, skipping leave", zap.String("leaving_node_id", id))
 		return nil
 	}
 	c.Logger.Info("leave requested", zap.String("leaving_node_id", id))

@@ -40,7 +40,7 @@ func (s *RpcServer) Fetch(ctx context.Context, req *protocol.FetchRequest) (*pro
 		if req.ReplicaNodeID != "" {
 			_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, int64(req.Offset))
 		}
-		return nil, &protocol.RPCError{Code: protocol.CodeReadOffset, Message: fmt.Sprintf("failed to read offset %d: %v", off, err)}
+		return nil, FromError(err)
 	}
 	// Segment returns [offset 8 bytes][value]; strip header for response
 	const offWidth = 8
@@ -88,14 +88,15 @@ func (s *RpcServer) FetchBatch(ctx context.Context, req *protocol.FetchBatchRequ
 	var entries []*protocol.LogEntry
 	useUncommitted := req.ReplicaNodeID != ""
 
+	var readErr error
 	for n := uint32(0); n < maxCount; n++ {
 		var raw []byte
 		if useUncommitted {
-			raw, err = leaderLog.ReadUncommitted(off)
+			raw, readErr = leaderLog.ReadUncommitted(off)
 		} else {
-			raw, err = leaderLog.Read(off)
+			raw, readErr = leaderLog.Read(off)
 		}
-		if err != nil {
+		if readErr != nil {
 			break
 		}
 		value := raw
@@ -110,10 +111,16 @@ func (s *RpcServer) FetchBatch(ctx context.Context, req *protocol.FetchBatchRequ
 		replicaLEO := int64(off)
 		if len(entries) == 0 {
 			replicaLEO = int64(req.Offset)
-			_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, replicaLEO)
-			return nil, &protocol.RPCError{Code: protocol.CodeReadOffset, Message: fmt.Sprintf("no data at offset %d (replica caught up)", req.Offset)}
 		}
 		_ = s.topicManager.RecordReplicaLEOFromFetch(ctx, req.Topic, req.ReplicaNodeID, replicaLEO)
+	}
+
+	// maxCount defaults to 1 above, so the loop always runs at least once: entries is
+	// empty here only if the very first read failed, in which case readErr is set —
+	// return it (classified via FromError) rather than a bare empty success, so a real
+	// I/O/corruption error can't masquerade as "no data yet".
+	if len(entries) == 0 {
+		return nil, FromError(readErr)
 	}
 
 	return &protocol.FetchBatchResponse{Entries: entries}, nil

@@ -27,7 +27,6 @@ func NewLog(dir string) (*Log, error) {
 	err := os.MkdirAll(dir, 0755)
 
 	if err != nil {
-		fmt.Printf("Error creating directory: %v\n", err)
 		return nil, err
 	}
 

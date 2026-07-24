@@ -136,6 +136,10 @@ func (tm *TopicManager) ReplicateFromLeader(ctx context.Context, leaderID string
 	}
 	defer cc.Close()
 	cc.SetReplicaNodeID(tm.CurrentNodeID)
+	// This loop already retries at tick granularity (abort this leader, try again next
+	// tick — see runReplicationThread/replicateAllTopics); the client's own
+	// retry-on-topic-not-ready would just stack another retry budget on top.
+	cc.DisableTopicNotReadyRetry()
 
 	consumerID := fmt.Sprintf("replicate-%s-%s", tm.CurrentNodeID, leaderID)
 
