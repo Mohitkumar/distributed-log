@@ -16,19 +16,15 @@ import (
 
 const defaultMetadataLogInterval = 30 * time.Second
 
-// Topic is the per-broker runtime state for a topic: its locally-open log (only
-// present on nodes that are currently leader or replica for it) and nothing else.
-// Cluster-wide state (leader, epoch, replica set, ISR) lives behind TopicCoordinator,
-// not here — see TopicManager.coordinator.
-type Topic struct {
-	mu   sync.RWMutex
-	Name string          `json:"name"`
-	Log  *log.LogManager `json:"-"`
-}
-
 type TopicManager struct {
-	mu                   sync.RWMutex
-	Topics               map[string]*Topic // local runtime state only: open log handles, keyed by topic name
+	mu sync.RWMutex
+	// Topics is local runtime state only: this node's open log handles, keyed by
+	// topic name. Cluster-wide state (leader, epoch, replica set, ISR) lives behind
+	// TopicCoordinator, not here. A name only ever appears here once its log.LogManager
+	// is fully open — publishing happens in one step (see publishLocalLog), so tm.mu
+	// alone is enough to guard it; there's no separate per-entry lock or "reserved but
+	// not yet ready" state to worry about.
+	Topics               map[string]*log.LogManager
 	BaseDir              string
 	Logger               *zap.Logger
 	CurrentNodeID        string // Local node ID from config; not persisted.
@@ -47,7 +43,7 @@ func NewTopicManager(baseDir string, coord TopicCoordinator, logger *zap.Logger)
 		logger = zap.NewNop()
 	}
 	tm := &TopicManager{
-		Topics:          make(map[string]*Topic),
+		Topics:          make(map[string]*log.LogManager),
 		BaseDir:         baseDir,
 		Logger:          logger,
 		coordinator:     coord,
@@ -93,23 +89,21 @@ func (tm *TopicManager) GetTopicLeaderRPCAddr(topic string) (string, error) {
 	return addr, nil
 }
 
-// lookupTopic returns the local runtime Topic for name, or nil if not found. Safe for concurrent use.
-func (tm *TopicManager) lookupTopic(name string) *Topic {
+// lookupTopic returns the locally-open log for name, or nil if not open here. Safe for concurrent use.
+func (tm *TopicManager) lookupTopic(name string) *log.LogManager {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return tm.Topics[name]
 }
 
-// ensureLocalTopic returns the local runtime Topic for name, creating an empty one if absent.
-func (tm *TopicManager) ensureLocalTopic(name string) *Topic {
+// publishLocalLog makes l the locally-open log for name, visible to any goroutine via
+// lookupTopic/GetLog from this point on. Call only once l is fully constructed —
+// there's no "reserve then fill in" step here, so a single tm.mu-guarded map write
+// is all the synchronization this needs.
+func (tm *TopicManager) publishLocalLog(name string, l *log.LogManager) {
 	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	t, ok := tm.Topics[name]
-	if !ok {
-		t = &Topic{Name: name}
-		tm.Topics[name] = t
-	}
-	return t
+	tm.Topics[name] = l
+	tm.mu.Unlock()
 }
 
 // GetRaftLeaderRPCAddr returns the RPC address of the current Raft (metadata) leader.
@@ -179,33 +173,24 @@ func (tm *TopicManager) GetLeader(topic string) (*log.LogManager, error) {
 	if leaderID != tm.currentNodeID() {
 		return nil, ErrThisNodeNotLeaderf(topic)
 	}
-	t := tm.lookupTopic(topic)
-	if t == nil {
-		return nil, ErrTopicNotFoundf(topic)
-	}
-	l := t.GetLog()
+	l := tm.lookupTopic(topic)
 	if l == nil {
-		// Present in tm.Topics but its log hasn't finished opening yet (reconcile is
-		// mid-flight) — treat the same as not found rather than handing back a Topic
-		// whose Log a caller might use unchecked (see HandleProduce).
 		return nil, ErrTopicNotFoundf(topic)
 	}
 	return l, nil
 }
 
-// GetTopic returns the local runtime topic object (open log handle). Returns
-// ErrTopicNotFound both when topic isn't known locally at all and when it's present
-// but its log hasn't finished opening yet (reconcileLocalTopics is mid-flight) — either
-// way there's nothing usable to hand back yet, and callers (e.g. Produce/Fetch) already
-// treat ErrTopicNotFound as retriable (see client.RetryTopicNotReady).
-func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	t, ok := tm.Topics[topic]
-	if !ok || t.GetLog() == nil {
+// GetLog returns the locally-open log for topic. Returns ErrTopicNotFound both when
+// topic isn't known locally at all and when its log hasn't finished opening yet
+// (reconcileLocalTopics is mid-flight) — either way there's nothing usable to hand
+// back yet, and callers (e.g. Produce/Fetch) already treat ErrTopicNotFound as
+// retriable (see client.RetryTopicNotReady).
+func (tm *TopicManager) GetLog(topic string) (*log.LogManager, error) {
+	l := tm.lookupTopic(topic)
+	if l == nil {
 		return nil, ErrTopicNotFoundf(topic)
 	}
-	return t, nil
+	return l, nil
 }
 
 // ListTopics returns topic names with leader and replica info. Any node can serve this (metadata is replicated).
@@ -244,10 +229,8 @@ func (tm *TopicManager) RestoreFromMetadata() error {
 			}
 			// Initialize HW from local state so consumers can read immediately if no
 			// replicas exist (otherwise HW stays 0 until replicas report in).
-			if t := tm.lookupTopic(topicName); t != nil {
-				if l := t.GetLog(); l != nil {
-					l.SetHighWatermark(tm.coordinator.TopicMinISRLeo(topicName, l.LEO()))
-				}
+			if l := tm.lookupTopic(topicName); l != nil {
+				l.SetHighWatermark(tm.coordinator.TopicMinISRLeo(topicName, l.LEO()))
 			}
 		} else if tm.coordinator.TopicHasReplica(topicName, currentNodeID) {
 			if err := tm.restoreReplicaTopic(topicName, leaderID); err != nil {
@@ -261,30 +244,28 @@ func (tm *TopicManager) RestoreFromMetadata() error {
 
 // restoreLeaderTopic opens the local leader log for the topic if not already open.
 func (tm *TopicManager) restoreLeaderTopic(topic string) error {
-	t := tm.ensureLocalTopic(topic)
-	if t.GetLog() != nil {
+	if tm.lookupTopic(topic) != nil {
 		return nil
 	}
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
 		return ErrCreateLog(err)
 	}
-	t.SetLog(logManager)
+	tm.publishLocalLog(topic, logManager)
 	tm.Logger.Info("leader topic restored", zap.String("topic", topic))
 	return nil
 }
 
 // restoreReplicaTopic creates a replica for the topic on this node (called by leader via RPC).
 func (tm *TopicManager) restoreReplicaTopic(topic string, leaderId string) error {
-	t := tm.ensureLocalTopic(topic)
-	if t.GetLog() != nil {
+	if tm.lookupTopic(topic) != nil {
 		return ErrTopicAlreadyReplicaf(topic)
 	}
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topic))
 	if err != nil {
 		return ErrCreateLogReplica(err)
 	}
-	t.SetLog(logManager)
+	tm.publishLocalLog(topic, logManager)
 	tm.Logger.Info("replica topic restored", zap.String("topic", topic), zap.String("leader_id", leaderId))
 	return nil
 }
@@ -294,37 +275,27 @@ func (tm *TopicManager) restoreReplicaTopic(topic string, leaderId string) error
 func (tm *TopicManager) ListReplicaTopics() []ReplicaTopicInfo {
 	tm.mu.RLock()
 	names := make([]string, 0, len(tm.Topics))
-	topics := make([]*Topic, 0, len(tm.Topics))
 	currentNodeID := tm.CurrentNodeID
-	for name, t := range tm.Topics {
-		if t == nil {
-			continue
+	for name, l := range tm.Topics {
+		if l != nil {
+			names = append(names, name)
 		}
-		names = append(names, name)
-		topics = append(topics, t)
 	}
 	tm.mu.RUnlock()
 
 	var out []ReplicaTopicInfo
-	for i, t := range topics {
-		if t.GetLog() == nil {
-			continue
-		}
-		leaderID, ok := tm.coordinator.TopicLeaderNodeID(names[i])
+	for _, name := range names {
+		leaderID, ok := tm.coordinator.TopicLeaderNodeID(name)
 		if !ok || leaderID == currentNodeID {
 			continue
 		}
-		out = append(out, ReplicaTopicInfo{TopicName: names[i], LeaderNodeID: leaderID})
+		out = append(out, ReplicaTopicInfo{TopicName: name, LeaderNodeID: leaderID})
 	}
 	return out
 }
 
 func (tm *TopicManager) GetLEO(topicName string) (uint64, bool) {
-	t := tm.lookupTopic(topicName)
-	if t == nil {
-		return 0, false
-	}
-	l := t.GetLog()
+	l := tm.lookupTopic(topicName)
 	if l == nil {
 		return 0, false
 	}
@@ -339,11 +310,7 @@ func (tm *TopicManager) ApplyChunk(topicName string, rawChunk []byte) error {
 	if err != nil {
 		return err
 	}
-	t := tm.lookupTopic(topicName)
-	if t == nil {
-		return nil
-	}
-	l := t.GetLog()
+	l := tm.lookupTopic(topicName)
 	if l == nil {
 		return nil
 	}
@@ -360,11 +327,7 @@ func (tm *TopicManager) ApplyRecord(topicName string, value []byte) error {
 	if len(value) == 0 {
 		return nil
 	}
-	t := tm.lookupTopic(topicName)
-	if t == nil {
-		return nil
-	}
-	l := t.GetLog()
+	l := tm.lookupTopic(topicName)
 	if l == nil {
 		return nil
 	}
@@ -377,11 +340,7 @@ func (tm *TopicManager) ApplyRecordBatch(topicName string, values [][]byte) erro
 	if len(values) == 0 {
 		return nil
 	}
-	t := tm.lookupTopic(topicName)
-	if t == nil {
-		return nil
-	}
-	l := t.GetLog()
+	l := tm.lookupTopic(topicName)
 	if l == nil {
 		return nil
 	}
@@ -392,14 +351,10 @@ func (tm *TopicManager) ApplyRecordBatch(topicName string, values [][]byte) erro
 // RecordReplicaLEOFromFetch is called by the leader when it serves a Fetch from a replica (ReplicaNodeID set).
 // It updates the replica's LEO and applies an ISR update via Raft.
 func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName, replicaNodeID string, leo int64) error {
-	t := tm.lookupTopic(topicName)
+	l := tm.lookupTopic(topicName)
 	var localLEO uint64
-	var l *log.LogManager
-	if t != nil {
-		l = t.GetLog()
-		if l != nil {
-			localLEO = l.LEO()
-		}
+	if l != nil {
+		localLEO = l.LEO()
 	}
 	lagThreshold := tm.ISRLagThreshold
 	if lagThreshold == 0 {
@@ -462,8 +417,7 @@ func (tm *TopicManager) reconcileLocalTopic(topicName string) {
 	if !isLocal {
 		return
 	}
-	t := tm.ensureLocalTopic(topicName)
-	if t.GetLog() != nil {
+	if tm.lookupTopic(topicName) != nil {
 		return
 	}
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
@@ -471,23 +425,21 @@ func (tm *TopicManager) reconcileLocalTopic(topicName string) {
 		tm.Logger.Warn("open log failed", zap.String("topic", topicName), zap.Error(err))
 		return
 	}
-	t.SetLog(logManager)
+	tm.publishLocalLog(topicName, logManager)
 	tm.Logger.Debug("local log opened", zap.String("topic", topicName), zap.String("leader_id", info.LeaderNodeID))
 }
 
 // removeLocalTopic closes the topic log, removes it from local bookkeeping, and deletes the topic dir.
 func (tm *TopicManager) removeLocalTopic(topicName string) {
 	tm.mu.Lock()
-	t, ok := tm.Topics[topicName]
+	l, ok := tm.Topics[topicName]
 	if ok {
 		delete(tm.Topics, topicName)
 	}
 	tm.mu.Unlock()
-	if t != nil {
-		if l := t.GetLog(); l != nil {
-			l.Close()
-			l.Delete()
-		}
+	if l != nil {
+		l.Close()
+		l.Delete()
 	}
 	_ = os.RemoveAll(filepath.Join(tm.BaseDir, topicName))
 	tm.Logger.Info("topic removed", zap.String("topic", topicName))
@@ -555,11 +507,8 @@ func (tm *TopicManager) periodicLog(interval time.Duration) {
 		case <-ticker.C:
 			tm.mu.RLock()
 			localLEOs := make(map[string]uint64, len(tm.Topics))
-			for name, t := range tm.Topics {
-				if t == nil {
-					continue
-				}
-				if l := t.GetLog(); l != nil {
+			for name, l := range tm.Topics {
+				if l != nil {
 					localLEOs[name] = l.LEO()
 				}
 			}

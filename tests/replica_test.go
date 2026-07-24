@@ -122,12 +122,12 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	// Then verify follower's replica log has the same messages
 	// Producing to the leader (above) doesn't prove the follower's own local
 	// reconciliation has happened yet — poll for it explicitly.
-	replicaTopic := waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
+	replicaLog := waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Poll until we have at least len(messages) entries (replication may be async)
 	var lastLEO uint64
 	for try := 0; try < 50; try++ {
-		lastLEO = replicaTopic.Log.LEO()
+		lastLEO = replicaLog.LEO()
 		if lastLEO >= uint64(len(messages)) {
 			break
 		}
@@ -142,7 +142,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	// Replica stores payload only (from raw chunk); segment.Read returns [offset 8][payload].
 	const offWidth = 8
 	for i, want := range messages {
-		raw, err := replicaTopic.Log.ReadUncommitted(uint64(i))
+		raw, err := replicaLog.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted(%d): %v", i, err)
 		}
@@ -193,12 +193,12 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 	// Then verify follower's replica log has the same messages
 	// Producing to the leader (above) doesn't prove the follower's own local
 	// reconciliation has happened yet — poll for it explicitly.
-	replicaTopic := waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
+	replicaLog := waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Poll until we have at least len(values) entries (replication may be async)
 	var lastLEO uint64
 	for try := 0; try < 50; try++ {
-		lastLEO = replicaTopic.Log.LEO()
+		lastLEO = replicaLog.LEO()
 		if lastLEO >= uint64(len(values)) {
 			break
 		}
@@ -213,7 +213,7 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 	// Replica stores payload only (from raw chunk); segment.Read returns [offset 8][payload].
 	const offWidth = 8
 	for i, want := range values {
-		raw, err := replicaTopic.Log.ReadUncommitted(uint64(i))
+		raw, err := replicaLog.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted(%d): %v", i, err)
 		}

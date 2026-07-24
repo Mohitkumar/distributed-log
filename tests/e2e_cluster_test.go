@@ -57,13 +57,13 @@ func TestE2E_RealCluster_BasicProduceConsume(t *testing.T) {
 	}
 
 	// Verify messages can be fetched/read from log
-	topic, err := node1.TopicManager.GetTopic(topicName)
+	l, err := node1.TopicManager.GetLog(topicName)
 	if err != nil {
-		t.Fatalf("GetTopic: %v", err)
+		t.Fatalf("GetLog: %v", err)
 	}
 
 	for i := 0; i < 5; i++ {
-		entry, err := topic.Log.ReadUncommitted(uint64(i))
+		entry, err := l.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted offset %d: %v", i, err)
 		}
@@ -129,16 +129,16 @@ func TestE2E_RealCluster_ReplicationAcrossNodes(t *testing.T) {
 
 	// Verify topic exists on all nodes
 	for idx, node := range []*RealTestServer{node1, node2, node3} {
-		topic, err := node.TopicManager.GetTopic(topicName)
+		l, err := node.TopicManager.GetLog(topicName)
 		if err != nil {
-			t.Logf("node %d: GetTopic error: %v", idx+1, err)
+			t.Logf("node %d: GetLog error: %v", idx+1, err)
 			continue
 		}
-		if topic == nil {
+		if l == nil {
 			t.Logf("node %d: topic not found", idx+1)
 			continue
 		}
-		t.Logf("node %d: topic found, LEO=%d", idx+1, topic.Log.LEO())
+		t.Logf("node %d: topic found, LEO=%d", idx+1, l.LEO())
 	}
 
 	t.Log("✓ Real cluster replication test passed")
@@ -285,13 +285,13 @@ func TestE2E_RealCluster_ConcurrentProducers(t *testing.T) {
 	}
 
 	// Verify message count
-	topic, err := node1.TopicManager.GetTopic(topicName)
+	l, err := node1.TopicManager.GetLog(topicName)
 	if err != nil {
-		t.Fatalf("GetTopic: %v", err)
+		t.Fatalf("GetLog: %v", err)
 	}
 	expectedCount := uint64(numProducers * messagesPerProducer)
-	if topic.Log.LEO() != expectedCount {
-		t.Fatalf("expected %d messages, got %d", expectedCount, topic.Log.LEO())
+	if l.LEO() != expectedCount {
+		t.Fatalf("expected %d messages, got %d", expectedCount, l.LEO())
 	}
 
 	t.Log("✓ Real cluster concurrent producers test passed")

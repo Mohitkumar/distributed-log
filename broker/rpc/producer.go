@@ -14,7 +14,7 @@ func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest)
 	if len(req.Value) == 0 {
 		return nil, Err(protocol.CodeValuesRequired, "value is required")
 	}
-	topicObj, err := srv.topicManager.GetTopic(req.Topic)
+	l, err := srv.topicManager.GetLog(req.Topic)
 	if err != nil {
 		return nil, &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: fmt.Sprintf("topic %s not found: %v", req.Topic, err)}
 	}
@@ -23,7 +23,7 @@ func (srv *RpcServer) Produce(ctx context.Context, req *protocol.ProduceRequest)
 		return nil, Err(protocol.CodeNotTopicLeader, "this node is not the topic leader; produce to the topic leader")
 	}
 
-	offset, err := srv.topicManager.HandleProduce(ctx, topicObj, &protocol.LogEntry{
+	offset, err := srv.topicManager.HandleProduce(ctx, req.Topic, l, &protocol.LogEntry{
 		Value: req.Value,
 	}, req.Acks)
 	if err != nil {
@@ -40,7 +40,7 @@ func (srv *RpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBat
 		return nil, Err(protocol.CodeValuesRequired, "values are required")
 	}
 
-	topicObj, err := srv.topicManager.GetTopic(req.Topic)
+	l, err := srv.topicManager.GetLog(req.Topic)
 	if err != nil {
 		return nil, &protocol.RPCError{Code: protocol.CodeTopicNotFound, Message: fmt.Sprintf("topic %s not found: %v", req.Topic, err)}
 	}
@@ -49,7 +49,7 @@ func (srv *RpcServer) ProduceBatch(ctx context.Context, req *protocol.ProduceBat
 		return nil, Err(protocol.CodeNotTopicLeader, "this node is not the topic leader; produce to the topic leader")
 	}
 
-	base, last, err := srv.topicManager.HandleProduceBatch(ctx, topicObj, req.Values, req.Acks)
+	base, last, err := srv.topicManager.HandleProduceBatch(ctx, req.Topic, l, req.Values, req.Acks)
 	if err != nil {
 		return nil, FromError(err)
 	}

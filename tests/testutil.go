@@ -14,6 +14,7 @@ import (
 	"github.com/mohitkumar/mlog/broker/cluster/discovery"
 	"github.com/mohitkumar/mlog/broker/config"
 	consumermgr "github.com/mohitkumar/mlog/broker/consumer"
+	"github.com/mohitkumar/mlog/broker/log"
 	"github.com/mohitkumar/mlog/broker/rpc"
 	"github.com/mohitkumar/mlog/broker/topic"
 	"go.uber.org/zap"
@@ -289,12 +290,12 @@ func (h *TwoNodeTestHelper) WaitReplicaCatchUp(topicName string, targetLEO uint6
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
 	for time.Now().Before(deadline) {
-		replicaTopic, err := h.GetFollowerTopicMgr().GetTopic(topicName)
-		if err != nil || replicaTopic == nil || replicaTopic.Log == nil {
+		replicaLog, err := h.GetFollowerTopicMgr().GetLog(topicName)
+		if err != nil || replicaLog == nil {
 			time.Sleep(pollMs)
 			continue
 		}
-		if replicaTopic.Log.LEO() >= targetLEO {
+		if replicaLog.LEO() >= targetLEO {
 			return time.Since(start), true
 		}
 		time.Sleep(pollMs)
@@ -302,19 +303,19 @@ func (h *TwoNodeTestHelper) WaitReplicaCatchUp(topicName string, targetLEO uint6
 	return time.Since(start), false
 }
 
-// waitForTopicOpen polls tm.GetTopic(topicName) until it returns a topic with a
-// non-nil local log, or fails the test after timeout. Local log-opening is now
-// reconciled on a periodic tick (see topic.TopicManager.reconcileLocalTopics) rather
-// than synchronously with the metadata event that created/assigned the topic, so tests
-// that apply a metadata event and then immediately need the local log (directly, not
-// through a client that already retries — see client.RetryTopicNotReady) must poll.
-func waitForTopicOpen(t testing.TB, tm *topic.TopicManager, topicName string, timeout time.Duration) *topic.Topic {
+// waitForTopicOpen polls tm.GetLog(topicName) until it returns a local log, or fails
+// the test after timeout. Local log-opening is now reconciled on a periodic tick (see
+// topic.TopicManager.reconcileLocalTopics) rather than synchronously with the metadata
+// event that created/assigned the topic, so tests that apply a metadata event and then
+// immediately need the local log (directly, not through a client that already retries
+// — see client.RetryTopicNotReady) must poll.
+func waitForTopicOpen(t testing.TB, tm *topic.TopicManager, topicName string, timeout time.Duration) *log.LogManager {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		top, err := tm.GetTopic(topicName)
-		if err == nil && top.GetLog() != nil {
-			return top
+		l, err := tm.GetLog(topicName)
+		if err == nil && l != nil {
+			return l
 		}
 		if !time.Now().Before(deadline) {
 			t.Fatalf("topic %q not open locally within %s", topicName, timeout)
