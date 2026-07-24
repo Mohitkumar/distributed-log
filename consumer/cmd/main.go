@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/mohitkumar/mlog/api/protocol"
-	"github.com/mohitkumar/mlog/client"
 	consumerclient "github.com/mohitkumar/mlog/consumer/client"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -53,34 +50,21 @@ func main() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			// Resolve topic leader by trying each --addrs until one returns the leader.
-			findLeader := func(ctx context.Context) (string, error) {
-				return client.TryAddrs(ctx, addrList(), func(c *client.RemoteClient) (string, error) {
-					resp, err := c.FindTopicLeader(ctx, &protocol.FindTopicLeaderRequest{Topic: topic})
-					if err != nil {
-						return "", err
-					}
-					if resp.LeaderAddr == "" {
-						return "", fmt.Errorf("empty leader address returned for topic %s", topic)
-					}
-					return resp.LeaderAddr, nil
-				})
-			}
-
-			leaderCtx, leaderCancel := context.WithTimeout(ctx, 5*time.Second)
-			leaderAddr, err := findLeader(leaderCtx)
-			leaderCancel()
+			// NewClient discovers the topic leader among --addrs and connects; Client
+			// itself handles re-discovery and reconnecting on failover from here on,
+			// so this command never has to.
+			connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
+			c, err := consumerclient.NewClient(connectCtx, addrList(), topic, id)
+			connectCancel()
 			if err != nil {
 				return err
 			}
-
-			consumerClient, err := consumerclient.NewConsumerClient(leaderAddr)
-			if err != nil {
-				return err
+			defer c.Close()
+			c.OnReconnect = func(addr string) {
+				fmt.Fprintf(os.Stderr, "reconnected to topic %q leader at %s\n", topic, addr)
 			}
-			defer consumerClient.Close()
 
-			fmt.Fprintf(os.Stderr, "connected to topic %q leader at %s\n", topic, leaderAddr)
+			fmt.Fprintf(os.Stderr, "connected to topic %q leader at %s\n", topic, c.LeaderAddr())
 
 			offsetExplicitlySet := cmd.Flags().Changed("offset")
 			startOffset := offset
@@ -92,13 +76,10 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Starting from offset %d (explicitly specified)\n", startOffset)
 			} else {
 				fetchCtx, fetchCancel := context.WithTimeout(ctx, 5*time.Second)
-				resp, err := consumerClient.FetchOffset(fetchCtx, &protocol.FetchOffsetRequest{
-					Id:    id,
-					Topic: topic,
-				})
+				committed, err := c.FetchCommittedOffset(fetchCtx)
 				fetchCancel()
-				if err == nil && resp != nil && resp.Offset > 0 {
-					startOffset = resp.Offset
+				if err == nil && committed > 0 {
+					startOffset = committed
 					fmt.Fprintf(os.Stderr, "Resuming from offset %d (last committed)\n", startOffset)
 				} else {
 					fmt.Fprintf(os.Stderr, "No previous offset found, starting from beginning\n")
@@ -110,64 +91,21 @@ func main() {
 			pollInterval := 500 * time.Millisecond
 
 			for {
-				resp, err := consumerClient.Fetch(ctx, &protocol.FetchRequest{
-					Id:     id,
-					Topic:  topic,
-					Offset: currentOffset,
-				})
+				// Poll blocks internally (backing off pollInterval) while the topic has
+				// no new data yet, and reconnects transparently on failover — this
+				// command only ever sees "got a record" or "something's actually wrong".
+				entry, err := c.Poll(ctx, currentOffset, pollInterval)
 				if err != nil {
-					// On leader change or connection failure, re-resolve leader with retries.
-					if client.ShouldReconnect(err) {
-						fmt.Fprintln(os.Stderr, "reconnecting (leader change or connection issue)...")
-						_ = consumerClient.Close()
-
-						var newAddr string
-						for attempt := 0; attempt < 10; attempt++ {
-							leaderCtx, leaderCancel := context.WithTimeout(ctx, 5*time.Second)
-							newAddr, err = findLeader(leaderCtx)
-							leaderCancel()
-							if err == nil {
-								break
-							}
-							fmt.Fprintf(os.Stderr, "find leader attempt %d failed: %v\n", attempt+1, err)
-							time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
-						}
-						if err != nil {
-							return fmt.Errorf("failed to find new leader after retries: %w", err)
-						}
-						leaderAddr = newAddr
-
-						consumerClient, err = consumerclient.NewConsumerClient(leaderAddr)
-						if err != nil {
-							return err
-						}
-						fmt.Fprintf(os.Stderr, "reconnected to topic leader at %s\n", leaderAddr)
-						continue
-					}
-					// Offset out of range means we've caught up; back off and poll.
-					var rpcErr *protocol.RPCError
-					if errors.As(err, &rpcErr) && rpcErr.Code == protocol.CodeReadOffset {
-						time.Sleep(pollInterval)
-						continue
-					}
 					return err
-				}
-				if resp.Entry == nil {
-					time.Sleep(pollInterval)
-					continue
 				}
 
 				// Print to stdout: "offset\tvalue"
-				fmt.Printf("%d\t%s\n", resp.Entry.Offset, string(resp.Entry.Value))
+				fmt.Printf("%d\t%s\n", entry.Offset, string(entry.Value))
 
-				currentOffset = resp.Entry.Offset + 1
+				currentOffset = entry.Offset + 1
 
 				commitCtx, commitCancel := context.WithTimeout(ctx, 5*time.Second)
-				if _, err := consumerClient.CommitOffset(commitCtx, &protocol.CommitOffsetRequest{
-					Id:     id,
-					Topic:  topic,
-					Offset: currentOffset,
-				}); err != nil {
+				if err := c.Commit(commitCtx, currentOffset); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: commit offset %d failed: %v\n", currentOffset, err)
 				}
 				commitCancel()

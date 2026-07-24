@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/mohitkumar/mlog/api/protocol"
-	"github.com/mohitkumar/mlog/client"
 	producerclient "github.com/mohitkumar/mlog/producer/client"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -51,36 +50,23 @@ func main() {
 				ackMode = protocol.AckLeader
 			}
 
-			// Resolve topic leader by trying each --addrs until one returns the leader.
-			findLeader := func(ctx context.Context) (string, error) {
-				return client.TryAddrs(ctx, addrList(), func(c *client.RemoteClient) (string, error) {
-					resp, err := c.FindTopicLeader(ctx, &protocol.FindTopicLeaderRequest{Topic: topic})
-					if err != nil {
-						return "", err
-					}
-					if resp.LeaderAddr == "" {
-						return "", fmt.Errorf("empty leader address returned for topic %s", topic)
-					}
-					return resp.LeaderAddr, nil
-				})
-			}
-
 			ctx := context.Background()
 
-			leaderCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			leaderAddr, err := findLeader(leaderCtx)
+			// NewClient discovers the topic leader among --addrs and connects; Client
+			// itself handles re-discovery and reconnecting on failover from here on,
+			// so this command never has to.
+			connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			c, err := producerclient.NewClient(connectCtx, addrList(), topic)
 			cancel()
 			if err != nil {
 				return err
 			}
-
-			producerClient, err := producerclient.NewProducerClient(leaderAddr)
-			if err != nil {
-				return err
+			defer c.Close()
+			c.OnReconnect = func(addr string) {
+				fmt.Fprintf(os.Stderr, "reconnected to topic %q leader at %s\n", topic, addr)
 			}
-			defer producerClient.Close()
 
-			fmt.Fprintf(os.Stderr, "connected to topic %q leader at %s\n", topic, leaderAddr)
+			fmt.Fprintf(os.Stderr, "connected to topic %q leader at %s\n", topic, c.LeaderAddr())
 			fmt.Fprintln(os.Stderr, "enter messages, each line will be produced to the topic (Ctrl-D to exit)")
 
 			scanner := bufio.NewScanner(os.Stdin)
@@ -91,51 +77,13 @@ func main() {
 					continue
 				}
 
-				for {
-					msgCtx, cancelMsg := context.WithTimeout(ctx, 10*time.Second)
-					resp, err := producerClient.Produce(msgCtx, &protocol.ProduceRequest{
-						Topic: topic,
-						Value: []byte(line),
-						Acks:  ackMode,
-					})
-					cancelMsg()
-
-					if err == nil {
-						fmt.Printf("offset=%d\n", resp.Offset)
-						break
-					}
-
-					// On leader change or connection failure, re-resolve leader with retries.
-					if client.ShouldReconnect(err) {
-						fmt.Fprintln(os.Stderr, "reconnecting (leader change or connection issue)...")
-						_ = producerClient.Close()
-
-						var newLeaderAddr string
-						for attempt := 0; attempt < 10; attempt++ {
-							leaderCtx, cancelLeader := context.WithTimeout(ctx, 10*time.Second)
-							newLeaderAddr, err = findLeader(leaderCtx)
-							cancelLeader()
-							if err == nil {
-								break
-							}
-							fmt.Fprintf(os.Stderr, "find leader attempt %d failed: %v\n", attempt+1, err)
-							time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
-						}
-						if err != nil {
-							return fmt.Errorf("failed to find new leader after retries: %w", err)
-						}
-
-						producerClient, err = producerclient.NewProducerClient(newLeaderAddr)
-						if err != nil {
-							return err
-						}
-
-						fmt.Fprintf(os.Stderr, "reconnected to topic leader at %s\n", newLeaderAddr)
-						continue
-					}
-
+				msgCtx, cancelMsg := context.WithTimeout(ctx, 10*time.Second)
+				offset, err := c.Send(msgCtx, []byte(line), ackMode)
+				cancelMsg()
+				if err != nil {
 					return err
 				}
+				fmt.Printf("offset=%d\n", offset)
 			}
 
 			if err := scanner.Err(); err != nil {
