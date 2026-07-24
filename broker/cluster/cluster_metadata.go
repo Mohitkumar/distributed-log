@@ -13,12 +13,7 @@ import (
 
 var _ raft.MetadataStore = (*ClusterMetadataStore)(nil)
 
-// ReplicaState is one replica's view within a topic. IsISR is Raft-replicated
-// (changed only via Apply, so it's identical on every node). LEO is written
-// locally (via RecordReplicaFetch, not through Raft) by whichever node
-// currently leads the topic when it serves a Fetch from that replica — it is
-// not part of the agreed cluster state, only a convenience cache, and is
-// meaningless/stale on nodes that aren't currently leading the topic.
+// ReplicaState is one replica's view within a topic.
 type ReplicaState struct {
 	ReplicaNodeID string `json:"replica_id"`
 	LEO           int64  `json:"leo"`
@@ -33,11 +28,7 @@ type ReplicaSnapshot struct {
 }
 
 // TopicMetadata is the cluster-wide (Raft-replicated) view of one topic: its
-// current leader, epoch, and replica set. This is the equivalent of a Kafka
-// partition's controller-side registration — every broker holds an identical
-// copy, kept in sync purely by applying Raft-committed events. It deliberately
-// holds no log handle: the actual on-disk log is a per-broker runtime concern
-// owned by topic.TopicManager, not cluster metadata.
+// current leader, epoch, and replica set.
 type TopicMetadata struct {
 	mu                  sync.RWMutex
 	Name                string
@@ -121,8 +112,6 @@ func (t *TopicMetadata) AddReplicaIfAbsent(nodeID string, isr bool) {
 	t.Replicas[nodeID] = &ReplicaState{ReplicaNodeID: nodeID, LEO: 0, IsISR: isr}
 }
 
-// SetReplicaISR sets nodeID's ISR flag (creating the entry with LEO 0 if absent).
-// Called only from Apply (Raft-driven), so every node's copy converges identically.
 func (t *TopicMetadata) SetReplicaISR(nodeID string, isr bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -202,10 +191,7 @@ func (t *TopicMetadata) MarshalJSON() ([]byte, error) {
 
 // ClusterMetadataStore is the in-memory materialized view of Raft-replicated topic
 // metadata (leader/epoch/replica assignment per topic), kept consistent across every
-// node by being the Raft FSM's applied state (implements raft.MetadataStore). This is
-// the equivalent of Kafka's MetadataCache/MetadataImage: every broker holds a full
-// copy, updated only by applying Raft-committed events; queries here never touch Raft
-// directly.
+// node by being the Raft FSM's applied state (implements raft.MetadataStore).
 type ClusterMetadataStore struct {
 	mu     sync.RWMutex
 	Topics map[string]*TopicMetadata
@@ -326,8 +312,6 @@ func (s *ClusterMetadataStore) Apply(ev *raft.MetadataEvent) error {
 	return nil
 }
 
-// createTopicLocked creates the topic if absent. Caller holds s.mu. Idempotent: guards
-// against TOCTOU races between CreateTopic's existence check and Apply().
 func (s *ClusterMetadataStore) createTopicLocked(name, leaderNodeID string, leaderEpoch int64, replicaNodeIds []string) {
 	if _, exists := s.Topics[name]; exists {
 		return
@@ -360,9 +344,6 @@ func snapshotToPB(topics map[string]*TopicMetadata) *pb.MetadataSnapshot {
 		if t == nil {
 			continue
 		}
-		// Name and DesiredReplicaCount are set once at creation and never mutated
-		// afterward, so they're safe to read without t.mu. Leader/epoch/replicas can
-		// change concurrently, so those go through Snapshot() which takes t.mu.
 		leaderID, epoch, replicaSnaps := t.Snapshot()
 		replicas := make(map[string]*pb.ReplicaState, len(replicaSnaps))
 		for _, r := range replicaSnaps {

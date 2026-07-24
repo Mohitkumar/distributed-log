@@ -30,7 +30,8 @@ type TopicManager struct {
 	CurrentNodeID        string // Local node ID from config; not persisted.
 	coordinator          TopicCoordinator
 	stopPeriodic         chan struct{}
-	stopReplication      chan struct{}
+	replicationCancel    context.CancelFunc // non-nil while the replication/reconcile loops are running
+	replConns            *replicationConnCache
 	replicationBatchSize uint32
 	ISRLagThreshold      uint64 // max record lag for ISR membership
 }
@@ -48,6 +49,7 @@ func NewTopicManager(baseDir string, coord TopicCoordinator, logger *zap.Logger)
 		Logger:          logger,
 		coordinator:     coord,
 		stopPeriodic:    make(chan struct{}),
+		replConns:       newReplicationConnCache(),
 		ISRLagThreshold: DefaultISRLagThreshold,
 	}
 	go tm.periodicLog(defaultMetadataLogInterval)
@@ -400,6 +402,13 @@ func (tm *TopicManager) reconcileLocalTopics() {
 // reconcileLocalTopic opens the local log for topicName if this node is its leader or a
 // replica and no log is open yet. No-op if topicName isn't leader/replica-local here.
 func (tm *TopicManager) reconcileLocalTopic(topicName string) {
+	// Cheap check first: once a topic's log is open, steady state (the overwhelming
+	// majority of calls — this runs 20x/second per topic) never needs to touch cluster
+	// metadata at all. Only pay for TopicInfo's snapshot+replica-list copy when there's
+	// actually a chance of work to do.
+	if tm.lookupTopic(topicName) != nil {
+		return
+	}
 	info, ok := tm.coordinator.TopicInfo(topicName)
 	if !ok {
 		return
@@ -415,9 +424,6 @@ func (tm *TopicManager) reconcileLocalTopic(topicName string) {
 		}
 	}
 	if !isLocal {
-		return
-	}
-	if tm.lookupTopic(topicName) != nil {
 		return
 	}
 	logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))

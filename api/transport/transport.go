@@ -168,10 +168,21 @@ type TransportClient struct {
 	codec *protocol.Codec
 }
 
+// dialTimeout bounds how long Dial waits for the TCP handshake to complete.
+// callTimeout bounds a single request/response round trip (or a single Read/Write) on
+// an already-established connection. Without it, a peer that accepts a connection but
+// then never sends/reads data (blackholed, half-open) can hang a caller forever —
+// nothing else on the client side enforces a deadline. Symmetric with the server's own
+// handlerTimeout above.
+const (
+	dialTimeout = 5 * time.Second
+	callTimeout = 30 * time.Second
+)
+
 // Dial opens a single TCP connection to addr and enables keepalive so the connection
 // stays alive for node-to-node RPC/stream use (one connection per peer).
 func Dial(addr string) (*TransportClient, error) {
-	conn, err := net.Dial("tcp", addr)
+	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -210,6 +221,7 @@ func DialWithFallback(addr string) (*TransportClient, error) {
 func (c *TransportClient) Call(msg any) (any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.conn.SetDeadline(time.Now().Add(callTimeout))
 	if err := c.codec.Encode(c.conn, msg); err != nil {
 		return nil, err
 	}
@@ -221,6 +233,7 @@ func (c *TransportClient) Call(msg any) (any, error) {
 func (c *TransportClient) ReadResponse() (any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.conn.SetDeadline(time.Now().Add(callTimeout))
 	return c.readResponse()
 }
 
@@ -243,6 +256,7 @@ func (c *TransportClient) readResponse() (any, error) {
 func (c *TransportClient) Write(msg any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.conn.SetDeadline(time.Now().Add(callTimeout))
 	return c.codec.Encode(c.conn, msg)
 }
 
@@ -250,6 +264,7 @@ func (c *TransportClient) Write(msg any) error {
 func (c *TransportClient) Read() (any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.conn.SetDeadline(time.Now().Add(callTimeout))
 	_, resp, err := c.codec.Decode(c.conn)
 	return resp, err
 }
