@@ -2,7 +2,6 @@ package topic
 
 import (
 	"github.com/mohitkumar/mlog/api/protocol"
-	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
 )
 
 // TopicCoordinator is the interface TopicManager uses for every cluster-metadata
@@ -41,12 +40,6 @@ type TopicCoordinator interface {
 	// exist. Local only (not Raft-replicated) — the caller applies the returned isr
 	// status via ApplyIsrUpdateEventInternal if it changed.
 	RecordReplicaFetch(topic, replicaNodeID string, leo int64, lagThreshold uint64, localLEO uint64) (isr bool, ok bool)
-
-	// — event subscription —
-
-	// SetOnMetadataEvent registers a callback invoked synchronously, in commit order,
-	// right after each metadata event is applied.
-	SetOnMetadataEvent(fn func(ev *raft.MetadataEvent) error)
 
 	// — cluster/raft state —
 

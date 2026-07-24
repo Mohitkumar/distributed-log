@@ -5,6 +5,7 @@ import (
 
 	"github.com/mohitkumar/mlog/api/protocol"
 	"github.com/mohitkumar/mlog/api/transport"
+	toplevelclient "github.com/mohitkumar/mlog/client"
 )
 
 type ProducerClient struct {
@@ -24,19 +25,33 @@ func (c *ProducerClient) Close() error {
 }
 
 func (c *ProducerClient) Produce(ctx context.Context, req *protocol.ProduceRequest) (*protocol.ProduceResponse, error) {
-	resp, err := c.tc.Call(*req)
+	var resp protocol.ProduceResponse
+	err := toplevelclient.RetryTopicNotReady(ctx, func() error {
+		r, err := c.tc.Call(*req)
+		if err != nil {
+			return err
+		}
+		resp = r.(protocol.ProduceResponse)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	r := resp.(protocol.ProduceResponse)
-	return &r, nil
+	return &resp, nil
 }
 
 func (c *ProducerClient) ProduceBatch(ctx context.Context, req *protocol.ProduceBatchRequest) (*protocol.ProduceBatchResponse, error) {
-	resp, err := c.tc.Call(*req)
+	var resp protocol.ProduceBatchResponse
+	err := toplevelclient.RetryTopicNotReady(ctx, func() error {
+		r, err := c.tc.Call(*req)
+		if err != nil {
+			return err
+		}
+		resp = r.(protocol.ProduceBatchResponse)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	r := resp.(protocol.ProduceBatchResponse)
-	return &r, nil
+	return &resp, nil
 }

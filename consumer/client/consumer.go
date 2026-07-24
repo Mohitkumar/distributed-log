@@ -5,6 +5,7 @@ import (
 
 	"github.com/mohitkumar/mlog/api/protocol"
 	"github.com/mohitkumar/mlog/api/transport"
+	toplevelclient "github.com/mohitkumar/mlog/client"
 )
 
 type ConsumerClient struct {
@@ -35,12 +36,19 @@ func (c *ConsumerClient) Fetch(ctx context.Context, req *protocol.FetchRequest) 
 	if c.ReplicaNodeID != "" {
 		reqCopy.ReplicaNodeID = c.ReplicaNodeID
 	}
-	resp, err := c.tc.Call(reqCopy)
+	var resp protocol.FetchResponse
+	err := toplevelclient.RetryTopicNotReady(ctx, func() error {
+		r, err := c.tc.Call(reqCopy)
+		if err != nil {
+			return err
+		}
+		resp = r.(protocol.FetchResponse)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	r := resp.(protocol.FetchResponse)
-	return &r, nil
+	return &resp, nil
 }
 
 func (c *ConsumerClient) FetchBatch(ctx context.Context, req *protocol.FetchBatchRequest) (*protocol.FetchBatchResponse, error) {
@@ -48,12 +56,19 @@ func (c *ConsumerClient) FetchBatch(ctx context.Context, req *protocol.FetchBatc
 	if c.ReplicaNodeID != "" {
 		reqCopy.ReplicaNodeID = c.ReplicaNodeID
 	}
-	resp, err := c.tc.Call(reqCopy)
+	var resp protocol.FetchBatchResponse
+	err := toplevelclient.RetryTopicNotReady(ctx, func() error {
+		r, err := c.tc.Call(reqCopy)
+		if err != nil {
+			return err
+		}
+		resp = r.(protocol.FetchBatchResponse)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	r := resp.(protocol.FetchBatchResponse)
-	return &r, nil
+	return &resp, nil
 }
 
 func (c *ConsumerClient) CommitOffset(ctx context.Context, req *protocol.CommitOffsetRequest) (*protocol.CommitOffsetResponse, error) {

@@ -69,7 +69,6 @@ func (cmdHelper *CommandHelper) setupCoordinator() error {
 		logger.Sync()
 		return fmt.Errorf("create topic manager: %w", err)
 	}
-	coord.SetOnMetadataEvent(topicMgr.HandleMetadataEvent)
 	topicMgr.SetCurrentNodeID(cmdHelper.NodeConfig.ID)
 	coord.SetOnNodeRemoved(topicMgr.ReassignLeadersForDeadNode)
 	cmdHelper.coord = coord

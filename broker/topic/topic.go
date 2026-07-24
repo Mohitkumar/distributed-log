@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/mohitkumar/mlog/api/protocol"
-	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
 	"github.com/mohitkumar/mlog/broker/log"
 	"go.uber.org/zap"
 )
@@ -127,8 +126,10 @@ func (tm *TopicManager) GetRaftLeaderRPCAddr() (string, error) {
 }
 
 // CreateTopic applies a CreateTopic event via Raft and returns the chosen leader and replica set.
-// Must be called on the Raft leader (client should use GetRaftLeader first). Replicas are created
-// when each node applies the event via HandleMetadataEvent's ensureLocalLogForTopic.
+// Must be called on the Raft leader (client should use GetRaftLeader first). Leader/replica logs
+// are opened locally by each node's periodic reconcileLocalTopics (see replication.go), not
+// synchronously here — callers producing/consuming right after this returns should expect a brief
+// window before the topic is locally ready (see client.RetryTopicNotReady).
 func (tm *TopicManager) CreateTopic(ctx context.Context, req *protocol.CreateTopicRequest) (*protocol.CreateTopicResponse, error) {
 	c := tm.coordinator
 	if !c.IsLeader() {
@@ -182,15 +183,26 @@ func (tm *TopicManager) GetLeader(topic string) (*log.LogManager, error) {
 	if t == nil {
 		return nil, ErrTopicNotFoundf(topic)
 	}
-	return t.GetLog(), nil
+	l := t.GetLog()
+	if l == nil {
+		// Present in tm.Topics but its log hasn't finished opening yet (reconcile is
+		// mid-flight) — treat the same as not found rather than handing back a Topic
+		// whose Log a caller might use unchecked (see HandleProduce).
+		return nil, ErrTopicNotFoundf(topic)
+	}
+	return l, nil
 }
 
-// GetTopic returns the local runtime topic object (open log handle).
+// GetTopic returns the local runtime topic object (open log handle). Returns
+// ErrTopicNotFound both when topic isn't known locally at all and when it's present
+// but its log hasn't finished opening yet (reconcileLocalTopics is mid-flight) — either
+// way there's nothing usable to hand back yet, and callers (e.g. Produce/Fetch) already
+// treat ErrTopicNotFound as retriable (see client.RetryTopicNotReady).
 func (tm *TopicManager) GetTopic(topic string) (*Topic, error) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	t, ok := tm.Topics[topic]
-	if !ok {
+	if !ok || t.GetLog() == nil {
 		return nil, ErrTopicNotFoundf(topic)
 	}
 	return t, nil
@@ -403,45 +415,45 @@ func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName
 	return tm.coordinator.ApplyIsrUpdateEventInternal(topicName, replicaNodeID, isr)
 }
 
-// HandleMetadataEvent reacts to a metadata event that has already been applied to the
-// canonical, Raft-replicated cluster metadata (see TopicCoordinator.SetOnMetadataEvent)
-// with any local side effects that follow from it: opening or closing this node's
-// on-disk log.
-func (tm *TopicManager) HandleMetadataEvent(ev *raft.MetadataEvent) error {
-	switch ev.EventType {
-	case raft.MetadataEventTypeCreateTopic:
-		e, err := raft.DecodeCreateTopicEvent(ev.Data)
-		if err != nil {
-			return err
-		}
-		tm.ensureLocalLogForTopic(e.Topic, e.LeaderNodeID, e.ReplicaNodeIds)
-	case raft.MetadataEventTypeLeaderChange:
-		e, err := raft.DecodeLeaderChangeEvent(ev.Data)
-		if err != nil {
-			return err
-		}
-		tm.applyLocalLeaderChange(e.Topic, e.LeaderNodeID)
-	case raft.MetadataEventTypeDeleteTopic:
-		e, err := raft.DecodeDeleteTopicEvent(ev.Data)
-		if err != nil {
-			return err
-		}
-		tm.removeLocalTopic(e.Topic)
-	case raft.MetadataEventTypeIsrUpdate:
-		// No local side effect: ISR membership is metadata-store-only.
-	default:
-		return fmt.Errorf("unknown event type: %d", ev.EventType)
+// reconcileLocalTopics is TopicManager's periodic reaction to cluster metadata changes
+// (called from the reconcile tick in runReplicationThread, see replication.go): it
+// opens local logs for topics this node now leads or replicates, and closes/removes
+// ones no longer present in cluster metadata. Runs on a fast poll rather than being
+// pushed synchronously off Raft's apply path — see replication.go's package doc note.
+func (tm *TopicManager) reconcileLocalTopics() {
+	names := tm.coordinator.TopicNames()
+	present := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		present[name] = struct{}{}
+		tm.reconcileLocalTopic(name)
 	}
-	return nil
+
+	tm.mu.RLock()
+	localNames := make([]string, 0, len(tm.Topics))
+	for name := range tm.Topics {
+		localNames = append(localNames, name)
+	}
+	tm.mu.RUnlock()
+
+	for _, name := range localNames {
+		if _, ok := present[name]; !ok {
+			tm.removeLocalTopic(name)
+		}
+	}
 }
 
-// ensureLocalLogForTopic opens the local log for the topic if this node is leader or replica.
-func (tm *TopicManager) ensureLocalLogForTopic(topicName, leaderNodeID string, replicaNodeIds []string) {
+// reconcileLocalTopic opens the local log for topicName if this node is its leader or a
+// replica and no log is open yet. No-op if topicName isn't leader/replica-local here.
+func (tm *TopicManager) reconcileLocalTopic(topicName string) {
+	info, ok := tm.coordinator.TopicInfo(topicName)
+	if !ok {
+		return
+	}
 	currentNodeID := tm.currentNodeID()
-	isLocal := currentNodeID == leaderNodeID
+	isLocal := info.LeaderNodeID == currentNodeID
 	if !isLocal {
-		for _, rid := range replicaNodeIds {
-			if rid == currentNodeID {
+		for _, r := range info.Replicas {
+			if r.NodeID == currentNodeID {
 				isLocal = true
 				break
 			}
@@ -460,27 +472,7 @@ func (tm *TopicManager) ensureLocalLogForTopic(topicName, leaderNodeID string, r
 		return
 	}
 	t.SetLog(logManager)
-	tm.Logger.Debug("local log opened", zap.String("topic", topicName), zap.String("leader_id", leaderNodeID))
-}
-
-// applyLocalLeaderChange opens the local log if this node was just promoted to leader.
-func (tm *TopicManager) applyLocalLeaderChange(topicName, newLeaderNodeID string) {
-	currentNodeID := tm.currentNodeID()
-	_, wasLocal := tm.Topics[topicName]
-	if currentNodeID == newLeaderNodeID {
-		t := tm.ensureLocalTopic(topicName)
-		if t.GetLog() == nil {
-			logManager, err := log.NewLogManager(filepath.Join(tm.BaseDir, topicName))
-			if err != nil {
-				tm.Logger.Warn("open leader log failed", zap.String("topic", topicName), zap.Error(err))
-			} else {
-				t.SetLog(logManager)
-			}
-		}
-		tm.Logger.Info("promoted to leader", zap.String("topic", topicName))
-	} else if wasLocal {
-		tm.Logger.Info("leader changed", zap.String("topic", topicName), zap.String("new_leader", newLeaderNodeID))
-	}
+	tm.Logger.Debug("local log opened", zap.String("topic", topicName), zap.String("leader_id", info.LeaderNodeID))
 }
 
 // removeLocalTopic closes the topic log, removes it from local bookkeeping, and deletes the topic dir.

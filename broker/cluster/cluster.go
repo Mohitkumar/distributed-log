@@ -33,32 +33,9 @@ type Cluster struct {
 	cfg           config.Config
 	metadataStore *ClusterMetadataStore
 
-	mu              sync.RWMutex
-	memberLister    MemberLister
-	onNodeRemoved   func(nodeID string)
-	onMetadataEvent func(ev *raft.MetadataEvent) error
-}
-
-// notifyingMetadataStore wraps ClusterMetadataStore to satisfy raft.MetadataStore
-// while also handing every successfully-applied event to Cluster's registered
-// onMetadataEvent callback, synchronously, in the same order Raft applied them. This
-// runs on Raft's own FSM-apply path (same timing topic.TopicManager relied on before
-// this type existed) — callers that create a topic and immediately produce to it rely
-// on the local log already being open by the time the create call returns, so this
-// must stay synchronous rather than handed off to a separate goroutine.
-type notifyingMetadataStore struct {
-	*ClusterMetadataStore
-	notify func(ev *raft.MetadataEvent) error
-}
-
-func (s *notifyingMetadataStore) Apply(ev *raft.MetadataEvent) error {
-	if err := s.ClusterMetadataStore.Apply(ev); err != nil {
-		return err
-	}
-	if s.notify != nil {
-		return s.notify(ev)
-	}
-	return nil
+	mu            sync.RWMutex
+	memberLister  MemberLister
+	onNodeRemoved func(nodeID string)
 }
 
 func NewCluster(cfg config.Config, logger *zap.Logger) (*Cluster, error) {
@@ -70,7 +47,7 @@ func NewCluster(cfg config.Config, logger *zap.Logger) (*Cluster, error) {
 		cfg:           cfg,
 		metadataStore: NewClusterMetadataStore(),
 	}
-	node, err := raft.NewRaftNode(cfg, &notifyingMetadataStore{ClusterMetadataStore: c.metadataStore, notify: c.notifyMetadataEvent}, logger)
+	node, err := raft.NewRaftNode(cfg, c.metadataStore, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -156,25 +133,6 @@ func (c *Cluster) RecordReplicaFetch(topic, replicaNodeID string, leo int64, lag
 		return false, false
 	}
 	return t.RecordReplicaFetch(replicaNodeID, leo, lagThreshold, localLEO), true
-}
-
-// SetOnMetadataEvent registers a callback invoked synchronously, in commit order, right
-// after each metadata event is applied to MetadataStore() — see notifyingMetadataStore.
-// Used by topic.TopicManager to react to cluster metadata changes (open/close local logs).
-func (c *Cluster) SetOnMetadataEvent(fn func(ev *raft.MetadataEvent) error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.onMetadataEvent = fn
-}
-
-func (c *Cluster) notifyMetadataEvent(ev *raft.MetadataEvent) error {
-	c.mu.RLock()
-	fn := c.onMetadataEvent
-	c.mu.RUnlock()
-	if fn == nil {
-		return nil
-	}
-	return fn(ev)
 }
 
 // SetMemberLister sets the Serf member lister used for Raft-Serf reconciliation and

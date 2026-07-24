@@ -144,6 +144,21 @@ func ShouldReconnect(err error) bool {
 	return false
 }
 
+// IsTopicNotReady returns true if err indicates the topic or its leader isn't yet
+// visible on the node that was called — e.g. immediately after CreateTopic, before
+// that node's periodic reconciliation has opened the local log for it. Unlike
+// ShouldReconnect (which also covers network errors and leader moves, where the
+// client should invalidate its connection and find a new address), this case doesn't
+// call for reconnecting: the same node will become ready on its own shortly, so the
+// caller should just retry the same request after a short backoff.
+func IsTopicNotReady(err error) bool {
+	var rpcErr *RPCError
+	if errors.As(err, &rpcErr) {
+		return rpcErr.Code == CodeTopicNotFound || rpcErr.Code == CodeNotTopicLeader
+	}
+	return false
+}
+
 type ReplicateRequest struct {
 	Topic         string
 	Offset        uint64 // replica LEO; leader streams from this offset

@@ -71,6 +71,7 @@ func (ts *TestServer) Coordinator() *FakeTopicCoordinator {
 
 // Cleanup closes all resources associated with the test server.
 func (ts *TestServer) Cleanup() {
+	ts.TopicManager.StopReplicationThread()
 	ts.coord.StopReplicationThread()
 	_ = ts.srv.Stop()
 }
@@ -101,7 +102,6 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	if err != nil {
 		t.Fatalf("NewTopicManager: %v", err)
 	}
-	fakeCoord.SetOnMetadataEvent(topicMgr.HandleMetadataEvent)
 	consumerMgr, err := consumermgr.NewConsumerManager(baseDir)
 	if err != nil {
 		t.Fatalf("NewConsumerManager: %v", err)
@@ -115,6 +115,7 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	fakeCoord.RPCAddr = srv.Addr
 	fakeCoord.AddNode(fakeCoord.NodeID, srv.Addr)
 	syncFakeNodesToTopicManager(topicMgr, fakeCoord)
+	topicMgr.StartReplicationThread()
 
 	return &TestServer{
 		TestServerComponents: &TestServerComponents{
@@ -159,7 +160,6 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	if err != nil {
 		t.Fatalf("NewTopicManager server1: %v", err)
 	}
-	fake1.SetOnMetadataEvent(server1TopicMgr.HandleMetadataEvent)
 	server1ConsumerMgr, err := consumermgr.NewConsumerManager(server1BaseDir)
 	if err != nil {
 		t.Fatalf("NewConsumerManager server1: %v", err)
@@ -168,7 +168,6 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	if err != nil {
 		t.Fatalf("NewTopicManager server2: %v", err)
 	}
-	fake2.SetOnMetadataEvent(server2TopicMgr.HandleMetadataEvent)
 	server2ConsumerMgr, err := consumermgr.NewConsumerManager(server2BaseDir)
 	if err != nil {
 		t.Fatalf("NewConsumerManager server2: %v", err)
@@ -203,7 +202,10 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	fake1.IsRaftLeader = true
 	fake2.IsRaftLeader = false
 
-	// TopicManager owns its replication thread; start it for the follower so it replicates from leader.
+	// TopicManager owns its replication thread — every node needs it running, both to
+	// replicate from a leader and to reconcile its own local topic state (leader-side
+	// log opens included) against cluster metadata.
+	server1TopicMgr.StartReplicationThread()
 	server2TopicMgr.StartReplicationThread()
 
 	server1 := &TestServer{
@@ -298,6 +300,27 @@ func (h *TwoNodeTestHelper) WaitReplicaCatchUp(topicName string, targetLEO uint6
 		time.Sleep(pollMs)
 	}
 	return time.Since(start), false
+}
+
+// waitForTopicOpen polls tm.GetTopic(topicName) until it returns a topic with a
+// non-nil local log, or fails the test after timeout. Local log-opening is now
+// reconciled on a periodic tick (see topic.TopicManager.reconcileLocalTopics) rather
+// than synchronously with the metadata event that created/assigned the topic, so tests
+// that apply a metadata event and then immediately need the local log (directly, not
+// through a client that already retries — see client.RetryTopicNotReady) must poll.
+func waitForTopicOpen(t testing.TB, tm *topic.TopicManager, topicName string, timeout time.Duration) *topic.Topic {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		top, err := tm.GetTopic(topicName)
+		if err == nil && top.GetLog() != nil {
+			return top
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("topic %q not open locally within %s", topicName, timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // StartTwoNodesForTests starts two nodes (server1, server2) and returns a helper. Caller must call Cleanup().
@@ -459,7 +482,6 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 		if err != nil {
 			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
 		}
-		coord.SetOnMetadataEvent(tm.HandleMetadataEvent)
 		tm.SetCurrentNodeID(nc.nodeID)
 		coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
 
@@ -553,7 +575,6 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 		if err != nil {
 			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
 		}
-		coord.SetOnMetadataEvent(tm.HandleMetadataEvent)
 		tm.SetCurrentNodeID(nc.nodeID)
 		coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
 

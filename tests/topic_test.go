@@ -39,6 +39,12 @@ func TestCreateTopic(t *testing.T) {
 	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leaderCoord.NodeID, resp.ReplicaNodeIds)
 	servers.Server2().Coordinator().ApplyEvent(ev)
 
+	// Local log opening (and thus the topic directory) is reconciled on a periodic
+	// tick now, not synchronously with CreateTopic/ApplyEvent above, so poll rather
+	// than asserting immediately.
+	waitForTopicOpen(t, servers.GetLeaderTopicMgr(), topicName, time.Second)
+	waitForTopicOpen(t, servers.GetFollowerTopicMgr(), topicName, time.Second)
+
 	if _, err := os.Stat(filepath.Join(servers.Server1BaseDir(), topicName)); os.IsNotExist(err) {
 		t.Fatalf("expected topic directory %s to exist on leader, got error: %v", topicName, err)
 	}

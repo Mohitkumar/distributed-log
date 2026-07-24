@@ -22,8 +22,9 @@ type FakeNodeInfo struct {
 
 // FakeTopicCoordinator implements topic.TopicCoordinator in memory (no Raft). Mimics
 // Cluster: it owns a real *cluster.ClusterMetadataStore (the same Apply/state-machine
-// logic production uses) and, when a callback is registered via SetOnMetadataEvent,
-// forwards every applied event to it synchronously (like Cluster's notifyingMetadataStore).
+// logic production uses), applied synchronously — local reconciliation on top of that
+// metadata (opening/closing logs) is the owning topic.TopicManager's own poll-driven
+// job (see topic.TopicManager.StartReplicationThread), same as in production.
 type FakeTopicCoordinator struct {
 	mu sync.RWMutex
 
@@ -34,7 +35,6 @@ type FakeTopicCoordinator struct {
 	Nodes         map[string]*FakeNodeInfo // nodeID -> node (fake's own membership view)
 	metadataStore *cluster.ClusterMetadataStore
 
-	onMetadataEvent func(ev *raft.MetadataEvent) error
 	stopReplication chan struct{}
 }
 
@@ -107,12 +107,6 @@ func (f *FakeTopicCoordinator) RecordReplicaFetch(topicName, replicaNodeID strin
 		return false, false
 	}
 	return t.RecordReplicaFetch(replicaNodeID, leo, lagThreshold, localLEO), true
-}
-
-func (f *FakeTopicCoordinator) SetOnMetadataEvent(fn func(ev *raft.MetadataEvent) error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.onMetadataEvent = fn
 }
 
 func (f *FakeTopicCoordinator) ApplyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
@@ -257,18 +251,8 @@ func (f *FakeTopicCoordinator) ApplyEvent(ev topic.ApplyEvent) {
 	}
 }
 
-// apply applies ev to the metadata store (same logic production's ClusterMetadataStore
-// uses) and, if a callback is registered, forwards it synchronously — mirroring
-// cluster.Cluster's notifyingMetadataStore.
+// apply applies ev to the metadata store — same logic production's ClusterMetadataStore
+// uses, so this fake stays behaviorally identical to cluster.Cluster.
 func (f *FakeTopicCoordinator) apply(ev *raft.MetadataEvent) error {
-	if err := f.metadataStore.Apply(ev); err != nil {
-		return err
-	}
-	f.mu.RLock()
-	fn := f.onMetadataEvent
-	f.mu.RUnlock()
-	if fn != nil {
-		_ = fn(ev)
-	}
-	return nil
+	return f.metadataStore.Apply(ev)
 }

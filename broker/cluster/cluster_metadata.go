@@ -205,19 +205,7 @@ func (t *TopicMetadata) MarshalJSON() ([]byte, error) {
 // node by being the Raft FSM's applied state (implements raft.MetadataStore). This is
 // the equivalent of Kafka's MetadataCache/MetadataImage: every broker holds a full
 // copy, updated only by applying Raft-committed events; queries here never touch Raft
-// directly. It intentionally does not model partitions yet (planned follow-up) — each
-// topic is still a single implicit partition. It also intentionally holds no broker/
-// node registry: cluster membership is Raft's own voter configuration (who's actually
-// agreed to be a member), reconciled with Serf gossip for addresses — see
-// cluster.Cluster.AliveNodeIDs/NodeRPCAddr. Duplicating that as a second,
-// separately-Raft-replicated "Nodes map" would just be two sources of truth for the
-// same fact.
-//
-// mu is a single coarse lock over the whole store. Unlike the per-topic runtime state
-// in topic.TopicManager — mutated on every single Produce/Fetch, which needed its own
-// per-entity lock to avoid contention — this store is only mutated by control-plane
-// events (create/delete topic, leader change, ISR transition), so one lock across the
-// whole store is the right granularity.
+// directly.
 type ClusterMetadataStore struct {
 	mu     sync.RWMutex
 	Topics map[string]*TopicMetadata

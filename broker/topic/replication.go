@@ -15,6 +15,14 @@ import (
 const (
 	DefaultReplicationBatchSize = 5000
 	replicationTickInterval     = 1 * time.Second
+	// reconcileTickInterval drives reconcileLocalTopics (topic.go): opening/closing
+	// local logs in reaction to cluster metadata changes (create/delete/leader-change).
+	// Deliberately much faster than replicationTickInterval — it's a cheap in-memory
+	// diff against cluster metadata, only touching disk when something actually
+	// changed, and callers producing/consuming right after a create rely on this
+	// window being small (see client.RetryTopicNotReady, which bounds its retry
+	// budget assuming this tick rate).
+	reconcileTickInterval = 50 * time.Millisecond
 )
 
 // ReplicaTopicInfo describes a topic this node replicates from a leader.
@@ -23,7 +31,10 @@ type ReplicaTopicInfo struct {
 	LeaderNodeID string
 }
 
-// StartReplicationThread starts the replication loop (TopicManager owns the replication thread).
+// StartReplicationThread starts the background loop that both replicates from leaders
+// (ListReplicaTopics/replicateAllTopics) and reconciles local topic state against
+// cluster metadata (reconcileLocalTopics) — every node needs this running, not just
+// replicas, since leader-side log opening is also driven by it now.
 func (tm *TopicManager) StartReplicationThread() {
 	tm.mu.Lock()
 	if tm.stopReplication != nil {
@@ -47,8 +58,10 @@ func (tm *TopicManager) StopReplicationThread() {
 }
 
 func (tm *TopicManager) runReplicationThread() {
-	ticker := time.NewTicker(replicationTickInterval)
-	defer ticker.Stop()
+	replicationTicker := time.NewTicker(replicationTickInterval)
+	defer replicationTicker.Stop()
+	reconcileTicker := time.NewTicker(reconcileTickInterval)
+	defer reconcileTicker.Stop()
 
 	tm.mu.RLock()
 	stop := tm.stopReplication
@@ -65,7 +78,9 @@ func (tm *TopicManager) runReplicationThread() {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-reconcileTicker.C:
+			tm.reconcileLocalTopics()
+		case <-replicationTicker.C:
 			tm.replicateAllTopics(ctx)
 		}
 	}
