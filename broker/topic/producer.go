@@ -20,6 +20,7 @@ func (tm *TopicManager) HandleProduce(ctx context.Context, topicName string, l *
 	if err != nil {
 		return 0, err
 	}
+	tm.advanceHighWatermark(topicName, l)
 	switch acks {
 	case protocol.AckLeader:
 		return offset, nil
@@ -44,6 +45,7 @@ func (tm *TopicManager) HandleProduceBatch(ctx context.Context, topicName string
 		return 0, 0, err
 	}
 	last := base + uint64(len(values)) - 1
+	tm.advanceHighWatermark(topicName, l)
 
 	switch acks {
 	case protocol.AckLeader:
@@ -56,6 +58,18 @@ func (tm *TopicManager) HandleProduceBatch(ctx context.Context, topicName string
 	default:
 		return 0, 0, ErrInvalidAckModef(int32(acks))
 	}
+}
+
+// advanceHighWatermark recomputes and sets the topic's high watermark to
+// min(localLEO, in-sync replicas' LEO) right after appending. Without this, a topic
+// with zero replicas would never advance its HW past whatever RestoreFromMetadata set
+// it to at startup (0 for a freshly created topic) — nothing else updates it, since
+// RecordReplicaLEOFromFetch only runs when a replica actually fetches, which never
+// happens for a topic with no replicas. For a topic with replicas this is a no-op
+// beyond what RecordReplicaLEOFromFetch will already do once they report in — this
+// just makes replica-less topics behave the same way instead of being a special case.
+func (tm *TopicManager) advanceHighWatermark(topicName string, l *log.LogManager) {
+	l.SetHighWatermark(tm.coordinator.TopicMinISRLeo(topicName, l.LEO()))
 }
 
 func (tm *TopicManager) waitForAllFollowersToCatchUp(ctx context.Context, topicName string, offset uint64) error {
