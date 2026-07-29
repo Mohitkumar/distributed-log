@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -11,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/config"
-	consumermgr "github.com/mohitkumar/mlog/consumer"
-	"github.com/mohitkumar/mlog/coordinator"
-	"github.com/mohitkumar/mlog/discovery"
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/rpc"
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/broker/cluster"
+	"github.com/mohitkumar/mlog/broker/cluster/discovery"
+	"github.com/mohitkumar/mlog/broker/config"
+	consumermgr "github.com/mohitkumar/mlog/broker/consumer"
+	"github.com/mohitkumar/mlog/broker/log"
+	"github.com/mohitkumar/mlog/broker/rpc"
+	"github.com/mohitkumar/mlog/broker/topic"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -73,23 +72,18 @@ func (ts *TestServer) Coordinator() *FakeTopicCoordinator {
 
 // Cleanup closes all resources associated with the test server.
 func (ts *TestServer) Cleanup() {
+	ts.TopicManager.StopReplicationThread()
 	ts.coord.StopReplicationThread()
 	_ = ts.srv.Stop()
 }
 
-// syncFakeNodesToTopicManager applies AddNode events to topicMgr for each node in the fake
-// so that TopicManager.Nodes is populated (CreateTopic uses tm.Nodes).
+// syncFakeNodesToTopicManager sets topicMgr's current node ID to match the fake
+// coordinator. Cluster membership itself (AliveNodeIDs/NodeRPCAddr) is answered
+// directly from the FakeTopicCoordinator (see fake_coordinator.go), not from any
+// state pushed into topicMgr — this mirrors production, where node membership comes
+// from Raft's own voter configuration rather than a Raft-replicated event.
 func syncFakeNodesToTopicManager(topicMgr *topic.TopicManager, fake *FakeTopicCoordinator) {
-	fake.mu.RLock()
-	defer fake.mu.RUnlock()
 	topicMgr.SetCurrentNodeID(fake.NodeID)
-	for _, n := range fake.Nodes {
-		if n == nil {
-			continue
-		}
-		data, _ := json.Marshal(protocol.AddNodeEvent{NodeID: n.NodeID, Addr: n.Addr, RpcAddr: n.RpcAddr})
-		_ = topicMgr.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeAddNode, Data: data})
-	}
 }
 
 // StartSingleNode starts a single-node server backed by a FakeTopicCoordinator.
@@ -122,7 +116,7 @@ func StartSingleNode(t testing.TB, baseDirSuffix string) *TestServer {
 	fakeCoord.RPCAddr = srv.Addr
 	fakeCoord.AddNode(fakeCoord.NodeID, srv.Addr)
 	syncFakeNodesToTopicManager(topicMgr, fakeCoord)
-	fakeCoord.SetReplicationTarget(topicMgr) // so ApplyCreateTopicEvent also applies to TopicManager
+	topicMgr.StartReplicationThread()
 
 	return &TestServer{
 		TestServerComponents: &TestServerComponents{
@@ -204,14 +198,15 @@ func StartTwoNodes(t testing.TB, server1BaseDirSuffix string, server2BaseDirSuff
 	// Sync fake nodes into each TopicManager so CreateTopic and replication see the cluster.
 	syncFakeNodesToTopicManager(server1TopicMgr, fake1)
 	syncFakeNodesToTopicManager(server2TopicMgr, fake2)
-	fake1.SetReplicationTarget(server1TopicMgr)
-	fake2.SetReplicationTarget(server2TopicMgr)
 
 	// Deterministically treat server1 as "leader" for tests that care.
 	fake1.IsRaftLeader = true
 	fake2.IsRaftLeader = false
 
-	// TopicManager owns its replication thread; start it for the follower so it replicates from leader.
+	// TopicManager owns its replication thread — every node needs it running, both to
+	// replicate from a leader and to reconcile its own local topic state (leader-side
+	// log opens included) against cluster metadata.
+	server1TopicMgr.StartReplicationThread()
 	server2TopicMgr.StartReplicationThread()
 
 	server1 := &TestServer{
@@ -295,17 +290,38 @@ func (h *TwoNodeTestHelper) WaitReplicaCatchUp(topicName string, targetLEO uint6
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
 	for time.Now().Before(deadline) {
-		replicaTopic, err := h.GetFollowerTopicMgr().GetTopic(topicName)
-		if err != nil || replicaTopic == nil || replicaTopic.Log == nil {
+		replicaLog, err := h.GetFollowerTopicMgr().GetLog(topicName)
+		if err != nil || replicaLog == nil {
 			time.Sleep(pollMs)
 			continue
 		}
-		if replicaTopic.Log.LEO() >= targetLEO {
+		if replicaLog.LEO() >= targetLEO {
 			return time.Since(start), true
 		}
 		time.Sleep(pollMs)
 	}
 	return time.Since(start), false
+}
+
+// waitForTopicOpen polls tm.GetLog(topicName) until it returns a local log, or fails
+// the test after timeout. Local log-opening is now reconciled on a periodic tick (see
+// topic.TopicManager.reconcileLocalTopics) rather than synchronously with the metadata
+// event that created/assigned the topic, so tests that apply a metadata event and then
+// immediately need the local log (directly, not through a client that already retries
+// — see client.RetryTopicNotReady) must poll.
+func waitForTopicOpen(t testing.TB, tm *topic.TopicManager, topicName string, timeout time.Duration) *log.LogManager {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		l, err := tm.GetLog(topicName)
+		if err == nil && l != nil {
+			return l
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("topic %q not open locally within %s", topicName, timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // StartTwoNodesForTests starts two nodes (server1, server2) and returns a helper. Caller must call Cleanup().
@@ -324,7 +340,7 @@ func testLoggerSilent(nodeID string) *zap.Logger {
 // RealTestServer represents a test server with a real coordinator.
 type RealTestServer struct {
 	NodeID         string
-	Coordinator    *coordinator.Coordinator
+	Coordinator    *cluster.Cluster
 	TopicManager   *topic.TopicManager
 	ConsumerMgr    *consumermgr.ConsumerManager
 	RpcServer      *rpc.RpcServer
@@ -456,19 +472,19 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 
 		logger := testLoggerSilent(nc.nodeID)
 
-		// Create topic manager first (implements MetadataStore)
-		tm, err := topic.NewTopicManager(nc.basePath, nil, logger)
+		// Create coordinator first (owns the Raft-replicated metadata store).
+		coord, err := cluster.NewCluster(cfg, logger)
+		if err != nil {
+			t.Fatalf("NewCluster %s: %v", nc.nodeID, err)
+		}
+
+		// Create topic manager
+		tm, err := topic.NewTopicManager(nc.basePath, coord, logger)
 		if err != nil {
 			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
 		}
-
-		// Create coordinator
-		coord, err := coordinator.NewCoordinatorFromConfig(cfg, tm, logger)
-		if err != nil {
-			t.Fatalf("NewCoordinator %s: %v", nc.nodeID, err)
-		}
-		tm.SetCoordinator(coord)
 		tm.SetCurrentNodeID(nc.nodeID)
+		coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
 
 		// Start coordinator for bootstrap
 		if err := coord.Start(); err != nil {
@@ -478,9 +494,6 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 		// Wait for Raft to be ready
 		if err := coord.WaitforRaftReady(10 * time.Second); err != nil {
 			t.Fatalf("bootstrap node %s: raft not ready: %v", nc.nodeID, err)
-		}
-		if err := coord.EnsureSelfInMetadata(); err != nil {
-			t.Fatalf("bootstrap node %s: ensure self in metadata: %v", nc.nodeID, err)
 		}
 
 		// Restore topic manager state
@@ -552,19 +565,19 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 
 		logger := testLoggerSilent(nc.nodeID)
 
-		// Create topic manager first (implements MetadataStore)
-		tm, err := topic.NewTopicManager(nc.basePath, nil, logger)
+		// Create coordinator first (owns the Raft-replicated metadata store).
+		coord, err := cluster.NewCluster(cfg, logger)
+		if err != nil {
+			t.Fatalf("NewCluster %s: %v", nc.nodeID, err)
+		}
+
+		// Create topic manager
+		tm, err := topic.NewTopicManager(nc.basePath, coord, logger)
 		if err != nil {
 			t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
 		}
-
-		// Create coordinator
-		coord, err := coordinator.NewCoordinatorFromConfig(cfg, tm, logger)
-		if err != nil {
-			t.Fatalf("NewCoordinator %s: %v", nc.nodeID, err)
-		}
-		tm.SetCoordinator(coord)
 		tm.SetCurrentNodeID(nc.nodeID)
+		coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
 
 		// Create consumer manager
 		consumerMgr, err := consumermgr.NewConsumerManager(nc.basePath)

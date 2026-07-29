@@ -1,21 +1,30 @@
 package tests
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/cluster"
+	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
+	"github.com/mohitkumar/mlog/broker/topic"
 )
 
 var _ topic.TopicCoordinator = (*FakeTopicCoordinator)(nil)
 
-// FakeTopicCoordinator implements topic.TopicCoordinator in memory (no Raft).
-// Mimics Raft-based coordinator: Apply* methods update in-memory state and, when
-// SetReplicationTarget is set, push the same events to the TopicManager (like FSM Apply).
+// FakeNodeInfo is a minimal node record for FakeTopicCoordinator (no Raft): just enough
+// to answer AliveNodeIDs/NodeRPCAddr/IsNodeAlive, which in production come from Raft's
+// voter configuration reconciled with Serf gossip (see cluster.Cluster).
+type FakeNodeInfo struct {
+	NodeID  string
+	RpcAddr string
+}
+
+// FakeTopicCoordinator implements topic.TopicCoordinator in memory (no Raft). Mimics
+// Cluster: it owns a real *cluster.ClusterMetadataStore (the same Apply/state-machine
+// logic production uses), applied synchronously — local reconciliation on top of that
+// metadata (opening/closing logs) is the owning topic.TopicManager's own poll-driven
+// job (see topic.TopicManager.StartReplicationThread), same as in production.
 type FakeTopicCoordinator struct {
 	mu sync.RWMutex
 
@@ -23,59 +32,120 @@ type FakeTopicCoordinator struct {
 	RPCAddr      string
 	IsRaftLeader bool
 
-	Nodes    map[string]*topic.NodeMetadata            // nodeID -> node
-	Topics   map[string]*fakeTopicMeta                 // topic -> meta
-	Replicas map[string]map[string]*topic.ReplicaState // topic -> replicaNodeID -> state
+	Nodes         map[string]*FakeNodeInfo // nodeID -> node (fake's own membership view)
+	metadataStore *cluster.ClusterMetadataStore
 
-	replicationTarget *topic.TopicManager
-	stopReplication   chan struct{}
-}
-
-type fakeTopicMeta struct {
-	LeaderNodeID string
-	ReplicaIDs   []string
+	stopReplication chan struct{}
 }
 
 func NewFakeTopicCoordinator(nodeID, rpcAddr string) *FakeTopicCoordinator {
 	f := &FakeTopicCoordinator{
-		NodeID:       nodeID,
-		RPCAddr:      rpcAddr,
-		IsRaftLeader: true,
-		Nodes:        make(map[string]*topic.NodeMetadata),
-		Topics:       make(map[string]*fakeTopicMeta),
-		Replicas:     make(map[string]map[string]*topic.ReplicaState),
+		NodeID:        nodeID,
+		RPCAddr:       rpcAddr,
+		IsRaftLeader:  true,
+		Nodes:         make(map[string]*FakeNodeInfo),
+		metadataStore: cluster.NewClusterMetadataStore(),
 	}
-	f.Nodes[nodeID] = &topic.NodeMetadata{NodeID: nodeID, Addr: rpcAddr, RpcAddr: rpcAddr}
+	f.Nodes[nodeID] = &FakeNodeInfo{NodeID: nodeID, RpcAddr: rpcAddr}
 	return f
 }
 
 // — TopicCoordinator interface —
 
+func (f *FakeTopicCoordinator) TopicExists(topicName string) bool {
+	return f.metadataStore.TopicExists(topicName)
+}
+
+func (f *FakeTopicCoordinator) TopicNames() []string {
+	return f.metadataStore.TopicNames()
+}
+
+func (f *FakeTopicCoordinator) TopicInfo(topicName string) (protocol.TopicInfo, bool) {
+	t := f.metadataStore.GetTopic(topicName)
+	if t == nil {
+		return protocol.TopicInfo{}, false
+	}
+	leaderID, epoch, replicaSnaps := t.Snapshot()
+	replicas := make([]protocol.ReplicaInfo, 0, len(replicaSnaps))
+	for _, rs := range replicaSnaps {
+		replicas = append(replicas, protocol.ReplicaInfo{NodeID: rs.ReplicaNodeID, IsISR: rs.IsISR, LEO: rs.LEO})
+	}
+	return protocol.TopicInfo{Name: topicName, LeaderNodeID: leaderID, LeaderEpoch: epoch, Replicas: replicas}, true
+}
+
+func (f *FakeTopicCoordinator) TopicLeaderNodeID(topicName string) (string, bool) {
+	t := f.metadataStore.GetTopic(topicName)
+	if t == nil {
+		return "", false
+	}
+	return t.LeaderID(), true
+}
+
+func (f *FakeTopicCoordinator) TopicHasReplica(topicName, nodeID string) bool {
+	t := f.metadataStore.GetTopic(topicName)
+	if t == nil {
+		return false
+	}
+	return t.HasReplica(nodeID)
+}
+
+func (f *FakeTopicCoordinator) TopicMinISRLeo(topicName string, localLEO uint64) uint64 {
+	t := f.metadataStore.GetTopic(topicName)
+	if t == nil {
+		return localLEO
+	}
+	return t.MinISRLeo(localLEO)
+}
+
+func (f *FakeTopicCoordinator) NodeIDWithLeastTopics(candidateNodeIDs []string) (string, error) {
+	return f.metadataStore.NodeIDWithLeastTopics(candidateNodeIDs)
+}
+
+func (f *FakeTopicCoordinator) RecordReplicaFetch(topicName, replicaNodeID string, leo int64, lagThreshold uint64, localLEO uint64) (bool, bool) {
+	t := f.metadataStore.GetTopic(topicName)
+	if t == nil {
+		return false, false
+	}
+	return t.RecordReplicaFetch(replicaNodeID, leo, lagThreshold, localLEO), true
+}
+
 func (f *FakeTopicCoordinator) ApplyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.applyCreateTopicEvent(topicName, replicaCount, leaderNodeID, replicaNodeIds)
+	if replicaCount == 0 {
+		leaderNodeID = f.NodeID
+	}
+	eventData, err := raft.EncodeCreateTopicEvent(raft.CreateTopicEvent{
+		Topic: topicName, ReplicaCount: replicaCount, LeaderNodeID: leaderNodeID, LeaderEpoch: 1, ReplicaNodeIds: replicaNodeIds,
+	})
+	if err != nil {
+		return err
+	}
+	return f.apply(&raft.MetadataEvent{EventType: raft.MetadataEventTypeCreateTopic, Data: eventData})
 }
 
 func (f *FakeTopicCoordinator) ApplyDeleteTopicEventInternal(topicName string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.applyDeleteTopicEvent(topicName)
+	eventData, err := raft.EncodeDeleteTopicEvent(raft.DeleteTopicEvent{Topic: topicName})
+	if err != nil {
+		return err
+	}
+	return f.apply(&raft.MetadataEvent{EventType: raft.MetadataEventTypeDeleteTopic, Data: eventData})
 }
 
 func (f *FakeTopicCoordinator) ApplyIsrUpdateEventInternal(topicName, replicaNodeID string, isr bool) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.applyIsrUpdateEvent(topicName, replicaNodeID, isr)
+	eventData, err := raft.EncodeIsrUpdateEvent(raft.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr})
+	if err != nil {
+		return err
+	}
+	return f.apply(&raft.MetadataEvent{EventType: raft.MetadataEventTypeIsrUpdate, Data: eventData})
 }
 
 func (f *FakeTopicCoordinator) ApplyLeaderChangeEvent(topicName, leaderNodeID string, leaderEpoch int64) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if meta := f.Topics[topicName]; meta != nil {
-		meta.LeaderNodeID = leaderNodeID
+	eventData, err := raft.EncodeLeaderChangeEvent(raft.LeaderChangeEvent{
+		Topic: topicName, LeaderNodeID: leaderNodeID, LeaderEpoch: leaderEpoch,
+	})
+	if err != nil {
+		return err
 	}
-	return nil
+	return f.apply(&raft.MetadataEvent{EventType: raft.MetadataEventTypeLeaderChange, Data: eventData})
 }
 
 func (f *FakeTopicCoordinator) IsLeader() bool {
@@ -91,62 +161,68 @@ func (f *FakeTopicCoordinator) GetRaftLeaderNodeID() (string, error) {
 	return "", fmt.Errorf("not raft leader")
 }
 
+// AliveNodeIDs returns all known node IDs (fakes don't model liveness beyond "known").
+func (f *FakeTopicCoordinator) AliveNodeIDs() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	ids := make([]string, 0, len(f.Nodes))
+	for id := range f.Nodes {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// NodeRPCAddr returns the RPC address for nodeID, if known.
+func (f *FakeTopicCoordinator) NodeRPCAddr(nodeID string) (string, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	n := f.Nodes[nodeID]
+	if n == nil {
+		return "", false
+	}
+	return n.RpcAddr, true
+}
+
+// IsNodeAlive reports whether nodeID is known to this fake.
+func (f *FakeTopicCoordinator) IsNodeAlive(nodeID string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.Nodes[nodeID] != nil
+}
+
 // — Helpers for tests (testutil and node/topic/replica tests) —
 
 func (f *FakeTopicCoordinator) AddNode(nodeID, rpcAddr string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Nodes[nodeID] = &topic.NodeMetadata{NodeID: nodeID, Addr: rpcAddr, RpcAddr: rpcAddr}
+	f.Nodes[nodeID] = &FakeNodeInfo{NodeID: nodeID, RpcAddr: rpcAddr}
 }
 
-func (f *FakeTopicCoordinator) SetReplicationTarget(tm *topic.TopicManager) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.replicationTarget = tm
-}
-
+// StartReplicationThread/StopReplicationThread exist for API parity with callers that
+// start/stop replication via the coordinator; actual replication in tests is driven by
+// the owning topic.TopicManager's own replication thread (see
+// topic.TopicManager.StartReplicationThread), not by the fake itself.
 func (f *FakeTopicCoordinator) StartReplicationThread() {
 	f.mu.Lock()
-	if f.stopReplication != nil {
-		f.mu.Unlock()
-		return
+	defer f.mu.Unlock()
+	if f.stopReplication == nil {
+		f.stopReplication = make(chan struct{})
 	}
-	f.stopReplication = make(chan struct{})
-	f.mu.Unlock()
-	go f.runReplicationThread()
 }
 
 func (f *FakeTopicCoordinator) StopReplicationThread() {
 	f.mu.Lock()
-	ch := f.stopReplication
-	f.stopReplication = nil
-	f.mu.Unlock()
-	if ch != nil {
-		close(ch)
+	defer f.mu.Unlock()
+	if f.stopReplication != nil {
+		close(f.stopReplication)
+		f.stopReplication = nil
 	}
 }
 
-func (f *FakeTopicCoordinator) TopicExists(topicName string) bool {
+func (f *FakeTopicCoordinator) GetOtherNodes() []*FakeNodeInfo {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	_, ok := f.Topics[topicName]
-	return ok
-}
-
-func (f *FakeTopicCoordinator) ListTopicNames() []string {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	names := make([]string, 0, len(f.Topics))
-	for name := range f.Topics {
-		names = append(names, name)
-	}
-	return names
-}
-
-func (f *FakeTopicCoordinator) GetOtherNodes() []*topic.NodeMetadata {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	out := make([]*topic.NodeMetadata, 0, len(f.Nodes))
+	out := make([]*FakeNodeInfo, 0, len(f.Nodes))
 	for id, n := range f.Nodes {
 		if id != f.NodeID && n != nil {
 			out = append(out, n)
@@ -155,107 +231,28 @@ func (f *FakeTopicCoordinator) GetOtherNodes() []*topic.NodeMetadata {
 	return out
 }
 
-// ApplyEvent applies a single metadata event (for tests that drive create/delete/isr without going through TopicManager).
+// ApplyEvent applies a single metadata event (for tests that drive create/delete/isr
+// on one fake to simulate another node observing Raft-replicated metadata, without
+// going through a shared TopicManager).
 func (f *FakeTopicCoordinator) ApplyEvent(ev topic.ApplyEvent) {
 	switch ev.Type {
 	case topic.ApplyEventCreateTopic:
 		if ev.CreateTopic != nil {
-			f.mu.Lock()
-			_ = f.applyCreateTopicEvent(ev.CreateTopic.Topic, ev.CreateTopic.ReplicaCount, ev.CreateTopic.LeaderNodeID, ev.CreateTopic.ReplicaNodeIds)
-			f.mu.Unlock()
+			_ = f.ApplyCreateTopicEvent(ev.CreateTopic.Topic, ev.CreateTopic.ReplicaCount, ev.CreateTopic.LeaderNodeID, ev.CreateTopic.ReplicaNodeIds)
 		}
 	case topic.ApplyEventDeleteTopic:
 		if ev.DeleteTopic != nil {
-			f.mu.Lock()
-			_ = f.applyDeleteTopicEvent(ev.DeleteTopic.Topic)
-			f.mu.Unlock()
+			_ = f.ApplyDeleteTopicEventInternal(ev.DeleteTopic.Topic)
 		}
 	case topic.ApplyEventIsrUpdate:
 		if ev.IsrUpdate != nil {
-			f.mu.Lock()
-			_ = f.applyIsrUpdateEvent(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr)
-			f.mu.Unlock()
+			_ = f.ApplyIsrUpdateEventInternal(ev.IsrUpdate.Topic, ev.IsrUpdate.ReplicaNodeID, ev.IsrUpdate.Isr)
 		}
 	}
 }
 
-// — internal apply helpers (mirror Raft FSM: update in-memory + push to replicationTarget) —
-
-func (f *FakeTopicCoordinator) applyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {
-	if replicaCount == 0 {
-		leaderNodeID = f.NodeID
-	}
-	f.Topics[topicName] = &fakeTopicMeta{LeaderNodeID: leaderNodeID, ReplicaIDs: replicaNodeIds}
-	f.Replicas[topicName] = make(map[string]*topic.ReplicaState)
-	for _, id := range replicaNodeIds {
-		f.Replicas[topicName][id] = &topic.ReplicaState{ReplicaNodeID: id, LEO: 0, IsISR: true}
-	}
-	if f.replicationTarget != nil {
-		eventData, _ := json.Marshal(protocol.CreateTopicEvent{
-			Topic: topicName, ReplicaCount: replicaCount, LeaderNodeID: leaderNodeID, LeaderEpoch: 1, ReplicaNodeIds: replicaNodeIds,
-		})
-		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeCreateTopic, Data: eventData})
-	}
-	return nil
-}
-
-func (f *FakeTopicCoordinator) applyDeleteTopicEvent(topicName string) error {
-	delete(f.Topics, topicName)
-	delete(f.Replicas, topicName)
-	if f.replicationTarget != nil {
-		eventData, _ := json.Marshal(protocol.DeleteTopicEvent{Topic: topicName})
-		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeDeleteTopic, Data: eventData})
-	}
-	return nil
-}
-
-func (f *FakeTopicCoordinator) applyIsrUpdateEvent(topicName, replicaNodeID string, isr bool) error {
-	f.updateReplicaISR(topicName, replicaNodeID, isr)
-	if f.replicationTarget != nil {
-		eventData, _ := json.Marshal(protocol.IsrUpdateEvent{Topic: topicName, ReplicaNodeID: replicaNodeID, Isr: isr})
-		_ = f.replicationTarget.Apply(&protocol.MetadataEvent{EventType: protocol.MetadataEventTypeIsrUpdate, Data: eventData})
-	}
-	return nil
-}
-
-func (f *FakeTopicCoordinator) updateReplicaISR(topicName, replicaNodeID string, isr bool) {
-	if f.Replicas[topicName] == nil {
-		f.Replicas[topicName] = make(map[string]*topic.ReplicaState)
-	}
-	rs := f.Replicas[topicName][replicaNodeID]
-	if rs == nil {
-		f.Replicas[topicName][replicaNodeID] = &topic.ReplicaState{ReplicaNodeID: replicaNodeID, LEO: 0, IsISR: isr}
-		return
-	}
-	rs.IsISR = isr
-}
-
-func (f *FakeTopicCoordinator) runReplicationThread() {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-f.stopReplication:
-			return
-		case <-ticker.C:
-			f.replicateAllTopics()
-		}
-	}
-}
-
-func (f *FakeTopicCoordinator) replicateAllTopics() {
-	f.mu.RLock()
-	target := f.replicationTarget
-	f.mu.RUnlock()
-	if target == nil {
-		return
-	}
-	leaderToTopics := make(map[string][]string)
-	for _, info := range target.ListReplicaTopics() {
-		leaderToTopics[info.LeaderNodeID] = append(leaderToTopics[info.LeaderNodeID], info.TopicName)
-	}
-	ctx := context.Background()
-	for leaderID, topicNames := range leaderToTopics {
-		_ = target.ReplicateFromLeader(ctx, leaderID, topicNames, 5000)
-	}
+// apply applies ev to the metadata store — same logic production's ClusterMetadataStore
+// uses, so this fake stays behaviorally identical to cluster.Cluster.
+func (f *FakeTopicCoordinator) apply(ev *raft.MetadataEvent) error {
+	return f.metadataStore.Apply(ev)
 }

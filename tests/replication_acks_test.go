@@ -6,9 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/topic"
 	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 func TestProduceWithAckLeader_10000Messages(t *testing.T) {
@@ -39,7 +40,7 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	server2.Coordinator().ApplyEvent(ev)
 	time.Sleep(400 * time.Millisecond) // allow follower replication thread to run and open replica log
 
-	producerClient, err := client.NewProducerClient(server1.Addr)
+	producerClient, err := producerclient.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -110,9 +111,9 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	var replicaLEO uint64
 	for time.Now().Before(deadline) {
-		replicaTopic, err := server2.TopicManager.GetTopic(topicName)
-		if err == nil && replicaTopic != nil && replicaTopic.Log != nil {
-			replicaLEO = replicaTopic.Log.LEO()
+		replicaLog, err := server2.TopicManager.GetLog(topicName)
+		if err == nil && replicaLog != nil {
+			replicaLEO = replicaLog.LEO()
 			if replicaLEO >= expectedReplicaLEO {
 				break
 			}
@@ -120,14 +121,14 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	replicaTopic, err := server2.TopicManager.GetTopic(topicName)
+	replicaLog, err := server2.TopicManager.GetLog(topicName)
 	if err != nil {
 		t.Fatalf("failed to get replica topic: %v", err)
 	}
-	if replicaTopic.Log == nil {
+	if replicaLog == nil {
 		t.Fatalf("replica topic has no log")
 	}
-	replicaLEO = replicaTopic.Log.LEO()
+	replicaLEO = replicaLog.LEO()
 	if replicaLEO < expectedReplicaLEO {
 		t.Fatalf("replica LEO is behind: expected at least %d, got %d", expectedReplicaLEO, replicaLEO)
 	}
@@ -165,7 +166,7 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 	time.Sleep(600 * time.Millisecond)
 
 	// Produce warmup (ACK_ALL waits for replica LEO; follower must have topic to replicate)
-	producerClient, err := client.NewProducerClient(server1.Addr)
+	producerClient, err := producerclient.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -238,17 +239,17 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 
 	t.Logf("verified leader LEO is %d (expected %d)", actualLEO, expectedLEO)
 
-	replicaTopic, err := server2.TopicManager.GetTopic(topicName)
+	replicaLog, err := server2.TopicManager.GetLog(topicName)
 	if err != nil {
 		t.Fatalf("failed to get replica topic: %v", err)
 	}
-	if replicaTopic.Log == nil {
+	if replicaLog == nil {
 		t.Fatalf("replica topic has no log")
 	}
 
 	// With ACK_ALL, replica should have caught up (ACK_ALL waits for replication)
 	// Verify by checking replica LEO matches leader LEO
-	replicaLEO := replicaTopic.Log.LEO()
+	replicaLEO := replicaLog.LEO()
 	expectedReplicaLEO := baseOffset + uint64(n) // Should match leader LEO
 
 	if replicaLEO < expectedReplicaLEO {

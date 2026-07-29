@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mohitkumar/mlog/api/protocol"
 	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
+	consumerclient "github.com/mohitkumar/mlog/consumer/client"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 // TestE2E_RealCluster_BasicProduceConsume tests basic produce and consume on a 3-node real cluster.
@@ -34,7 +36,7 @@ func TestE2E_RealCluster_BasicProduceConsume(t *testing.T) {
 	remoteClient.Close()
 
 	// Produce messages
-	producerClient, err := client.NewProducerClient(node1.Addr)
+	producerClient, err := producerclient.NewProducerClient(node1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -55,13 +57,13 @@ func TestE2E_RealCluster_BasicProduceConsume(t *testing.T) {
 	}
 
 	// Verify messages can be fetched/read from log
-	topic, err := node1.TopicManager.GetTopic(topicName)
+	l, err := node1.TopicManager.GetLog(topicName)
 	if err != nil {
-		t.Fatalf("GetTopic: %v", err)
+		t.Fatalf("GetLog: %v", err)
 	}
 
 	for i := 0; i < 5; i++ {
-		entry, err := topic.Log.ReadUncommitted(uint64(i))
+		entry, err := l.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted offset %d: %v", i, err)
 		}
@@ -104,7 +106,7 @@ func TestE2E_RealCluster_ReplicationAcrossNodes(t *testing.T) {
 	t.Logf("Created topic with replicas=%v", resp.ReplicaNodeIds)
 
 	// Produce messages
-	producerClient, err := client.NewProducerClient(node1.Addr)
+	producerClient, err := producerclient.NewProducerClient(node1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -127,16 +129,16 @@ func TestE2E_RealCluster_ReplicationAcrossNodes(t *testing.T) {
 
 	// Verify topic exists on all nodes
 	for idx, node := range []*RealTestServer{node1, node2, node3} {
-		topic, err := node.TopicManager.GetTopic(topicName)
+		l, err := node.TopicManager.GetLog(topicName)
 		if err != nil {
-			t.Logf("node %d: GetTopic error: %v", idx+1, err)
+			t.Logf("node %d: GetLog error: %v", idx+1, err)
 			continue
 		}
-		if topic == nil {
+		if l == nil {
 			t.Logf("node %d: topic not found", idx+1)
 			continue
 		}
-		t.Logf("node %d: topic found, LEO=%d", idx+1, topic.Log.LEO())
+		t.Logf("node %d: topic found, LEO=%d", idx+1, l.LEO())
 	}
 
 	t.Log("✓ Real cluster replication test passed")
@@ -165,7 +167,7 @@ func TestE2E_RealCluster_ConsumerOffsets(t *testing.T) {
 	remoteClient.Close()
 
 	// Produce messages
-	producerClient, err := client.NewProducerClient(node1.Addr)
+	producerClient, err := producerclient.NewProducerClient(node1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -185,7 +187,7 @@ func TestE2E_RealCluster_ConsumerOffsets(t *testing.T) {
 	consumerID := "test-consumer"
 
 	// Test consumer offset operations
-	consumerClient, err := client.NewConsumerClient(node1.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(node1.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -251,7 +253,7 @@ func TestE2E_RealCluster_ConcurrentProducers(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			producerClient, err := client.NewProducerClient(node1.Addr)
+			producerClient, err := producerclient.NewProducerClient(node1.Addr)
 			if err != nil {
 				errors <- err
 				return
@@ -283,13 +285,13 @@ func TestE2E_RealCluster_ConcurrentProducers(t *testing.T) {
 	}
 
 	// Verify message count
-	topic, err := node1.TopicManager.GetTopic(topicName)
+	l, err := node1.TopicManager.GetLog(topicName)
 	if err != nil {
-		t.Fatalf("GetTopic: %v", err)
+		t.Fatalf("GetLog: %v", err)
 	}
 	expectedCount := uint64(numProducers * messagesPerProducer)
-	if topic.Log.LEO() != expectedCount {
-		t.Fatalf("expected %d messages, got %d", expectedCount, topic.Log.LEO())
+	if l.LEO() != expectedCount {
+		t.Fatalf("expected %d messages, got %d", expectedCount, l.LEO())
 	}
 
 	t.Log("✓ Real cluster concurrent producers test passed")
@@ -300,14 +302,23 @@ func TestE2E_RealCluster_ClusterMetadata(t *testing.T) {
 	node1, node2, node3, cleanup := StartRealThreeNodeCluster(t, "e2e-metadata")
 	defer cleanup()
 
-	// Verify each node has correct metadata
+	// Verify each node has correct metadata (cluster membership is Raft's own voter
+	// configuration now, not a separately-replicated node map — see cluster.Cluster).
 	for idx, node := range []*RealTestServer{node1, node2, node3} {
-		if len(node.TopicManager.Nodes) < 3 {
-			t.Logf("node %d: waiting for cluster members... (have %d)", idx+1, len(node.TopicManager.Nodes))
-			time.Sleep(500 * time.Millisecond)
+		ids, err := node.Coordinator.RaftServerIDs()
+		if err != nil {
+			t.Fatalf("node %d: RaftServerIDs: %v", idx+1, err)
 		}
-		if len(node.TopicManager.Nodes) != 3 {
-			t.Fatalf("node %d: expected 3 cluster members, got %d", idx+1, len(node.TopicManager.Nodes))
+		if len(ids) < 3 {
+			t.Logf("node %d: waiting for cluster members... (have %d)", idx+1, len(ids))
+			time.Sleep(500 * time.Millisecond)
+			ids, err = node.Coordinator.RaftServerIDs()
+			if err != nil {
+				t.Fatalf("node %d: RaftServerIDs: %v", idx+1, err)
+			}
+		}
+		if len(ids) != 3 {
+			t.Fatalf("node %d: expected 3 cluster members, got %d", idx+1, len(ids))
 		}
 	}
 

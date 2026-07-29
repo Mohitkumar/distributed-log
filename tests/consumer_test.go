@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
+	"github.com/mohitkumar/mlog/api/protocol"
+	consumerclient "github.com/mohitkumar/mlog/consumer/client"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 func TestFetch(t *testing.T) {
@@ -17,7 +18,7 @@ func TestFetch(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := producerclient.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -31,7 +32,7 @@ func TestFetch(t *testing.T) {
 		t.Fatalf("Produce: %v", err)
 	}
 
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestFetch_TopicNotFound(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestFetch_InvalidArguments(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestCommitOffset(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestCommitOffset_InvalidArguments(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestFetchOffset(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestFetchOffset_InvalidArguments(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -211,7 +212,7 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := producerclient.NewProducerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -227,7 +228,7 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 		}
 	}
 
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		t.Fatalf("NewConsumerClient: %v", err)
 	}
@@ -271,7 +272,7 @@ func BenchmarkFetch(b *testing.B) {
 	defer ts.Cleanup()
 
 	ctx := context.Background()
-	producerClient, err := client.NewProducerClient(ts.Addr)
+	producerClient, err := producerclient.NewProducerClient(ts.Addr)
 	if err != nil {
 		b.Fatalf("NewProducerClient: %v", err)
 	}
@@ -289,7 +290,7 @@ func BenchmarkFetch(b *testing.B) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	consumerClient, err := client.NewConsumerClient(ts.Addr)
+	consumerClient, err := consumerclient.NewConsumerClient(ts.Addr)
 	if err != nil {
 		b.Fatalf("NewConsumerClient: %v", err)
 	}

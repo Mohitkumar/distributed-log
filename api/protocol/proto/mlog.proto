@@ -1,0 +1,239 @@
+syntax = "proto3";
+
+package mlog.protocol;
+
+option go_package = "github.com/mohitkumar/mlog/api/protocol/pb";
+
+// ---- Wire (client <-> broker RPC) messages ----
+
+message LogEntry {
+  uint64 offset = 1;
+  bytes value = 2;
+}
+
+message ReplicateRequest {
+  string topic = 1;
+  uint64 offset = 2;
+  uint32 batch_size = 3;
+  string replica_node_id = 4;
+}
+
+message ReplicateResponse {
+  string topic = 1;
+  bytes raw_chunk = 2;
+  bool end_of_stream = 3;
+  int64 leader_leo = 4;
+}
+
+message ProduceRequest {
+  string topic = 1;
+  bytes value = 2;
+  int32 acks = 3;
+}
+
+message ProduceResponse {
+  uint64 offset = 1;
+}
+
+message ProduceBatchRequest {
+  string topic = 1;
+  repeated bytes values = 2;
+  int32 acks = 3;
+}
+
+message ProduceBatchResponse {
+  uint64 base_offset = 1;
+  uint64 last_offset = 2;
+  uint32 count = 3;
+}
+
+message FetchRequest {
+  string topic = 1;
+  string id = 2;
+  uint64 offset = 3;
+  string replica_node_id = 4;
+}
+
+message FetchResponse {
+  LogEntry entry = 1;
+}
+
+message FetchBatchRequest {
+  string topic = 1;
+  string id = 2;
+  uint64 offset = 3;
+  uint32 max_count = 4;
+  string replica_node_id = 5;
+}
+
+message FetchBatchResponse {
+  repeated LogEntry entries = 1;
+}
+
+message CommitOffsetRequest {
+  string topic = 1;
+  string id = 2;
+  uint64 offset = 3;
+}
+
+message CommitOffsetResponse {
+  bool success = 1;
+}
+
+message FetchOffsetRequest {
+  string topic = 1;
+  string id = 2;
+}
+
+message FetchOffsetResponse {
+  uint64 offset = 1;
+}
+
+message CreateTopicRequest {
+  string topic = 1;
+  uint32 replica_count = 2;
+  string designated_leader_node_id = 3;
+}
+
+message CreateTopicResponse {
+  string topic = 1;
+  repeated string replica_node_ids = 2;
+}
+
+message DeleteTopicRequest {
+  string topic = 1;
+}
+
+message DeleteTopicResponse {
+  string topic = 1;
+}
+
+message FindTopicLeaderRequest {
+  string topic = 1;
+}
+
+message FindTopicLeaderResponse {
+  string leader_addr = 1;
+}
+
+message FindRaftLeaderRequest {}
+
+message FindRaftLeaderResponse {
+  string raft_leader_addr = 1;
+}
+
+message ListTopicsRequest {}
+
+message ReplicaInfo {
+  string node_id = 1;
+  bool is_isr = 2;
+  int64 leo = 3;
+}
+
+message TopicInfo {
+  string name = 1;
+  string leader_node_id = 2;
+  int64 leader_epoch = 3;
+  repeated ReplicaInfo replicas = 4;
+}
+
+message ListTopicsResponse {
+  repeated TopicInfo topics = 1;
+}
+
+message ApplyIsrUpdateEventRequest {
+  string topic = 1;
+  string replica_node_id = 2;
+  bool isr = 3;
+}
+
+message ApplyIsrUpdateEventResponse {}
+
+message RPCErrorResponse {
+  int32 code = 1;
+  string message = 2;
+}
+
+// ---- Raft-replicated metadata event envelope + payloads ----
+
+message MetadataEvent {
+  uint32 event_type = 1;
+  bytes data = 2;
+}
+
+message CreateTopicEvent {
+  string topic = 1;
+  uint32 replica_count = 2;
+  string leader_id = 3;
+  int64 leader_epoch = 4;
+  repeated string replicas = 5;
+}
+
+message DeleteTopicEvent {
+  string topic = 1;
+}
+
+message LeaderChangeEvent {
+  string topic = 1;
+  string leader_id = 2;
+  int64 leader_epoch = 3;
+}
+
+message IsrUpdateEvent {
+  string topic = 1;
+  string replica_id = 2;
+  bool isr = 3;
+}
+
+message AddNodeEvent {
+  string node_id = 1;
+  string addr = 2;
+  string rpc_addr = 3;
+}
+
+message RemoveNodeEvent {
+  string node_id = 1;
+}
+
+message UpdateNodeEvent {
+  string node_id = 1;
+  bool is_healthy = 2;
+}
+
+// ---- Raft log entry persistence (custom LogStore backing) ----
+
+message RaftLog {
+  uint64 index = 1;
+  uint64 term = 2;
+  uint32 type = 3;
+  bytes data = 4;
+  bytes extensions = 5;
+  int64 appended_at_unix_nano = 6;
+}
+
+// ---- Metadata snapshot (Raft FSM snapshot/restore) ----
+
+message ReplicaState {
+  string replica_id = 1;
+  int64 leo = 2;
+  bool is_isr = 3;
+}
+
+message TopicState {
+  string name = 1;
+  string leader_id = 2;
+  int64 leader_epoch = 3;
+  int32 desired_replica_count = 4;
+  map<string, ReplicaState> replicas = 5;
+}
+
+message NodeState {
+  string node_id = 1;
+  string addr = 2;
+  string rpc_addr = 3;
+}
+
+message MetadataSnapshot {
+  map<string, TopicState> topics = 1;
+  map<string, NodeState> nodes = 2;
+}

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mohitkumar/mlog/client"
-	"github.com/mohitkumar/mlog/protocol"
-	"github.com/mohitkumar/mlog/topic"
+	"github.com/mohitkumar/mlog/api/protocol"
+	"github.com/mohitkumar/mlog/broker/topic"
+	producerclient "github.com/mohitkumar/mlog/producer/client"
 )
 
 func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
@@ -27,14 +27,10 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	leaderCoord.ApplyEvent(ev)
 	followerCoord.ApplyEvent(ev)
 
-	// Verify topic exists on leader (leader has the topic with leader log)
-	leaderView, err := server1.TopicManager.GetLeader(topicName)
-	if err != nil {
-		t.Fatalf("GetLeader on leader: %v", err)
-	}
-	if leaderView == nil || leaderView.Log == nil {
-		t.Fatal("leader should have leader log for topic")
-	}
+	// Verify topic exists on leader (leader has the topic with leader log). Local log
+	// opening is reconciled on a periodic tick now, not synchronously with ApplyEvent
+	// above, so poll rather than asserting immediately.
+	waitForTopicOpen(t, server1.TopicManager, topicName, time.Second)
 
 	// Verify leader topic directory exists (BaseDir/topic)
 	leaderTopicDir := filepath.Join(server1.BaseDir, topicName)
@@ -45,13 +41,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	}
 
 	// Verify topic/replica exists on follower (follower has replica for this topic)
-	replicaTopic, err := server2.TopicManager.GetTopic(topicName)
-	if err != nil {
-		t.Fatalf("GetTopic on follower: %v (creating topic on leader should create replica on follower)", err)
-	}
-	if replicaTopic == nil || replicaTopic.Log == nil {
-		t.Fatalf("follower should have topic with replica log, got %+v", replicaTopic)
-	}
+	waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Verify follower topic directory exists (BaseDir/topic)
 	followerTopicDir := filepath.Join(server2.BaseDir, topicName)
@@ -77,15 +67,12 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 	leaderCoord.ApplyEvent(ev)
 	followerCoord.ApplyEvent(ev)
 
-	// Leader has topic
-	if _, err := server1.TopicManager.GetTopic(topicName); err != nil {
-		t.Fatalf("leader should have topic: %v", err)
-	}
+	// Leader has topic (local log opening is reconciled on a periodic tick, not
+	// synchronously with ApplyEvent above, so poll rather than asserting immediately).
+	waitForTopicOpen(t, server1.TopicManager, topicName, time.Second)
 
 	// Follower has topic (replica created when it applies the CreateTopic Raft event)
-	if _, err := server2.TopicManager.GetTopic(topicName); err != nil {
-		t.Fatalf("follower should have topic after leader created it with replica: %v", err)
-	}
+	waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Verify topic directory exists on follower (BaseDir/topic/replicaID)
 	replicaDir := filepath.Join(server2.BaseDir, topicName)
@@ -113,7 +100,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	leaderCoord.ApplyEvent(ev)
 	followerCoord.ApplyEvent(ev)
 
-	producerClient, err := client.NewProducerClient(server1.Addr)
+	producerClient, err := producerclient.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -133,18 +120,14 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 
 	// Wait for replication to catch up (follower replica fetches from leader)
 	// Then verify follower's replica log has the same messages
-	replicaTopic, err := server2.TopicManager.GetTopic(topicName)
-	if err != nil {
-		t.Fatalf("GetTopic (replica): %v", err)
-	}
-	if replicaTopic.Log == nil {
-		t.Fatal("replica should have Log")
-	}
+	// Producing to the leader (above) doesn't prove the follower's own local
+	// reconciliation has happened yet — poll for it explicitly.
+	replicaLog := waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Poll until we have at least len(messages) entries (replication may be async)
 	var lastLEO uint64
 	for try := 0; try < 50; try++ {
-		lastLEO = replicaTopic.Log.LEO()
+		lastLEO = replicaLog.LEO()
 		if lastLEO >= uint64(len(messages)) {
 			break
 		}
@@ -159,7 +142,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	// Replica stores payload only (from raw chunk); segment.Read returns [offset 8][payload].
 	const offWidth = 8
 	for i, want := range messages {
-		raw, err := replicaTopic.Log.ReadUncommitted(uint64(i))
+		raw, err := replicaLog.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted(%d): %v", i, err)
 		}
@@ -187,7 +170,7 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 	ev := topic.NewCreateTopicApplyEvent(topicName, 1, leaderCoord.NodeID, []string{server2.Coordinator().NodeID})
 	leaderCoord.ApplyEvent(ev)
 	followerCoord.ApplyEvent(ev)
-	producerClient, err := client.NewProducerClient(server1.Addr)
+	producerClient, err := producerclient.NewProducerClient(server1.Addr)
 	if err != nil {
 		t.Fatalf("NewProducerClient: %v", err)
 	}
@@ -208,18 +191,14 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 
 	// Wait for replication to catch up (follower replica fetches from leader)
 	// Then verify follower's replica log has the same messages
-	replicaTopic, err := server2.TopicManager.GetTopic(topicName)
-	if err != nil {
-		t.Fatalf("GetTopic (replica): %v", err)
-	}
-	if replicaTopic.Log == nil {
-		t.Fatal("replica should have Log")
-	}
+	// Producing to the leader (above) doesn't prove the follower's own local
+	// reconciliation has happened yet — poll for it explicitly.
+	replicaLog := waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Poll until we have at least len(values) entries (replication may be async)
 	var lastLEO uint64
 	for try := 0; try < 50; try++ {
-		lastLEO = replicaTopic.Log.LEO()
+		lastLEO = replicaLog.LEO()
 		if lastLEO >= uint64(len(values)) {
 			break
 		}
@@ -234,7 +213,7 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 	// Replica stores payload only (from raw chunk); segment.Read returns [offset 8][payload].
 	const offWidth = 8
 	for i, want := range values {
-		raw, err := replicaTopic.Log.ReadUncommitted(uint64(i))
+		raw, err := replicaLog.ReadUncommitted(uint64(i))
 		if err != nil {
 			t.Fatalf("ReadUncommitted(%d): %v", i, err)
 		}
