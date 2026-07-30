@@ -157,6 +157,13 @@ func (m *Membership) Leave() error {
 	return m.serf.Leave()
 }
 
+// Shutdown hard-stops Serf without broadcasting a graceful leave, so other members
+// detect this node as failed (via their own failure detector) rather than as a clean
+// departure — the membership-layer half of simulating a process crash for fault testing.
+func (m *Membership) Shutdown() error {
+	return m.serf.Shutdown()
+}
+
 func (m *Membership) logError(err error, msg string, member serf.Member) {
 	log := m.logger.Error
 	if err == raft.ErrNotLeader {

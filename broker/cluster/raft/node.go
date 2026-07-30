@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -25,6 +26,8 @@ type RaftNode struct {
 	raftConfig *raft.Config
 	LocalAddr  raft.ServerAddress
 	cfg        config.Config
+	stableLog  *raftboltdb.BoltStore // closed in Shutdown — raft.Shutdown() doesn't own it
+	logStore   *logStore             // closed in Shutdown — raft.Shutdown() doesn't own it
 }
 
 func NewRaftNode(cfg config.Config, metadataStore MetadataStore, logger *zap.Logger) (*RaftNode, error) {
@@ -35,7 +38,7 @@ func NewRaftNode(cfg config.Config, metadataStore MetadataStore, logger *zap.Log
 	if err != nil {
 		return nil, err
 	}
-	raftNode, raftConfig, localAddr, err := setupRaft(fsm, cfg.RaftConfig)
+	raftNode, raftConfig, localAddr, stableLog, logStore, err := setupRaft(fsm, cfg.RaftConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +49,8 @@ func NewRaftNode(cfg config.Config, metadataStore MetadataStore, logger *zap.Log
 		raftConfig: raftConfig,
 		LocalAddr:  localAddr,
 		cfg:        cfg,
+		stableLog:  stableLog,
+		logStore:   logStore,
 	}
 	rpcAddr, err := cfg.RPCAddr()
 	if err != nil {
@@ -55,7 +60,7 @@ func NewRaftNode(cfg config.Config, metadataStore MetadataStore, logger *zap.Log
 	return c, nil
 }
 
-func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, *raft.Config, raft.ServerAddress, error) {
+func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, *raft.Config, raft.ServerAddress, *raftboltdb.BoltStore, *logStore, error) {
 	raftBindAddr := cfg.Address
 	if cfg.BindAddress != "" {
 		raftBindAddr = cfg.BindAddress
@@ -69,29 +74,29 @@ func setupRaft(fsm raft.FSM, cfg config.RaftConfig) (*raft.Raft, *raft.Config, r
 
 	advertiseAddr, err := net.ResolveTCPAddr("tcp", raftAdvertiseAddr)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to resolve Raft advertise address %s: %w", raftAdvertiseAddr, err)
+		return nil, nil, "", nil, nil, fmt.Errorf("failed to resolve Raft advertise address %s: %w", raftAdvertiseAddr, err)
 	}
 	transport, err := raft.NewTCPTransport(raftBindAddr, advertiseAddr, 3, 10*time.Second, os.Stderr)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to make TCP transport bind %s advertise %s: %w", raftBindAddr, raftAdvertiseAddr, err)
+		return nil, nil, "", nil, nil, fmt.Errorf("failed to make TCP transport bind %s advertise %s: %w", raftBindAddr, raftAdvertiseAddr, err)
 	}
 	snapshots, err := raft.NewFileSnapshotStore(cfg.Dir, RetainSnapshotCount, os.Stderr)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to create snapshot store at %s: %w", cfg.Dir, err)
+		return nil, nil, "", nil, nil, fmt.Errorf("failed to create snapshot store at %s: %w", cfg.Dir, err)
 	}
 	boltDB, err := raftboltdb.NewBoltStore(filepath.Join(cfg.Dir, "raft.db"))
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to create bolt store: %w", err)
+		return nil, nil, "", nil, nil, fmt.Errorf("failed to create bolt store: %w", err)
 	}
 	logStore, err := NewLogStore(cfg.Dir)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to create log store: %w", err)
+		return nil, nil, "", nil, nil, fmt.Errorf("failed to create log store: %w", err)
 	}
 	ra, err := raft.NewRaft(raftConfig, fsm, logStore, boltDB, snapshots, transport)
 	if err != nil {
-		return nil, nil, "", ErrNewRaft(err)
+		return nil, nil, "", nil, nil, ErrNewRaft(err)
 	}
-	return ra, raftConfig, transport.LocalAddr(), nil
+	return ra, raftConfig, transport.LocalAddr(), boltDB, logStore, nil
 }
 
 func (c *RaftNode) Join(id, raftAddr, rpcAddr string) error {
@@ -210,10 +215,28 @@ func (c *RaftNode) Start() error {
 	return nil
 }
 
+// Shutdown stops Raft and closes the stable/log stores it opened in setupRaft —
+// raft.Shutdown() only stops the FSM/transport, it never owns or closes the
+// LogStore/StableStore passed into raft.NewRaft, so skipping this leaks the
+// underlying BoltDB file lock and mmap'd segments (surfaces as a hang re-acquiring
+// the same lock if the node is ever restarted in the same process, e.g. under test).
 func (c *RaftNode) Shutdown() error {
 	c.Logger.Info("coordinator shutting down")
-	f := c.raft.Shutdown()
-	return f.Error()
+	var errs []error
+	if err := c.raft.Shutdown().Error(); err != nil {
+		errs = append(errs, err)
+	}
+	if c.stableLog != nil {
+		if err := c.stableLog.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if c.logStore != nil {
+		if err := c.logStore.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // PeerChangeEvent describes a peer being added to or removed from this node's

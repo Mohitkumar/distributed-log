@@ -349,6 +349,154 @@ type RealTestServer struct {
 	Addr           string
 	raftAddr       string
 	cancelShutdown func()
+	startCfg       nodeStartConfig // captured for Restart after Kill
+}
+
+// nodeStartConfig captures what's needed to (re)start a node against its existing
+// on-disk state (Raft log/snapshots, segments) — used by RealTestServer.Restart after
+// Kill. Ports and basePath are fixed for the node's lifetime, so the same config works
+// for every restart.
+type nodeStartConfig struct {
+	nodeID        string
+	basePath      string
+	serfPort      int
+	raftPort      int
+	rpcPort       int
+	peerSerfPorts []int // other nodes' Serf ports, to rejoin the cluster via any of them
+}
+
+func (nc nodeStartConfig) addr(port int) string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+}
+
+func (nc nodeStartConfig) joinAddrs() []string {
+	addrs := make([]string, 0, len(nc.peerSerfPorts))
+	for _, p := range nc.peerSerfPorts {
+		addrs = append(addrs, nc.addr(p))
+	}
+	return addrs
+}
+
+// startRealNode (re)starts a node from nc's on-disk state as a rejoining member (never
+// a fresh bootstrap — the persisted Raft log already has cluster configuration). Used
+// by RealTestServer.Restart.
+func startRealNode(t testing.TB, nc nodeStartConfig) *RealTestServer {
+	t.Helper()
+
+	cfg := config.Config{
+		BindAddr:       nc.addr(nc.serfPort),
+		AdvertiseAddr:  "127.0.0.1",
+		StartJoinAddrs: nc.joinAddrs(),
+		NodeConfig: config.NodeConfig{
+			ID:      nc.nodeID,
+			RPCPort: nc.rpcPort,
+			DataDir: nc.basePath,
+		},
+		RaftConfig: config.RaftConfig{
+			ID:          nc.nodeID,
+			Address:     nc.addr(nc.raftPort),
+			BindAddress: nc.addr(nc.raftPort),
+			Dir:         nc.basePath,
+			Boostatrap:  false,
+		},
+	}
+
+	logger := testLoggerSilent(nc.nodeID)
+
+	coord, err := cluster.NewCluster(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewCluster %s: %v", nc.nodeID, err)
+	}
+	tm, err := topic.NewTopicManager(nc.basePath, coord, logger)
+	if err != nil {
+		t.Fatalf("NewTopicManager %s: %v", nc.nodeID, err)
+	}
+	tm.SetCurrentNodeID(nc.nodeID)
+	coord.SetOnNodeRemoved(tm.ReassignLeadersForDeadNode)
+
+	consumerMgr, err := consumermgr.NewConsumerManager(nc.basePath)
+	if err != nil {
+		t.Fatalf("NewConsumerManager %s: %v", nc.nodeID, err)
+	}
+
+	rpcSrv := rpc.NewRpcServer(nc.addr(nc.rpcPort), tm, consumerMgr)
+	if err := rpcSrv.Start(); err != nil {
+		t.Fatalf("RpcServer Start %s: %v", nc.nodeID, err)
+	}
+
+	membership, err := discovery.New(coord, cfg)
+	if err != nil {
+		t.Fatalf("discovery.New %s: %v", nc.nodeID, err)
+	}
+	coord.SetMemberLister(membership)
+
+	if err := coord.WaitforRaftReady(15 * time.Second); err != nil {
+		t.Fatalf("node %s: raft not ready after restart: %v", nc.nodeID, err)
+	}
+	if err := tm.RestoreFromMetadata(); err != nil {
+		t.Fatalf("RestoreFromMetadata %s: %v", nc.nodeID, err)
+	}
+	tm.StartReplicationThread()
+
+	return &RealTestServer{
+		NodeID:       nc.nodeID,
+		Coordinator:  coord,
+		TopicManager: tm,
+		ConsumerMgr:  consumerMgr,
+		RpcServer:    rpcSrv,
+		Membership:   membership,
+		BaseDir:      nc.basePath,
+		Addr:         rpcSrv.Addr,
+		raftAddr:     cfg.RaftConfig.Address,
+		startCfg:     nc,
+	}
+}
+
+// Kill hard-stops the node the way a process crash would: RPCs stop being served,
+// Raft stops, and Serf is hard-stopped (no graceful leave broadcast) so surviving
+// nodes detect the failure via Serf's own failure detector — the same path a real
+// crash takes, including the resulting leader re-election and ISR shrink. Safe to
+// follow with Restart, or leave as-is for a permanent node loss.
+func (rts *RealTestServer) Kill() error {
+	var errs []error
+	if rts.RpcServer != nil {
+		if err := rts.RpcServer.Stop(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rts.Membership != nil {
+		if err := rts.Membership.Shutdown(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rts.Coordinator != nil {
+		if err := rts.Coordinator.Shutdown(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	rts.RpcServer = nil
+	rts.Membership = nil
+	rts.Coordinator = nil
+	rts.TopicManager = nil
+	rts.ConsumerMgr = nil
+	if len(errs) > 0 {
+		return fmt.Errorf("kill errors: %v", errs)
+	}
+	return nil
+}
+
+// Restart brings a killed node back up from its existing on-disk state (Raft
+// log/snapshots, segments) as a rejoining member. Call after Kill.
+func (rts *RealTestServer) Restart(t testing.TB) {
+	t.Helper()
+	fresh := startRealNode(t, rts.startCfg)
+	rts.Coordinator = fresh.Coordinator
+	rts.TopicManager = fresh.TopicManager
+	rts.ConsumerMgr = fresh.ConsumerMgr
+	rts.RpcServer = fresh.RpcServer
+	rts.Membership = fresh.Membership
+	rts.Addr = fresh.Addr
+	rts.raftAddr = fresh.raftAddr
 }
 
 // Cleanup stops the server and cleans up resources.
@@ -401,6 +549,17 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 	serf3 := basePort + 6
 	raft3 := basePort + 7
 	rpc3 := basePort + 8
+
+	allSerfPorts := []int{serf1, serf2, serf3}
+	peerSerfPorts := func(self int) []int {
+		peers := make([]int, 0, 2)
+		for _, p := range allSerfPorts {
+			if p != self {
+				peers = append(peers, p)
+			}
+		}
+		return peers
+	}
 
 	baseDirs := [3]string{
 		path.Join(t.TempDir(), baseDirPrefix+"-node1"),
@@ -532,6 +691,14 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 			BaseDir:      nc.basePath,
 			Addr:         rpcSrv.Addr,
 			raftAddr:     cfg.RaftConfig.Address,
+			startCfg: nodeStartConfig{
+				nodeID:        nc.nodeID,
+				basePath:      nc.basePath,
+				serfPort:      nc.serfPort,
+				raftPort:      nc.raftPort,
+				rpcPort:       nc.rpcPort,
+				peerSerfPorts: peerSerfPorts(nc.serfPort),
+			},
 		}
 
 		allCleanup = append(allCleanup, func(s *RealTestServer) func() {
@@ -625,6 +792,14 @@ func StartRealThreeNodeCluster(t testing.TB, baseDirPrefix string) (*RealTestSer
 			BaseDir:      nc.basePath,
 			Addr:         rpcSrv.Addr,
 			raftAddr:     cfg.RaftConfig.Address,
+			startCfg: nodeStartConfig{
+				nodeID:        nc.nodeID,
+				basePath:      nc.basePath,
+				serfPort:      nc.serfPort,
+				raftPort:      nc.raftPort,
+				rpcPort:       nc.rpcPort,
+				peerSerfPorts: peerSerfPorts(nc.serfPort),
+			},
 		}
 
 		allCleanup = append(allCleanup, func(s *RealTestServer) func() {
