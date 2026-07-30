@@ -66,5 +66,28 @@ local-cluster-start:
 local-cluster-stop:
 	./scripts/stop-local-cluster.sh
 
+# Fast unit tests only (broker/log, broker/segment, api/transport, ...) — no cluster spin-up.
+test-unit:
+	$(GO_CMD) test -v $$($(GO_CMD) list ./... | grep -v '/tests')
+
+# Integration tests: fake-coordinator-backed single/two-node servers (tests/integration).
+test-integration:
+	$(GO_CMD) test -v ./tests/integration/...
+
+# End-to-end tests: real 3-node Raft/Serf cluster, no fault injection (tests/endtoend).
+test-endtoend:
+	$(GO_CMD) test -v ./tests/endtoend/...
+
+# Fault-injection and Porcupine linearizability tests: real cluster with nodes hard-killed
+# mid-workload (tests/chaos). Slower and noisier (real Serf failure detection), gated
+# behind the "chaos" build tag so it's excluded from `make test` / `go test ./...`.
+test-chaos:
+	$(GO_CMD) test -tags chaos -v ./tests/chaos/...
+
+# Everything `go test ./...` would run: unit + integration + endtoend (chaos excluded by
+# build tag; run `make test-chaos` separately).
 test:
 	$(GO_CMD) test -v ./...
+
+# All suites, including chaos.
+test-all: test test-chaos
