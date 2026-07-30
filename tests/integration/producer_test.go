@@ -1,4 +1,4 @@
-package tests
+package integration
 
 import (
 	"context"
@@ -9,12 +9,13 @@ import (
 	"github.com/mohitkumar/mlog/broker/topic"
 	"github.com/mohitkumar/mlog/client"
 	producerclient "github.com/mohitkumar/mlog/producer/client"
+	"github.com/mohitkumar/mlog/tests"
 )
 
 // producerTestServers holds the two-node cluster used by all producer tests (setup once).
 type producerTestServers struct {
-	server1 *TestServer
-	server2 *TestServer
+	server1 *tests.TestServer
+	server2 *tests.TestServer
 }
 
 func (s *producerTestServers) getLeaderAddr() string {
@@ -25,7 +26,7 @@ func (s *producerTestServers) getLeaderAddr() string {
 // getTopicLeaderTopicMgr returns the TopicManager of the node that is the topic leader for topicName (from metadata).
 // Use this for verification when the topic leader may be different from the Raft leader.
 func (s *producerTestServers) getTopicLeaderTopicMgr(topicName string) *topic.TopicManager {
-	for _, srv := range []*TestServer{s.server1, s.server2} {
+	for _, srv := range []*tests.TestServer{s.server1, s.server2} {
 		tm := srv.TopicManager
 		if isLeader, err := tm.IsLeader(topicName); err == nil && isLeader {
 			return tm
@@ -54,7 +55,7 @@ func (s *producerTestServers) getTopicLeaderAddr(ctx context.Context, topicName 
 
 // TestProducer runs all producer tests with a single two-node cluster setup.
 func TestProducer(t *testing.T) {
-	server1, server2 := StartTwoNodes(t, "producer-server1", "producer-server2")
+	server1, server2 := tests.StartTwoNodes(t, "producer-server1", "producer-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
@@ -264,7 +265,7 @@ func TestProducer(t *testing.T) {
 
 // TestProducerBatch runs all produce-batch tests with a single two-node cluster setup.
 func TestProducerBatch(t *testing.T) {
-	server1, server2 := StartTwoNodes(t, "producer-batch-server1", "producer-batch-server2")
+	server1, server2 := tests.StartTwoNodes(t, "producer-batch-server1", "producer-batch-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
@@ -414,7 +415,7 @@ func TestProducerBatch(t *testing.T) {
 }
 
 func BenchmarkProduce(b *testing.B) {
-	server1, server2 := StartTwoNodes(b, "bench-produce-server1", "bench-produce-server2")
+	server1, server2 := tests.StartTwoNodes(b, "bench-produce-server1", "bench-produce-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
@@ -463,7 +464,7 @@ func BenchmarkProduce(b *testing.B) {
 }
 
 func BenchmarkProduceBatch(b *testing.B) {
-	server1, server2 := StartTwoNodes(b, "bench-batch-server1", "bench-batch-server2")
+	server1, server2 := tests.StartTwoNodes(b, "bench-batch-server1", "bench-batch-server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 

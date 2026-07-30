@@ -36,6 +36,18 @@ const (
 var testPortMu sync.Mutex
 var testNextPort = testPortBase
 
+// SetPortBase overrides the starting port allocPorts hands out. Call once, before any
+// test in the calling package runs (e.g. from a package-level TestMain) — needed
+// because tests/integration, tests/endtoend, and tests/chaos are separate packages
+// (separate `go test` processes), each importing this package fresh with its own copy
+// of testNextPort; without distinct bases, `go test ./...` running them in parallel
+// would have two processes independently bind the same 127.0.0.1:<port>.
+func SetPortBase(base int) {
+	testPortMu.Lock()
+	defer testPortMu.Unlock()
+	testNextPort = base
+}
+
 func allocPorts(n int) []int {
 	testPortMu.Lock()
 	start := testNextPort
@@ -303,13 +315,13 @@ func (h *TwoNodeTestHelper) WaitReplicaCatchUp(topicName string, targetLEO uint6
 	return time.Since(start), false
 }
 
-// waitForTopicOpen polls tm.GetLog(topicName) until it returns a local log, or fails
+// WaitForTopicOpen polls tm.GetLog(topicName) until it returns a local log, or fails
 // the test after timeout. Local log-opening is now reconciled on a periodic tick (see
 // topic.TopicManager.reconcileLocalTopics) rather than synchronously with the metadata
 // event that created/assigned the topic, so tests that apply a metadata event and then
 // immediately need the local log (directly, not through a client that already retries
 // — see client.RetryTopicNotReady) must poll.
-func waitForTopicOpen(t testing.TB, tm *topic.TopicManager, topicName string, timeout time.Duration) *log.LogManager {
+func WaitForTopicOpen(t testing.TB, tm *topic.TopicManager, topicName string, timeout time.Duration) *log.LogManager {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {

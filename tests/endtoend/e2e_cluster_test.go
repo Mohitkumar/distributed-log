@@ -1,4 +1,4 @@
-package tests
+package endtoend
 
 import (
 	"context"
@@ -11,11 +11,12 @@ import (
 	"github.com/mohitkumar/mlog/client"
 	consumerclient "github.com/mohitkumar/mlog/consumer/client"
 	producerclient "github.com/mohitkumar/mlog/producer/client"
+	"github.com/mohitkumar/mlog/tests"
 )
 
 // TestE2E_RealCluster_BasicProduceConsume tests basic produce and consume on a 3-node real cluster.
 func TestE2E_RealCluster_BasicProduceConsume(t *testing.T) {
-	node1, _, _, cleanup := StartRealThreeNodeCluster(t, "e2e-basic")
+	node1, _, _, cleanup := tests.StartRealThreeNodeCluster(t, "e2e-basic")
 	defer cleanup()
 
 	ctx := context.Background()
@@ -83,7 +84,7 @@ func TestE2E_RealCluster_BasicProduceConsume(t *testing.T) {
 
 // TestE2E_RealCluster_ReplicationAcrossNodes tests data replicates to follower nodes.
 func TestE2E_RealCluster_ReplicationAcrossNodes(t *testing.T) {
-	node1, node2, node3, cleanup := StartRealThreeNodeCluster(t, "e2e-replication")
+	node1, node2, node3, cleanup := tests.StartRealThreeNodeCluster(t, "e2e-replication")
 	defer cleanup()
 
 	ctx := context.Background()
@@ -128,7 +129,7 @@ func TestE2E_RealCluster_ReplicationAcrossNodes(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Verify topic exists on all nodes
-	for idx, node := range []*RealTestServer{node1, node2, node3} {
+	for idx, node := range []*tests.RealTestServer{node1, node2, node3} {
 		l, err := node.TopicManager.GetLog(topicName)
 		if err != nil {
 			t.Logf("node %d: GetLog error: %v", idx+1, err)
@@ -146,7 +147,7 @@ func TestE2E_RealCluster_ReplicationAcrossNodes(t *testing.T) {
 
 // TestE2E_RealCluster_ConsumerOffsets tests consumer offset tracking.
 func TestE2E_RealCluster_ConsumerOffsets(t *testing.T) {
-	node1, _, _, cleanup := StartRealThreeNodeCluster(t, "e2e-offsets")
+	node1, _, _, cleanup := tests.StartRealThreeNodeCluster(t, "e2e-offsets")
 	defer cleanup()
 
 	ctx := context.Background()
@@ -223,7 +224,7 @@ func TestE2E_RealCluster_ConsumerOffsets(t *testing.T) {
 
 // TestE2E_RealCluster_ConcurrentProducers tests concurrent production.
 func TestE2E_RealCluster_ConcurrentProducers(t *testing.T) {
-	node1, _, _, cleanup := StartRealThreeNodeCluster(t, "e2e-concurrent")
+	node1, _, _, cleanup := tests.StartRealThreeNodeCluster(t, "e2e-concurrent")
 	defer cleanup()
 
 	ctx := context.Background()
@@ -299,12 +300,12 @@ func TestE2E_RealCluster_ConcurrentProducers(t *testing.T) {
 
 // TestE2E_RealCluster_ClusterMetadata tests cluster metadata consistency.
 func TestE2E_RealCluster_ClusterMetadata(t *testing.T) {
-	node1, node2, node3, cleanup := StartRealThreeNodeCluster(t, "e2e-metadata")
+	node1, node2, node3, cleanup := tests.StartRealThreeNodeCluster(t, "e2e-metadata")
 	defer cleanup()
 
 	// Verify each node has correct metadata (cluster membership is Raft's own voter
 	// configuration now, not a separately-replicated node map — see cluster.Cluster).
-	for idx, node := range []*RealTestServer{node1, node2, node3} {
+	for idx, node := range []*tests.RealTestServer{node1, node2, node3} {
 		ids, err := node.Coordinator.RaftServerIDs()
 		if err != nil {
 			t.Fatalf("node %d: RaftServerIDs: %v", idx+1, err)
@@ -327,11 +328,11 @@ func TestE2E_RealCluster_ClusterMetadata(t *testing.T) {
 
 // TestE2E_RealCluster_LeaderElection tests Raft leader election (basic verification).
 func TestE2E_RealCluster_LeaderElection(t *testing.T) {
-	node1, node2, node3, cleanup := StartRealThreeNodeCluster(t, "e2e-leader")
+	node1, node2, node3, cleanup := tests.StartRealThreeNodeCluster(t, "e2e-leader")
 	defer cleanup()
 
 	// Verify a leader was elected
-	for idx, node := range []*RealTestServer{node1, node2, node3} {
+	for idx, node := range []*tests.RealTestServer{node1, node2, node3} {
 		isLeader := node.Coordinator.IsLeader()
 		leaderID, _ := node.Coordinator.GetRaftLeaderNodeID()
 		t.Logf("node %d (%s): is_leader=%v, leader_id=%s", idx+1, node.NodeID, isLeader, leaderID)
@@ -339,7 +340,7 @@ func TestE2E_RealCluster_LeaderElection(t *testing.T) {
 
 	// At least one node should be a leader
 	isLeaderFound := false
-	for _, node := range []*RealTestServer{node1, node2, node3} {
+	for _, node := range []*tests.RealTestServer{node1, node2, node3} {
 		if node.Coordinator.IsLeader() {
 			isLeaderFound = true
 			break

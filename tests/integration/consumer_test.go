@@ -1,4 +1,4 @@
-package tests
+package integration
 
 import (
 	"context"
@@ -8,10 +8,11 @@ import (
 	"github.com/mohitkumar/mlog/api/protocol"
 	consumerclient "github.com/mohitkumar/mlog/consumer/client"
 	producerclient "github.com/mohitkumar/mlog/producer/client"
+	"github.com/mohitkumar/mlog/tests"
 )
 
 func TestFetch(t *testing.T) {
-	ts := StartTestServer(t, "leader")
+	ts := tests.StartTestServer(t, "leader")
 	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestFetch(t *testing.T) {
 }
 
 func TestFetch_TopicNotFound(t *testing.T) {
-	ts := StartTestServer(t, "leader")
+	ts := tests.StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -77,7 +78,7 @@ func TestFetch_TopicNotFound(t *testing.T) {
 }
 
 func TestFetch_InvalidArguments(t *testing.T) {
-	ts := StartTestServer(t, "leader")
+	ts := tests.StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -96,7 +97,7 @@ func TestFetch_InvalidArguments(t *testing.T) {
 }
 
 func TestCommitOffset(t *testing.T) {
-	ts := StartTestServer(t, "leader")
+	ts := tests.StartTestServer(t, "leader")
 	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestCommitOffset(t *testing.T) {
 }
 
 func TestCommitOffset_InvalidArguments(t *testing.T) {
-	ts := StartTestServer(t, "leader")
+	ts := tests.StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -141,7 +142,7 @@ func TestCommitOffset_InvalidArguments(t *testing.T) {
 }
 
 func TestFetchOffset(t *testing.T) {
-	ts := StartTestServer(t, "leader")
+	ts := tests.StartTestServer(t, "leader")
 	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestFetchOffset(t *testing.T) {
 }
 
 func TestFetchOffset_InvalidArguments(t *testing.T) {
-	ts := StartTestServer(t, "leader")
+	ts := tests.StartTestServer(t, "leader")
 	defer ts.Cleanup()
 
 	ctx := context.Background()
@@ -205,7 +206,7 @@ func TestFetchOffset_InvalidArguments(t *testing.T) {
 }
 
 func TestFetch_WithCachedOffset(t *testing.T) {
-	ts := StartTestServer(t, "leader")
+	ts := tests.StartTestServer(t, "leader")
 	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
@@ -265,7 +266,7 @@ func TestFetch_WithCachedOffset(t *testing.T) {
 }
 
 func BenchmarkFetch(b *testing.B) {
-	ts := StartTestServer(b, "leader")
+	ts := tests.StartTestServer(b, "leader")
 	if _, err := ts.TopicManager.CreateTopic(context.Background(), &protocol.CreateTopicRequest{Topic: "test-topic", ReplicaCount: 0}); err != nil {
 		b.Fatalf("CreateTopic: %v", err)
 	}

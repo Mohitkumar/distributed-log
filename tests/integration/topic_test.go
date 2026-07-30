@@ -1,4 +1,4 @@
-package tests
+package integration
 
 import (
 	"context"
@@ -11,10 +11,11 @@ import (
 	"github.com/mohitkumar/mlog/broker/topic"
 	"github.com/mohitkumar/mlog/client"
 	producerclient "github.com/mohitkumar/mlog/producer/client"
+	"github.com/mohitkumar/mlog/tests"
 )
 
 func TestCreateTopic(t *testing.T) {
-	servers := StartTwoNodesForTests(t, "topic-create-leader", "topic-create-follower")
+	servers := tests.StartTwoNodesForTests(t, "topic-create-leader", "topic-create-follower")
 	defer servers.Cleanup()
 
 	ctx := context.Background()
@@ -42,8 +43,8 @@ func TestCreateTopic(t *testing.T) {
 	// Local log opening (and thus the topic directory) is reconciled on a periodic
 	// tick now, not synchronously with CreateTopic/ApplyEvent above, so poll rather
 	// than asserting immediately.
-	waitForTopicOpen(t, servers.GetLeaderTopicMgr(), topicName, time.Second)
-	waitForTopicOpen(t, servers.GetFollowerTopicMgr(), topicName, time.Second)
+	tests.WaitForTopicOpen(t, servers.GetLeaderTopicMgr(), topicName, time.Second)
+	tests.WaitForTopicOpen(t, servers.GetFollowerTopicMgr(), topicName, time.Second)
 
 	if _, err := os.Stat(filepath.Join(servers.Server1BaseDir(), topicName)); os.IsNotExist(err) {
 		t.Fatalf("expected topic directory %s to exist on leader, got error: %v", topicName, err)
@@ -55,7 +56,7 @@ func TestCreateTopic(t *testing.T) {
 
 func TestDeleteTopic(t *testing.T) {
 	// Single node: CreateTopic and DeleteTopic both go to Raft leader; topic is created/deleted via Raft events.
-	ts := StartTestServer(t, "topic-delete-single")
+	ts := tests.StartTestServer(t, "topic-delete-single")
 	defer ts.Cleanup()
 
 	ctx := context.Background()

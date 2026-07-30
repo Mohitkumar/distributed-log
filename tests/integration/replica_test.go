@@ -1,4 +1,4 @@
-package tests
+package integration
 
 import (
 	"context"
@@ -11,10 +11,11 @@ import (
 	"github.com/mohitkumar/mlog/api/protocol"
 	"github.com/mohitkumar/mlog/broker/topic"
 	producerclient "github.com/mohitkumar/mlog/producer/client"
+	"github.com/mohitkumar/mlog/tests"
 )
 
 func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
-	server1, server2 := SetupTwoTestServers(t, "server1", "server2")
+	server1, server2 := tests.SetupTwoTestServers(t, "server1", "server2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
@@ -30,7 +31,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	// Verify topic exists on leader (leader has the topic with leader log). Local log
 	// opening is reconciled on a periodic tick now, not synchronously with ApplyEvent
 	// above, so poll rather than asserting immediately.
-	waitForTopicOpen(t, server1.TopicManager, topicName, time.Second)
+	tests.WaitForTopicOpen(t, server1.TopicManager, topicName, time.Second)
 
 	// Verify leader topic directory exists (BaseDir/topic)
 	leaderTopicDir := filepath.Join(server1.BaseDir, topicName)
@@ -41,7 +42,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 	}
 
 	// Verify topic/replica exists on follower (follower has replica for this topic)
-	waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
+	tests.WaitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Verify follower topic directory exists (BaseDir/topic)
 	followerTopicDir := filepath.Join(server2.BaseDir, topicName)
@@ -55,7 +56,7 @@ func TestCreateTopicOnLeaderCreatesTopicOnFollower(t *testing.T) {
 // TestCreateTopicOnLeaderWithTwoReplicas requires two followers; with only one follower we use replica count 1.
 // This test is a variant that explicitly checks the topic object exists on follower (GetTopic).
 func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
-	server1, server2 := SetupTwoTestServers(t, "leader2", "follower2")
+	server1, server2 := tests.SetupTwoTestServers(t, "leader2", "follower2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
@@ -69,10 +70,10 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 
 	// Leader has topic (local log opening is reconciled on a periodic tick, not
 	// synchronously with ApplyEvent above, so poll rather than asserting immediately).
-	waitForTopicOpen(t, server1.TopicManager, topicName, time.Second)
+	tests.WaitForTopicOpen(t, server1.TopicManager, topicName, time.Second)
 
 	// Follower has topic (replica created when it applies the CreateTopic Raft event)
-	waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
+	tests.WaitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Verify topic directory exists on follower (BaseDir/topic/replicaID)
 	replicaDir := filepath.Join(server2.BaseDir, topicName)
@@ -86,7 +87,7 @@ func TestCreateTopicOnLeader_FollowerHasTopic(t *testing.T) {
 // TestReplication_FollowerHasMessagesAfterReplication verifies that after producing on the leader,
 // the follower replica eventually has the same messages (replication runs in background).
 func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
-	server1, server2 := SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
+	server1, server2 := tests.SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
@@ -122,7 +123,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 	// Then verify follower's replica log has the same messages
 	// Producing to the leader (above) doesn't prove the follower's own local
 	// reconciliation has happened yet — poll for it explicitly.
-	replicaLog := waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
+	replicaLog := tests.WaitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Poll until we have at least len(messages) entries (replication may be async)
 	var lastLEO uint64
@@ -157,7 +158,7 @@ func TestReplication_FollowerHasMessagesAfterReplication(t *testing.T) {
 }
 
 func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
-	server1, server2 := SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
+	server1, server2 := tests.SetupTwoTestServers(t, "leader-repl2", "follower-repl2")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
@@ -193,7 +194,7 @@ func TestReplication_FollowerHasMessagesAfterReplication_10000(t *testing.T) {
 	// Then verify follower's replica log has the same messages
 	// Producing to the leader (above) doesn't prove the follower's own local
 	// reconciliation has happened yet — poll for it explicitly.
-	replicaLog := waitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
+	replicaLog := tests.WaitForTopicOpen(t, server2.TopicManager, topicName, time.Second)
 
 	// Poll until we have at least len(values) entries (replication may be async)
 	var lastLEO uint64

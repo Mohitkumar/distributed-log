@@ -1,4 +1,12 @@
-package tests
+//go:build chaos
+
+// Package chaos holds fault-injection and linearizability tests: real 3-node clusters
+// with nodes hard-killed/restarted mid-workload (see tests.RealTestServer.Kill/Restart)
+// and Porcupine-checked histories (porcupine_test.go). Gated behind the "chaos" build
+// tag — these are slower and noisier than the default suite (real Serf failure
+// detection takes real wall-clock time), so `go test ./...` skips them; run explicitly
+// with `go test -tags chaos ./chaos/...`.
+package chaos
 
 import (
 	"context"
@@ -10,10 +18,11 @@ import (
 	"github.com/mohitkumar/mlog/api/protocol"
 	"github.com/mohitkumar/mlog/client"
 	producerclient "github.com/mohitkumar/mlog/producer/client"
+	"github.com/mohitkumar/mlog/tests"
 )
 
 // nodeByID returns the server with the given node ID among the three real cluster nodes.
-func nodeByID(nodes []*RealTestServer, id string) *RealTestServer {
+func nodeByID(nodes []*tests.RealTestServer, id string) *tests.RealTestServer {
 	for _, n := range nodes {
 		if n.NodeID == id {
 			return n
@@ -23,7 +32,7 @@ func nodeByID(nodes []*RealTestServer, id string) *RealTestServer {
 }
 
 // bootstrapAddrs returns the RPC addresses of nodes, for producer/consumer client bootstrap.
-func bootstrapAddrs(nodes []*RealTestServer) []string {
+func bootstrapAddrs(nodes []*tests.RealTestServer) []string {
 	addrs := make([]string, len(nodes))
 	for i, n := range nodes {
 		addrs[i] = n.Addr
@@ -37,7 +46,7 @@ func bootstrapAddrs(nodes []*RealTestServer) []string {
 // CreateTopic). Used after killing the leader so the test observes the cluster having
 // actually completed Raft voter removal + leader reassignment (see
 // topic.TopicManager.ReassignLeadersForDeadNode), not just guessed at timing.
-func waitForTopicLeaderID(t testing.TB, nodes []*RealTestServer, topicName, excludeNodeID string, timeout time.Duration) string {
+func waitForTopicLeaderID(t testing.TB, nodes []*tests.RealTestServer, topicName, excludeNodeID string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -63,7 +72,7 @@ func waitForTopicLeaderID(t testing.TB, nodes []*RealTestServer, topicName, excl
 // gossip/consensus state (the rejoining Serf instance can collide with a not-yet-reaped
 // membership entry for the same name/address) — this mirrors the timing a real process
 // supervisor gets for free by virtue of needing to notice the crash before restarting.
-func waitForNodeRemoved(t testing.TB, nodes []*RealTestServer, deadNodeID string, timeout time.Duration) {
+func waitForNodeRemoved(t testing.TB, nodes []*tests.RealTestServer, deadNodeID string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -90,9 +99,9 @@ func waitForNodeRemoved(t testing.TB, nodes []*RealTestServer, deadNodeID string
 // transparently reconnects on failover) recovers, and every message it received an
 // AckAll acknowledgment for survives on the new leader — no acked write is lost.
 func TestFault_KillLeaderDuringProduce(t *testing.T) {
-	node1, node2, node3, cleanup := StartRealThreeNodeCluster(t, "fault-leader-kill")
+	node1, node2, node3, cleanup := tests.StartRealThreeNodeCluster(t, "fault-leader-kill")
 	defer cleanup()
-	nodes := []*RealTestServer{node1, node2, node3}
+	nodes := []*tests.RealTestServer{node1, node2, node3}
 
 	ctx := context.Background()
 	topicName := "fault-leader-kill-topic"
@@ -129,7 +138,7 @@ func TestFault_KillLeaderDuringProduce(t *testing.T) {
 	}
 
 	leaderID := pc.LeaderAddr()
-	var deadNode *RealTestServer
+	var deadNode *tests.RealTestServer
 	for _, n := range nodes {
 		if n.Addr == leaderID {
 			deadNode = n
@@ -193,9 +202,9 @@ func TestFault_KillLeaderDuringProduce(t *testing.T) {
 // restarted rejoins the cluster and catches back up to the leader's log end offset from
 // its own on-disk state, without needing to be re-added by hand.
 func TestFault_KillAndRestartFollower(t *testing.T) {
-	node1, node2, node3, cleanup := StartRealThreeNodeCluster(t, "fault-follower-restart")
+	node1, node2, node3, cleanup := tests.StartRealThreeNodeCluster(t, "fault-follower-restart")
 	defer cleanup()
-	nodes := []*RealTestServer{node1, node2, node3}
+	nodes := []*tests.RealTestServer{node1, node2, node3}
 
 	ctx := context.Background()
 	topicName := "fault-follower-restart-topic"
@@ -217,7 +226,7 @@ func TestFault_KillAndRestartFollower(t *testing.T) {
 	if leaderNode == nil {
 		t.Fatalf("could not find leader node %q", leaderID)
 	}
-	var followerNode *RealTestServer
+	var followerNode *tests.RealTestServer
 	for _, n := range nodes {
 		if n.NodeID != leaderID {
 			followerNode = n
@@ -290,9 +299,9 @@ func TestFault_KillAndRestartFollower(t *testing.T) {
 // same node, which is where lifecycle bugs (stuck goroutines, stale registrations) tend
 // to surface that a single kill/restart wouldn't catch.
 func TestFault_KillFollowerLoop(t *testing.T) {
-	node1, node2, node3, cleanup := StartRealThreeNodeCluster(t, "fault-follower-loop")
+	node1, node2, node3, cleanup := tests.StartRealThreeNodeCluster(t, "fault-follower-loop")
 	defer cleanup()
-	nodes := []*RealTestServer{node1, node2, node3}
+	nodes := []*tests.RealTestServer{node1, node2, node3}
 
 	ctx := context.Background()
 	topicName := "fault-follower-loop-topic"
@@ -311,7 +320,7 @@ func TestFault_KillFollowerLoop(t *testing.T) {
 
 	leaderID := waitForTopicLeaderID(t, nodes, topicName, "", 15*time.Second)
 	leaderNode := nodeByID(nodes, leaderID)
-	var followerNode *RealTestServer
+	var followerNode *tests.RealTestServer
 	for _, n := range nodes {
 		if n.NodeID != leaderID {
 			followerNode = n

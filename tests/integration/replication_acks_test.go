@@ -1,4 +1,4 @@
-package tests
+package integration
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"github.com/mohitkumar/mlog/broker/topic"
 	"github.com/mohitkumar/mlog/client"
 	producerclient "github.com/mohitkumar/mlog/producer/client"
+	"github.com/mohitkumar/mlog/tests"
 )
 
 func TestProduceWithAckLeader_10000Messages(t *testing.T) {
@@ -17,7 +18,7 @@ func TestProduceWithAckLeader_10000Messages(t *testing.T) {
 		t.Skip("skipping 10k message test in -short mode")
 	}
 
-	server1, server2 := SetupTwoTestServers(t, "ack-leader-10k-leader", "ack-leader-10k-follower")
+	server1, server2 := tests.SetupTwoTestServers(t, "ack-leader-10k-leader", "ack-leader-10k-follower")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
@@ -141,7 +142,7 @@ func TestProduceWithAckAll_10000Messages(t *testing.T) {
 		t.Skip("skipping 10k message test in -short mode")
 	}
 
-	server1, server2 := SetupTwoTestServers(t, "ack-all-10k-leader", "ack-all-10k-follower")
+	server1, server2 := tests.SetupTwoTestServers(t, "ack-all-10k-leader", "ack-all-10k-follower")
 	defer server1.Cleanup()
 	defer server2.Cleanup()
 
