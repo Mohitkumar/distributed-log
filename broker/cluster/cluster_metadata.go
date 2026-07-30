@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/mohitkumar/mlog/api/protocol/pb"
 	raft "github.com/mohitkumar/mlog/broker/cluster/raft"
@@ -18,6 +19,10 @@ type ReplicaState struct {
 	ReplicaNodeID string `json:"replica_id"`
 	LEO           int64  `json:"leo"`
 	IsISR         bool   `json:"is_isr"`
+	// LastFetchAt is when this replica last called Fetch (ReplicaNodeID set) — local,
+	// in-process liveness signal for ExpireStaleISR; not Raft-replicated or persisted
+	// across snapshot restore (not meaningful outside the process that observed it).
+	LastFetchAt time.Time `json:"-"`
 }
 
 // ReplicaSnapshot is a point-in-time copy of one replica's state.
@@ -46,8 +51,9 @@ func newTopicMetadata(name, leaderNodeID string, leaderEpoch int64, replicaNodeI
 		DesiredReplicaCount: len(replicaNodeIds),
 		Replicas:            make(map[string]*ReplicaState),
 	}
+	now := time.Now()
 	for _, id := range replicaNodeIds {
-		t.Replicas[id] = &ReplicaState{ReplicaNodeID: id, LEO: 0, IsISR: true}
+		t.Replicas[id] = &ReplicaState{ReplicaNodeID: id, LEO: 0, IsISR: true, LastFetchAt: now}
 	}
 	return t
 }
@@ -109,7 +115,7 @@ func (t *TopicMetadata) AddReplicaIfAbsent(nodeID string, isr bool) {
 	if _, ok := t.Replicas[nodeID]; ok {
 		return
 	}
-	t.Replicas[nodeID] = &ReplicaState{ReplicaNodeID: nodeID, LEO: 0, IsISR: isr}
+	t.Replicas[nodeID] = &ReplicaState{ReplicaNodeID: nodeID, LEO: 0, IsISR: isr, LastFetchAt: time.Now()}
 }
 
 func (t *TopicMetadata) SetReplicaISR(nodeID string, isr bool) {
@@ -145,6 +151,7 @@ func (t *TopicMetadata) RecordReplicaFetch(nodeID string, leo int64, lagThreshol
 	} else {
 		rs.LEO = leo
 	}
+	rs.LastFetchAt = time.Now()
 	if leaderLEO > lagThreshold {
 		isr = uint64(leo) >= leaderLEO-lagThreshold
 	} else {
@@ -167,6 +174,28 @@ func (t *TopicMetadata) MinISRLeo(localLEO uint64) uint64 {
 		}
 	}
 	return minOffset
+}
+
+// ExpireStaleISR demotes any ISR replica that hasn't fetched within maxLag — matching
+// Kafka's replica.lag.time.max.ms. RecordReplicaFetch only ever recomputes IsISR
+// reactively, when that replica calls Fetch; a replica that's gone silent (dead,
+// partitioned, wedged) rather than merely behind on offset never triggers that path, so
+// without this its last-known IsISR=true/LEO stay frozen forever and pin MinISRLeo (the
+// high watermark) at that stale value, making the topic unreadable for every consumer
+// past that point. Returns the node IDs demoted, for the caller to Raft-propagate via
+// ApplyIsrUpdateEventInternal.
+func (t *TopicMetadata) ExpireStaleISR(maxLag time.Duration) []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var expired []string
+	now := time.Now()
+	for id, r := range t.Replicas {
+		if r != nil && r.IsISR && now.Sub(r.LastFetchAt) > maxLag {
+			r.IsISR = false
+			expired = append(expired, id)
+		}
+	}
+	return expired
 }
 
 // MarshalJSON locks t.mu so debug logging can't race with concurrent field mutation.

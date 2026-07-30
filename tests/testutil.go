@@ -471,6 +471,16 @@ func startRealNode(t testing.TB, nc nodeStartConfig) *RealTestServer {
 // follow with Restart, or leave as-is for a permanent node loss.
 func (rts *RealTestServer) Kill() error {
 	var errs []error
+	// Must stop first, before anything else: TopicManager's replication goroutines
+	// (StartReplicationThread) make outbound Fetch calls to whichever node currently
+	// leads each topic, entirely independent of this node's own RpcServer/Raft/Serf.
+	// A real process death takes those goroutines down for free; here they're just
+	// goroutines in the same test binary, so leaving them running after "killing" a
+	// node lets it keep zombie-replicating from the leader in the background —
+	// silently healing its own LEO/ISR and masking the exact fault this simulates.
+	if rts.TopicManager != nil {
+		rts.TopicManager.StopReplicationThread()
+	}
 	if rts.RpcServer != nil {
 		if err := rts.RpcServer.Stop(); err != nil {
 			errs = append(errs, err)
@@ -516,6 +526,9 @@ func (rts *RealTestServer) Cleanup() error {
 	var errs []error
 	if rts.cancelShutdown != nil {
 		rts.cancelShutdown()
+	}
+	if rts.TopicManager != nil {
+		rts.TopicManager.StopReplicationThread()
 	}
 	if rts.Membership != nil {
 		if err := rts.Membership.Leave(); err != nil {

@@ -33,7 +33,8 @@ type TopicManager struct {
 	replicationCancel    context.CancelFunc // non-nil while the replication/reconcile loops are running
 	replConns            *replicationConnCache
 	replicationBatchSize uint32
-	ISRLagThreshold      uint64 // max record lag for ISR membership
+	ISRLagThreshold      uint64        // max record lag for ISR membership
+	ISRLagTime           time.Duration // max time since last fetch for ISR membership (Kafka's replica.lag.time.max.ms)
 }
 
 // NewTopicManager creates a TopicManager. coord is the cluster coordinator (real
@@ -51,6 +52,7 @@ func NewTopicManager(baseDir string, coord TopicCoordinator, logger *zap.Logger)
 		stopPeriodic:    make(chan struct{}),
 		replConns:       newReplicationConnCache(),
 		ISRLagThreshold: DefaultISRLagThreshold,
+		ISRLagTime:      DefaultISRLagTime,
 	}
 	go tm.periodicLog(defaultMetadataLogInterval)
 	tm.replicationBatchSize = DefaultReplicationBatchSize
@@ -370,6 +372,43 @@ func (tm *TopicManager) RecordReplicaLEOFromFetch(ctx context.Context, topicName
 		l.SetHighWatermark(tm.coordinator.TopicMinISRLeo(topicName, localLEO))
 	}
 	return tm.coordinator.ApplyIsrUpdateEventInternal(topicName, replicaNodeID, isr)
+}
+
+// expireStaleISR demotes ISR replicas that have gone silent — not just lagging on
+// offset, which RecordReplicaLEOFromFetch already handles reactively, but stopped
+// fetching entirely (dead, partitioned, wedged) — for every topic this node currently
+// leads. Without this, a replica's last-known IsISR=true/LEO never gets re-evaluated
+// once it stops calling Fetch, permanently pinning the high watermark at its stale LEO
+// (see cluster.TopicMetadata.ExpireStaleISR). Mirrors Kafka's periodic
+// isr-expiration task (replica.lag.time.max.ms) — called each replication tick, see
+// runReplicateLoop.
+func (tm *TopicManager) expireStaleISR() {
+	lagTime := tm.ISRLagTime
+	if lagTime <= 0 {
+		lagTime = DefaultISRLagTime
+	}
+	for _, topicName := range tm.coordinator.TopicNames() {
+		isLeader, err := tm.IsLeader(topicName)
+		if err != nil || !isLeader {
+			continue
+		}
+		expired := tm.coordinator.ExpireStaleISR(topicName, lagTime)
+		if len(expired) == 0 {
+			continue
+		}
+		if l := tm.lookupTopic(topicName); l != nil {
+			l.SetHighWatermark(tm.coordinator.TopicMinISRLeo(topicName, l.LEO()))
+		}
+		for _, nodeID := range expired {
+			tm.Logger.Warn("ISR expired: replica stopped fetching",
+				zap.String("topic", topicName), zap.String("node_id", nodeID), zap.Duration("max_lag", lagTime))
+			// Best-effort, like RecordReplicaLEOFromFetch's own Apply call: this
+			// node's local view (what HandleProduce/HW computation actually reads) is
+			// already correct regardless of whether Raft-propagating it to other
+			// nodes succeeds here.
+			_ = tm.coordinator.ApplyIsrUpdateEventInternal(topicName, nodeID, false)
+		}
+	}
 }
 
 // reconcileLocalTopics is TopicManager's periodic reaction to cluster metadata changes

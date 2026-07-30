@@ -1,6 +1,8 @@
 package topic
 
 import (
+	"time"
+
 	"github.com/mohitkumar/mlog/api/protocol"
 )
 
@@ -40,6 +42,12 @@ type TopicCoordinator interface {
 	// exist. Local only (not Raft-replicated) — the caller applies the returned isr
 	// status via ApplyIsrUpdateEventInternal if it changed.
 	RecordReplicaFetch(topic, replicaNodeID string, leo int64, lagThreshold uint64, localLEO uint64) (isr bool, ok bool)
+	// ExpireStaleISR demotes any of topic's ISR replicas that haven't fetched within
+	// maxLag (Kafka's replica.lag.time.max.ms), returning the node IDs demoted — the
+	// liveness-independent half of ISR membership; RecordReplicaFetch/lagThreshold
+	// above is the reactive, offset-lag half and never fires for a replica that's gone
+	// silent rather than merely behind.
+	ExpireStaleISR(topic string, maxLag time.Duration) []string
 
 	// — cluster/raft state —
 

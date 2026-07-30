@@ -3,6 +3,7 @@ package tests
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mohitkumar/mlog/api/protocol"
 	"github.com/mohitkumar/mlog/broker/cluster"
@@ -107,6 +108,16 @@ func (f *FakeTopicCoordinator) RecordReplicaFetch(topicName, replicaNodeID strin
 		return false, false
 	}
 	return t.RecordReplicaFetch(replicaNodeID, leo, lagThreshold, localLEO), true
+}
+
+// ExpireStaleISR delegates to the same cluster.TopicMetadata logic production uses —
+// see cluster.Cluster.ExpireStaleISR.
+func (f *FakeTopicCoordinator) ExpireStaleISR(topicName string, maxLag time.Duration) []string {
+	t := f.metadataStore.GetTopic(topicName)
+	if t == nil {
+		return nil
+	}
+	return t.ExpireStaleISR(maxLag)
 }
 
 func (f *FakeTopicCoordinator) ApplyCreateTopicEvent(topicName string, replicaCount uint32, leaderNodeID string, replicaNodeIds []string) error {

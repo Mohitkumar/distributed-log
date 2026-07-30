@@ -101,6 +101,7 @@ func (tm *TopicManager) runReplicateLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			tm.replicateAllTopics(ctx)
+			tm.expireStaleISR()
 		}
 	}
 }

@@ -123,6 +123,19 @@ func (c *Cluster) NodeIDWithLeastTopics(candidateNodeIDs []string) (string, erro
 	return c.metadataStore.NodeIDWithLeastTopics(candidateNodeIDs)
 }
 
+// ExpireStaleISR demotes any of topic's ISR replicas that haven't fetched within
+// maxLag (Kafka's replica.lag.time.max.ms), returning the node IDs demoted. Local
+// only, like RecordReplicaFetch — meaningful only when called on the node currently
+// leading topic (see topic.TopicManager.expireStaleISR), which is the only node with
+// fresh per-replica fetch timestamps to judge staleness from.
+func (c *Cluster) ExpireStaleISR(topic string, maxLag time.Duration) []string {
+	t := c.metadataStore.GetTopic(topic)
+	if t == nil {
+		return nil
+	}
+	return t.ExpireStaleISR(maxLag)
+}
+
 // RecordReplicaFetch updates replicaNodeID's LEO for topic from a Fetch call and
 // recomputes its ISR status against lagThreshold; ok is false if topic doesn't exist.
 // Local only (not Raft-replicated) — the caller applies the returned isr status via
