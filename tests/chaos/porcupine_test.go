@@ -217,3 +217,136 @@ func TestChaos_LinearizableProduceUnderLeaderKill(t *testing.T) {
 	}
 	t.Logf("✓ %d operations (%d appends, %d reads) linearizable under leader kill", len(rec.history), total, total)
 }
+
+// TestChaos_LinearizableProduceUnderFollowerKill runs several producers concurrently
+// against a 3-node cluster while a FOLLOWER (not the leader) is hard-killed mid-stream,
+// and checks the resulting produce/read history for linearizability — the Porcupine
+// counterpart to TestChaos_FollowerFaultIntegrity's direct LEO/ISR/HW assertions, and
+// specifically exercises the ISR-expiry fix (TopicManager.expireStaleISR, matching
+// Kafka's replica.lag.time.max.ms): without it, the dead follower's stale ISR entry
+// pins HW forever, so every AckAll Send after the kill would hang until it timed out
+// instead of completing. Here that's checked the Porcupine way: is there a valid
+// linearization of every concurrent append/read once the dead follower is fully
+// expired out of the picture, not just "did the calls eventually return".
+func TestChaos_LinearizableProduceUnderFollowerKill(t *testing.T) {
+	node1, node2, node3, cleanup := tests.StartRealThreeNodeCluster(t, "chaos-porcupine-follower")
+	defer cleanup()
+	nodes := []*tests.RealTestServer{node1, node2, node3}
+
+	ctx := context.Background()
+	topicName := "chaos-porcupine-follower-topic"
+
+	remoteClient, err := client.NewRemoteClient(node1.Addr)
+	if err != nil {
+		t.Fatalf("NewRemoteClient: %v", err)
+	}
+	if _, err := remoteClient.CreateTopic(ctx, &protocol.CreateTopicRequest{
+		Topic:        topicName,
+		ReplicaCount: 2,
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	remoteClient.Close()
+
+	leaderID := waitForTopicLeaderID(t, nodes, topicName, "", 15*time.Second)
+	leader := nodeByID(nodes, leaderID)
+	var follower *tests.RealTestServer
+	for _, n := range nodes {
+		if n.NodeID != leaderID {
+			follower = n
+			break
+		}
+	}
+	if leader == nil || follower == nil {
+		t.Fatalf("could not resolve leader/follower for topic %q", topicName)
+	}
+
+	// Shorten ISRLagTime so AckAll's 5s waitForAllFollowersToCatchUp timeout has
+	// comfortable margin over how long the dead follower stays wrongly counted as ISR
+	// — see TestChaos_FollowerFaultIntegrity for the same tuning, applied there via
+	// direct assertions instead of a linearizability check.
+	leader.TopicManager.ISRLagTime = 2 * time.Second
+
+	const numProducers = 4
+	const messagesPerProducer = 25
+	total := numProducers * messagesPerProducer
+
+	rec := &opRecorder{}
+	var wg sync.WaitGroup
+	for p := 0; p < numProducers; p++ {
+		wg.Add(1)
+		go func(clientID int) {
+			defer wg.Done()
+			pc, err := producerclient.NewClient(ctx, bootstrapAddrs(nodes), topicName)
+			if err != nil {
+				t.Errorf("client %d: NewClient: %v", clientID, err)
+				return
+			}
+			defer pc.Close()
+			for i := 0; i < messagesPerProducer; i++ {
+				val := fmt.Sprintf("f%d-m%d", clientID, i)
+				sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				call := time.Now()
+				offset, err := pc.Send(sendCtx, []byte(val), protocol.AckAll)
+				ret := time.Now()
+				cancel()
+				if err != nil {
+					t.Errorf("client %d msg %d: Send: %v", clientID, i, err)
+					return
+				}
+				rec.record(clientID, logOp{isAppend: true, value: val}, call, logOutput{offset: int(offset)}, ret)
+			}
+		}(p)
+	}
+
+	// Kill the follower partway through the concurrent produce load. The leader never
+	// changes here — only ISR shrinks — so unlike the leader-kill test above, producers
+	// never need to reconnect; the only thing keeping AckAll alive is ExpireStaleISR.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		t.Logf("chaos: killing follower %s mid-produce", follower.NodeID)
+		_ = follower.Kill()
+	}()
+
+	wg.Wait()
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	// Fold a read of every offset back from the (unchanged) leader into the same
+	// history, so Porcupine checks produce and fetch against one consistent model.
+	l, err := leader.TopicManager.GetLog(topicName)
+	if err != nil {
+		t.Fatalf("GetLog on leader: %v", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for uint64(total) > l.LEO() {
+		if !time.Now().Before(deadline) {
+			t.Fatalf("leader LEO=%d, want %d within timeout", l.LEO(), total)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	const offWidth = 8
+	for i := 0; i < total; i++ {
+		call := time.Now()
+		entry, err := l.ReadUncommitted(uint64(i))
+		ret := time.Now()
+		if err != nil {
+			t.Fatalf("ReadUncommitted offset %d: %v", i, err)
+		}
+		rec.record(numProducers, logOp{isAppend: false, offset: i}, call, logOutput{value: string(entry[offWidth:]), found: true}, ret)
+	}
+
+	result, info := porcupine.CheckOperationsVerbose(logModel, rec.history, 0)
+	if result != porcupine.Ok {
+		const visPath = "/tmp/mlog-chaos-porcupine-follower.html"
+		if f, ferr := os.Create(visPath); ferr == nil {
+			defer f.Close()
+			if verr := porcupine.Visualize(logModel, info, f); verr == nil {
+				t.Logf("visualization written to %s", visPath)
+			}
+		}
+		t.Fatalf("produce/read history under follower kill is not linearizable (result=%v)", result)
+	}
+	t.Logf("✓ %d operations (%d appends, %d reads) linearizable under follower kill (AckAll stayed alive via ISR expiry)", len(rec.history), total, total)
+}
