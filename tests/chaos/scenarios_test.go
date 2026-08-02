@@ -17,8 +17,6 @@ import (
 
 const offsetPrefixWidth = 8
 
-// createTopic creates topicName with the given replica count via node's RPC address and
-// returns the assigned replica set (leader + replicas, per CreateTopicResponse).
 func createTopic(t testing.TB, node *tests.RealTestServer, topicName string, replicaCount uint32) protocol.CreateTopicResponse {
 	t.Helper()
 	rc, err := client.NewRemoteClient(node.Addr)
@@ -36,10 +34,6 @@ func createTopic(t testing.TB, node *tests.RealTestServer, topicName string, rep
 	return *resp
 }
 
-// produceOrdered produces n values ("<prefix>-0".."<prefix>-(n-1)") to topicName against
-// leaderAddr with the given ack mode, in order, and returns the values in the order
-// produced (index i was assigned offset baseOffset+i, since a single producer connection
-// issuing synchronous sequential Produce calls never races itself).
 func produceOrdered(t testing.TB, leaderAddr, topicName, prefix string, n int, acks protocol.AckMode) []string {
 	t.Helper()
 	pc, err := producerclient.NewProducerClient(leaderAddr)

@@ -65,9 +65,10 @@ func (t *TopicMetadata) LeaderID() string {
 	return t.LeaderNodeID
 }
 
-// SetLeader updates the leader and epoch, removes nodeID from Replicas (a
+// setLeader updates the leader and epoch, removes nodeID from Replicas (a
 // leader isn't also tracked as a replica), and returns the previous leader.
-func (t *TopicMetadata) SetLeader(nodeID string, epoch int64) (oldLeaderID string) {
+// Only called from ClusterMetadataStore.Apply — leader changes must go through Raft.
+func (t *TopicMetadata) setLeader(nodeID string, epoch int64) (oldLeaderID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	oldLeaderID = t.LeaderNodeID
@@ -105,8 +106,9 @@ func (t *TopicMetadata) HasReplica(nodeID string) bool {
 	return ok
 }
 
-// AddReplicaIfAbsent adds nodeID as a replica with the given ISR status if not already tracked.
-func (t *TopicMetadata) AddReplicaIfAbsent(nodeID string, isr bool) {
+// addReplicaIfAbsent adds nodeID as a replica with the given ISR status if not already tracked.
+// Only called from ClusterMetadataStore.Apply — replica membership must go through Raft.
+func (t *TopicMetadata) addReplicaIfAbsent(nodeID string, isr bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.Replicas == nil {
@@ -118,7 +120,8 @@ func (t *TopicMetadata) AddReplicaIfAbsent(nodeID string, isr bool) {
 	t.Replicas[nodeID] = &ReplicaState{ReplicaNodeID: nodeID, LEO: 0, IsISR: isr, LastFetchAt: time.Now()}
 }
 
-func (t *TopicMetadata) SetReplicaISR(nodeID string, isr bool) {
+// setReplicaISR is only called from ClusterMetadataStore.Apply — ISR membership must go through Raft.
+func (t *TopicMetadata) setReplicaISR(nodeID string, isr bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.Replicas == nil {
@@ -322,9 +325,9 @@ func (s *ClusterMetadataStore) Apply(ev *raft.MetadataEvent) error {
 			return err
 		}
 		if t := s.Topics[e.Topic]; t != nil {
-			oldLeaderID := t.SetLeader(e.LeaderNodeID, e.LeaderEpoch)
+			oldLeaderID := t.setLeader(e.LeaderNodeID, e.LeaderEpoch)
 			if oldLeaderID != e.LeaderNodeID && oldLeaderID != "" {
-				t.AddReplicaIfAbsent(oldLeaderID, false)
+				t.addReplicaIfAbsent(oldLeaderID, false)
 			}
 		}
 	case raft.MetadataEventTypeIsrUpdate:
@@ -333,7 +336,7 @@ func (s *ClusterMetadataStore) Apply(ev *raft.MetadataEvent) error {
 			return err
 		}
 		if t := s.Topics[e.Topic]; t != nil {
-			t.SetReplicaISR(e.ReplicaNodeID, e.Isr)
+			t.setReplicaISR(e.ReplicaNodeID, e.Isr)
 		}
 	default:
 		return fmt.Errorf("unknown or unsupported event type for cluster metadata: %d", ev.EventType)

@@ -10,13 +10,7 @@ import (
 )
 
 // Client is a topic-aware producer: it discovers the current topic leader and
-// reconnects automatically on failover or leader change, so callers never see address
-// resolution or reconnect logic — mirrors how KafkaProducer.send() hides
-// NetworkClient's connection/leader-tracking from the caller. ProducerClient (which
-// this wraps) already retries same-connection for the brief post-create/leader-change
-// window (see ProducerClient.Produce); Client adds the second tier Kafka's client also
-// has: reconnecting to a different broker when the leader actually moved or the
-// connection died.
+// reconnects automatically on failover or leader change.
 type Client struct {
 	mu             sync.Mutex
 	bootstrapAddrs []string

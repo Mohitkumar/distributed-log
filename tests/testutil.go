@@ -36,12 +36,6 @@ const (
 var testPortMu sync.Mutex
 var testNextPort = testPortBase
 
-// SetPortBase overrides the starting port allocPorts hands out. Call once, before any
-// test in the calling package runs (e.g. from a package-level TestMain) — needed
-// because tests/integration, tests/endtoend, and tests/chaos are separate packages
-// (separate `go test` processes), each importing this package fresh with its own copy
-// of testNextPort; without distinct bases, `go test ./...` running them in parallel
-// would have two processes independently bind the same 127.0.0.1:<port>.
 func SetPortBase(base int) {
 	testPortMu.Lock()
 	defer testPortMu.Unlock()
@@ -365,9 +359,7 @@ type RealTestServer struct {
 }
 
 // nodeStartConfig captures what's needed to (re)start a node against its existing
-// on-disk state (Raft log/snapshots, segments) — used by RealTestServer.Restart after
-// Kill. Ports and basePath are fixed for the node's lifetime, so the same config works
-// for every restart.
+// on-disk state (Raft log/snapshots, segments) — used by RealTestServer.Restart after Kill.
 type nodeStartConfig struct {
 	nodeID        string
 	basePath      string
@@ -471,13 +463,7 @@ func startRealNode(t testing.TB, nc nodeStartConfig) *RealTestServer {
 // follow with Restart, or leave as-is for a permanent node loss.
 func (rts *RealTestServer) Kill() error {
 	var errs []error
-	// Must stop first, before anything else: TopicManager's replication goroutines
-	// (StartReplicationThread) make outbound Fetch calls to whichever node currently
-	// leads each topic, entirely independent of this node's own RpcServer/Raft/Serf.
-	// A real process death takes those goroutines down for free; here they're just
-	// goroutines in the same test binary, so leaving them running after "killing" a
-	// node lets it keep zombie-replicating from the leader in the background —
-	// silently healing its own LEO/ISR and masking the exact fault this simulates.
+
 	if rts.TopicManager != nil {
 		rts.TopicManager.StopReplicationThread()
 	}
